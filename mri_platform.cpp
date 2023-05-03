@@ -163,6 +163,7 @@ int Platform_CommReceiveChar(void)
 
     uint8_t byte = 0;
     uint32_t bytesRead = g_gdbSocket.m_tcpToMriQueue.read(&byte, sizeof(byte));
+    (void)bytesRead;
     assert ( bytesRead == sizeof(byte) );
 
     return (int)byte;
