@@ -1,0 +1,7 @@
+.idea
+.vscode
+_deps
+cmake-*
+build/
+wifi_config.cmake
+.DS_Store

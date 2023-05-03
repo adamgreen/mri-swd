@@ -1,0 +1,94 @@
+/* Copyright 2023 Adam Green (https://github.com/adamgreen/)
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+; Use the RP2040's PIO state machines to implement the ARM Serial Wire Debug (SWD) low level signalling.
+
+; Configure both SWDIO and SWCLK pins to be output pin controlled by PIO and default them both to be output enabled.
+; Side Set will need to be configured for the SWCLK pin.
+; OUT pins should be configured for the SWDIO pin.
+; SET pins should be configured for the SWDIO pin.
+; OSR should be configured for auto pull with a threshold of 32. Right shift through OSR as lsb is to be sent first.
+; INPUT pin to SWDIO as well.
+; ISR should be configured for auto push with a threshold of 32. Right shift through ISR as lsb are read in first.
+.program swd
+
+; Will use side set for the SWCLK pin from some instructions.
+.side_set 1 opt
+
+    ; Start out by sending CPU specified init sequency such as line resets, JTAG to SWD switch sequence, etc.
+    ; Pull 2+ words from TX FIFO.
+    ;   First word is the number of bits from next word(s) to send.
+    ;   Subsequent words contain the bits (right justified) to send.
+word_loop:
+    pull                        ; Manually pull the (bit count - 1) off of the TX FIFO since OSR might have unused bits
+    out x, 32                   ; Place this bit count in X.
+    jmp !x packet_start         ; Start sending packets if count was 0.
+bit_loop:
+    out pins, 1 side 0          ; Falling edge of SWCLK: At the same time shift next data pin out to SWDIO pin. Auto pull as required.
+    jmp x-- bit_loop side 1     ; Rising edge of SWCLK: Loop over number of bits indicated by X register.
+    jmp word_loop               ; Loop around for next group of bits to send.
+
+    ; Process AP/DP read/write packets.
+    ; The request is only 8-bits long but I have the CPU send 9 bits. The last bit is the R/W bit repeated so that the
+    ; PIO code has it around after reading in the ACK to know if it should run the read or write code path next.
+.wrap_target
+public packet_start:
+    ; Send 8-bit Packet Request to Target.
+    pull                        ; Hang here waiting for packet request from CPU.
+    set x, 7                    ; Send 8-bit packet request
+header_loop:
+    out pins, 1 side 0          ; Falling edge of SWCLK: At the same time shift next data pin out to SWDIO pin. Auto pull as required.
+    jmp x-- header_loop side 1  ; Rising edge of SWCLK: Loop over number of bits indicated by X register.
+    ; Turn around bit time switched into input mode.
+    set pindirs, 0 side 0
+    set x, 2 side 1             ; Preparing for next Acknowledge Response read.
+    set pins, 0 side 0          ; Make sure SWDIO will be in idle state at end of packet and then
+                                ;   enter upcoming read with first falling edge already sent.
+    ; Read Acknowledge Response (3 bits long) from Target.
+ack_loop:
+    in pins, 1 side 1           ; Read bit from target on rising edge.
+    jmp x-- ack_loop side 0
+    ; Send Acknowledge Response back to CPU.
+    in null, 29                 ; Right align the bits and trigger auto push.
+    ; 9th bit sent from CPU will let us know if we are reading or writing.
+    out x, 1                    ; Fetch RnW bit to see if we are handling read or write request.
+    out null, 23                ; Discard the rest of the unused Packet Request bits (32-9=23).
+    jmp !x write
+
+    ; Handle Read Transfer from Target if 9th bit was 1.
+read:
+    set x, 31
+read_loop:
+    in pins, 1 side 1
+    jmp x-- read_loop side 0
+    ; Send the parity bit in its own word as well.
+    in pins, 1 side 1           ; Read the parity sent by target.
+    in null, 31 side 0          ; Right justify this parity bit and trigger auto push.
+    ; Turn around before starting write of next Packet Request.
+    set pindirs, 1 side 1       ; Switch SWDIO back to being an output and
+    jmp packet_start            ;   set SWCLK high before start of next Packet Request.
+
+    ; Handle Write Transfer to Target if 9th bit was 0.
+write:
+    ; Turn around bit time to switch back into output mode.
+    set x, 31 side 1            ; Set bit count to 32 and use turn around for rising SWCLK edge.
+    set pindirs, 1              ; Switch back into output mode just before next falling SWCLK edge.
+    ; Send next 32-bit word.
+write_loop:
+    out pins, 1 side 0          ; Falling edge of SWCLK: At the same time shift next data pin out to SWDIO pin.
+    jmp x-- write_loop side 1   ; Rising edge of SWCLK: Loop over number of bits indicated by X register.
+    ; Write 33rd bit as well, the parity bit.
+    out pins, 1 side 0          ; Auto pull the parity bit from next word.
+    out null, 31 side 1         ; Consume rest of the bits in the word to trigger auto pull before
+.wrap                           ;   jumping back to start processing start of next Packet Request.
