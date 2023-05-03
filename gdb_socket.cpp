@@ -163,10 +163,18 @@ err_t GDBSocket::onRecv(tcp_pcb* pPCB, pbuf* pBuf, err_t error)
 
 err_t GDBSocket::send(const void* pBuffer, uint16_t bufferLength)
 {
+    // Minimum packet is $#00
+    const uint16_t minPacketLength = 4;
     // UNDONE: Should call tcp_sndbuf() to figure out maximum data to send.
     logf("Writing %d bytes to client\n", bufferLength);
     cyw43_arch_lwip_begin();
         err_t error = tcp_write(m_pClientPCB, pBuffer, bufferLength, TCP_WRITE_FLAG_COPY);
+        if (bufferLength >= minPacketLength)
+        {
+            // Send data now if it is long enough to be a packet for which GDB is waiting.
+            // UNDONE: Just ignoring errors for now.
+            tcp_output(m_pClientPCB);
+        }
     cyw43_arch_lwip_end();
     if (error != ERR_OK)
     {
