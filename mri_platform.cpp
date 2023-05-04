@@ -35,14 +35,33 @@ extern "C"
 #define SWDIO_PIN 1
 
 
+// Macros used to enable/disable logging of SWD error conditions.
+#define logFailure(X) errorf("%s:%u %s() - " X "\n", __FILE__, __LINE__, __FUNCTION__)
+
+static int (*errorf)(const char* format, ...) = printf;
+
+
 static SWD       g_swd;
 static GDBSocket g_gdbSocket;
+static bool      g_wasStopFromGDB = false;
+static bool      g_wasMemoryExceptionEncountered = false;
 
+
+// The number of special registers (msp, psp, primask, basepri, faultmask, and control) is 6.
+static const uint32_t specialRegisterCount = 6;
+// The number of integer registers (R0-R12,SP,LR,PC,XPSR) is 17.
+static const uint32_t integerRegisterCount = 17;
+// The number of float registers (S0-S32, FPSCR) is 33.
+static const uint32_t floatRegisterCount = 33;
+// The number of registers in the CPU content depends on whether device has a FPU or not.
+static const uint32_t registerCountNoFPU = integerRegisterCount + specialRegisterCount;
+static const uint32_t registerCountFPU = registerCountNoFPU + floatRegisterCount;
 
 // CPU register context information is stored here.
-static uint32_t       g_contextRegisters[23];
-static ContextSection g_contextEntries = { .pValues = &g_contextRegisters[0], .count = count_of(g_contextRegisters) };
-static MriContext     g_context = { .pSections = &g_contextEntries, .sectionCount = 1 };
+static uint32_t       g_contextRegisters[registerCountFPU];
+static ContextSection g_contextEntriesNoFPU = { .pValues = &g_contextRegisters[0], .count = registerCountNoFPU };
+static ContextSection g_contextEntriesFPU = { .pValues = &g_contextRegisters[0], .count = registerCountFPU };
+static MriContext     g_context;
 
 
 // Forward Function Declarations.
@@ -84,7 +103,12 @@ void mainDebuggerLoop()
 
         if (haveGdbStopRequest)
         {
+            g_wasStopFromGDB = true;
+            // UNDONE: Request CPU halt and once it does halt, enter MRI.
             // UNDONE: Build up real context.
+            // UNDONE: Support chips with FPU as well.
+            (void)g_contextEntriesFPU;
+            mriContext_Init(&g_context, &g_contextEntriesNoFPU, 1);
             mriDebugException(&g_context);
         }
     }
@@ -131,20 +155,17 @@ static bool initSWD()
 }
 
 
-void Platform_Init(Token* pParameterTokens)
-{
-    // UNDONE: Copy some code from mriCortexMInit().
-    // Enable DWT...
-    // Make sure that single stepping is disabled.
-    // Maybe delay DWT enabling until the first entry into mriDebugException() instead.
-}
-
 
 
 // *********************************************************************************************************************
-//  Implementation of the Platform_Comm* functions.
-//  The MRI debug monitor library calls these routines to communicate with GDB. The implementations below use TCP/IP
-//  sockets to communicate with GDB wirelessly.
+// MRI PLATFORM LAYER
+//
+// Routines needed by the MRI core for platform specific operations. Declarations are in MRI's platforms.h
+// *********************************************************************************************************************
+// *********************************************************************************************************************
+// Implementation of the Platform_Comm* functions.
+// Routines used by the MRI core to communicate with GDB. The implementations below use TCP/IP sockets to communicate
+// with GDB wirelessly.
 // *********************************************************************************************************************
 static void waitToReceiveData(void);
 uint32_t Platform_CommHasReceiveData(void)
@@ -189,8 +210,264 @@ void Platform_CommSendChar(int character)
 
 
 
-// UNDONE: Do I want this to be this large?
-static char g_packetBuffer[16 * 1024];
+
+// *********************************************************************************************************************
+// Routine called by the MRI core at init time (as part of handling the mriInit() call in mainDebuggerLoop() above).
+// It is used perform any platform specific initialization. In our case we want to initialize the DWT (Data Watchpoint)
+// and FPB (Flash Patch and Breakpoint) units on the Cortex-M CPU.
+// *********************************************************************************************************************
+// Element of the Cortex-M DWT Comparator register array.
+struct DWT_COMP_Type
+{
+    uint32_t comp;
+    uint32_t mask;
+    uint32_t function;
+    uint32_t padding;
+};
+
+// Forward declarations for functions used by Platform_Init() to initialize the data watchpoint (DWT) and code
+// breakpoint units (called BP on ARMv6M and FPB on ARMv7M) on Cortex-M devices.
+static void configureDWTandFPB();
+static void enableDWTandITM();
+static void initDWT();
+static void clearDWTComparators();
+static uint32_t getDWTComparatorCount();
+static void clearDWTComparator(uint32_t comparatorAddress);
+static void initFPB();
+static void clearFPBComparators();
+static uint32_t getFPBCodeComparatorCount();
+static uint32_t readFPControlRegister();
+static uint32_t getFPBLiteralComparatorCount();
+static void clearFPBComparator(uint32_t comparatorAddress);
+static void enableFPB();
+static void writeFPControlRegister(uint32_t FP_CTRL_Value);
+
+
+void Platform_Init(Token* pParameterTokens)
+{
+    // UNDONE: I probably need to perform this for each core in a dual core system.
+    // UNDONE: Need to enable HALT debugging on the Cortex-M queue.
+    configureDWTandFPB();
+}
+
+static void configureDWTandFPB()
+{
+    enableDWTandITM();
+    initDWT();
+    initFPB();
+}
+
+static void enableDWTandITM()
+{
+    // DEMCR_DWTENA is the name on ARMv6M and it is called TRCENA on ARMv7M.
+    const uint32_t DEMCR_DWTENA_Bit = 1 << 24;
+    const uint32_t DEMCR_Address = 0xE000EDFC;
+    uint32_t DEMCR_Value = 0;
+
+    if (!g_swd.readTargetMemory(DEMCR_Address, &DEMCR_Value, sizeof(DEMCR_Value), SWD::TRANSFER_32BIT))
+    {
+        logFailure("Failed to read DEMCR register.");
+        return;
+    }
+
+    DEMCR_Value |= DEMCR_DWTENA_Bit;
+
+    if (!g_swd.writeTargetMemory(DEMCR_Address, &DEMCR_Value, sizeof(DEMCR_Value), SWD::TRANSFER_32BIT))
+    {
+        logFailure("Failed to set DWTENA/TRCENA bit in DEMCR register.");
+        return;
+    }
+}
+
+static void initDWT()
+{
+    clearDWTComparators();
+}
+
+static void clearDWTComparators()
+{
+    uint32_t DWT_COMP_Address = 0xE0001020;
+    uint32_t comparatorCount = getDWTComparatorCount();
+    for (uint32_t i = 0 ; i < comparatorCount ; i++)
+    {
+        clearDWTComparator(DWT_COMP_Address);
+        DWT_COMP_Address += sizeof(DWT_COMP_Type);
+    }
+}
+
+static uint32_t getDWTComparatorCount()
+{
+    uint32_t DWT_CTRL_Address = 0xE0001000;
+    uint32_t DWT_CTRL_Value = 0;
+
+    if (!g_swd.readTargetMemory(DWT_CTRL_Address, &DWT_CTRL_Value, sizeof(DWT_CTRL_Value), SWD::TRANSFER_32BIT))
+    {
+        logFailure("Failed to read DWT_CTRL register.");
+        return 0;
+    }
+    return (DWT_CTRL_Value >> 28) & 0xF;
+}
+
+static void clearDWTComparator(uint32_t comparatorAddress)
+{
+    //  Matched.  Read-only.  Set to 1 to indicate that this comparator has been matched.  Cleared on read.
+    const uint32_t DWT_COMP_FUNCTION_DATAVMATCH_Bit = 1 << 8;
+    //  Cycle Count Match.  Set to 1 for enabling cycle count match and 0 otherwise.  Only valid on comparator 0.
+    const uint32_t DWT_COMP_FUNCTION_CYCMATCH_Bit = 1 << 7;
+    //  Enable Data Trace Address offset packets.  0 to disable.
+    const uint32_t DWT_COMP_FUNCTION_EMITRANGE_Bit = 1 << 5;
+    //  Selects action to be taken on match.
+    const uint32_t DWT_COMP_FUNCTION_FUNCTION_Mask = 0xF;
+    DWT_COMP_Type dwtComp;
+
+    if (!g_swd.readTargetMemory(comparatorAddress, &dwtComp, 3*sizeof(uint32_t), SWD::TRANSFER_32BIT))
+    {
+        logFailure("Failed to read DWT_COMP/DWT_MASK/DWT_FUNCTION registers for clearing.");
+    }
+
+    dwtComp.comp = 0;
+    dwtComp.mask = 0;
+    dwtComp.function &= ~(DWT_COMP_FUNCTION_DATAVMATCH_Bit |
+                                     DWT_COMP_FUNCTION_CYCMATCH_Bit |
+                                     DWT_COMP_FUNCTION_EMITRANGE_Bit |
+                                     DWT_COMP_FUNCTION_FUNCTION_Mask);
+
+    if (!g_swd.writeTargetMemory(comparatorAddress, &dwtComp, 3*sizeof(uint32_t), SWD::TRANSFER_32BIT))
+    {
+        logFailure("Failed to write DWT_FUNCTION register for clearing.");
+    }
+}
+
+static void initFPB()
+{
+    clearFPBComparators();
+    enableFPB();
+}
+
+static void clearFPBComparators()
+{
+    uint32_t currentComparatorAddress = 0xE0002008;
+    uint32_t codeComparatorCount = getFPBCodeComparatorCount();
+    uint32_t literalComparatorCount = getFPBLiteralComparatorCount();
+    uint32_t totalComparatorCount = codeComparatorCount + literalComparatorCount;
+    for (uint32_t i = 0 ; i < totalComparatorCount ; i++)
+    {
+        clearFPBComparator(currentComparatorAddress);
+        currentComparatorAddress += sizeof(uint32_t);
+    }
+}
+
+static uint32_t getFPBCodeComparatorCount()
+{
+    // Most significant bits of number of instruction address comparators.  Read-only
+    const uint32_t FP_CTRL_NUM_CODE_MSB_Shift = 12;
+    const uint32_t FP_CTRL_NUM_CODE_MSB_Mask = 0x7 << FP_CTRL_NUM_CODE_MSB_Shift;
+    //  Least significant bits of number of instruction address comparators.  Read-only
+    const uint32_t FP_CTRL_NUM_CODE_LSB_Shift = 4;
+    const uint32_t FP_CTRL_NUM_CODE_LSB_Mask = 0xF << FP_CTRL_NUM_CODE_LSB_Shift;
+    uint32_t FP_CTRL_Value = readFPControlRegister();
+
+    return (((FP_CTRL_Value & FP_CTRL_NUM_CODE_MSB_Mask) >> (FP_CTRL_NUM_CODE_MSB_Shift - 4)) |
+            ((FP_CTRL_Value & FP_CTRL_NUM_CODE_LSB_Mask) >> FP_CTRL_NUM_CODE_LSB_Shift));
+}
+
+static const uint32_t FP_CTRL_Address = 0xE0002000;
+
+static uint32_t readFPControlRegister()
+{
+    uint32_t FP_CTRL_Value = 0;
+    if (!g_swd.readTargetMemory(FP_CTRL_Address, &FP_CTRL_Value, sizeof(FP_CTRL_Value), SWD::TRANSFER_32BIT))
+    {
+        logFailure("Failed to read FP_CTRL register.");
+        return 0;
+    }
+    return FP_CTRL_Value;
+}
+
+static uint32_t getFPBLiteralComparatorCount()
+{
+    //  Number of instruction literal address comparators.  Read only
+    const uint32_t FP_CTRL_NUM_LIT_Shift = 8;
+    const uint32_t FP_CTRL_NUM_LIT_Mask = 0xF << FP_CTRL_NUM_LIT_Shift;
+    uint32_t FP_CTRL_Value = readFPControlRegister();
+
+    return ((FP_CTRL_Value & FP_CTRL_NUM_LIT_Mask) >> FP_CTRL_NUM_LIT_Shift);
+}
+
+static void clearFPBComparator(uint32_t comparatorAddress)
+{
+    uint32_t comparatorValue = 0;
+    if (!g_swd.writeTargetMemory(comparatorAddress, &comparatorValue, sizeof(comparatorValue), SWD::TRANSFER_32BIT))
+    {
+        logFailure("Failed to write to FP comparator register.");
+    }
+}
+
+static void enableFPB()
+{
+    //  This Key field must be set to 1 when writing or the write will be ignored.
+    const uint32_t FP_CTRL_KEY = 1 << 1;
+    //  Enable bit for the FPB.  Set to 1 to enable FPB.
+    const uint32_t FP_CTRL_ENABLE = 1;
+
+    uint32_t FP_CTRL_Value = readFPControlRegister();
+    FP_CTRL_Value |= (FP_CTRL_KEY | FP_CTRL_ENABLE);
+    writeFPControlRegister(FP_CTRL_Value);
+}
+
+static void writeFPControlRegister(uint32_t FP_CTRL_Value)
+{
+    if (!g_swd.writeTargetMemory(FP_CTRL_Address, &FP_CTRL_Value, sizeof(FP_CTRL_Value), SWD::TRANSFER_32BIT))
+    {
+        logFailure("Failed to write FP_CTRL register.");
+    }
+}
+
+
+
+
+// *********************************************************************************************************************
+// Routines called by the MRI core each time the CPU is halted and resumed.
+// *********************************************************************************************************************
+void Platform_EnteringDebugger(void)
+{
+    g_wasMemoryExceptionEncountered = false;
+#ifdef UNDONE
+    mriCortexMState.originalPC = Platform_GetProgramCounter();
+    Platform_DisableSingleStep();
+    if (isExternalInterrupt(mriCortexMState.exceptionNumber))
+        setControlCFlag();
+    setActiveDebugFlag();
+#endif // UNDONE
+}
+
+void Platform_LeavingDebugger(void)
+{
+    g_wasStopFromGDB = false;
+#ifdef UNDONE
+    checkStack();
+    clearControlCFlag();
+    clearActiveDebugFlag();
+    clearPendedFromFaultFlag();
+    clearMonitorPending();
+#endif // UNDONE
+}
+
+
+
+// *********************************************************************************************************************
+// Routines called by the MRI core to access the storage used for buffering inbound and outbound packets from/to GDB.
+// g_packetBuffer must be large enough to contain a 'G' packet sent from GDB to update all of the CPU registers in
+// the context at once. This is:
+//      1 (byte for 'G' itself) +
+//        [ 2 (text hex digits per byte) *
+//          4 (bytes per 32-bit word) *
+//          56 (registers store in context for CPU w/ FPU) ] +
+//      4 (bytes for packet overhead of '$', '#', and 2 hex digit checksum)
+//      = 1 + 2 * 4 * 56 + 4 = 453
+// *********************************************************************************************************************
+// UNDONE: Should I make this larger to maybe improve FLASHing performance?
+static char g_packetBuffer[512];
 
 char* Platform_GetPacketBuffer(void)
 {
@@ -202,60 +479,69 @@ uint32_t Platform_GetPacketBufferSize(void)
     return sizeof(g_packetBuffer);
 }
 
-void Platform_EnteringDebugger(void)
-{
-}
-
-void Platform_LeavingDebugger(void)
-{
-}
 
 
-
+// *********************************************************************************************************************
+// Routines called by the MRI core to read and write memory on the target device.
+// *********************************************************************************************************************
 // UNDONE: Need a standard way to read and write multiple words at once.
-// UNDONE: I have enough to be able to implement these first.
+//         Can probably move core/memory.c into here and re-implement to be more efficient.
 uint32_t Platform_MemRead32(const void* pv)
 {
+    g_wasMemoryExceptionEncountered = false;
     uint32_t data = 0;
-    bool result = g_swd.readTargetMemory((uint32_t)pv, &data, sizeof(data), SWD::TRANSFER_32BIT);
-    if (!result)
+    uint32_t bytesRead = g_swd.readTargetMemory((uint32_t)pv, &data, sizeof(data), SWD::TRANSFER_32BIT);
+    if (bytesRead != sizeof(data))
     {
         // UNDONE: Probably memory exception.
         __breakpoint();
+        g_wasMemoryExceptionEncountered = true;
+        return 0;
     }
     return data;
 }
 
 uint16_t Platform_MemRead16(const void* pv)
 {
+    g_wasMemoryExceptionEncountered = false;
     __breakpoint();
     return 0;
 }
 
 uint8_t Platform_MemRead8(const void* pv)
 {
+    g_wasMemoryExceptionEncountered = false;
     __breakpoint();
     return 0;
 }
 
 void Platform_MemWrite32(void* pv, uint32_t value)
 {
+    g_wasMemoryExceptionEncountered = false;
     g_swd.writeTargetMemory((uint32_t)pv, &value, sizeof(value), SWD::TRANSFER_32BIT);
 }
 
 void Platform_MemWrite16(void* pv, uint16_t value)
 {
+    g_wasMemoryExceptionEncountered = false;
     __breakpoint();
 }
 
 void Platform_MemWrite8(void* pv, uint8_t value)
 {
+    g_wasMemoryExceptionEncountered = false;
     __breakpoint();
+}
+
+int Platform_WasMemoryFaultEncountered()
+{
+    return g_wasMemoryExceptionEncountered;
 }
 
 void Platform_SyncICacheToDCache(void *pv, uint32_t size)
 {
 }
+
 
 
 
@@ -311,11 +597,6 @@ void Platform_AdvanceProgramCounterToNextInstruction(void)
 }
 
 int Platform_WasProgramCounterModifiedByUser(void)
-{
-    return 0;
-}
-
-int Platform_WasMemoryFaultEncountered(void)
 {
     return 0;
 }
