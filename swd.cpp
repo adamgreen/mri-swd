@@ -635,10 +635,7 @@ uint32_t SWD::readTargetMemory(uint32_t address, void* pvBuffer, uint32_t buffer
 
 uint32_t SWD::readTargetMemoryInternal(uint32_t address, uint8_t* pDest, uint32_t bufferSize, TransferSize readSize)
 {
-    // UNDONE: Add support for sub-word transfers later.
-    assert ( readSize == TRANSFER_32BIT );
     uint32_t sizeInBytes = readSize / 8;
-
     assert ( pDest != NULL );
     assert ( bufferSize % sizeInBytes == 0 );
     assert ( address % sizeInBytes == 0 );
@@ -653,10 +650,10 @@ uint32_t SWD::readTargetMemoryInternal(uint32_t address, uint8_t* pDest, uint32_
     }
 
     // Setup for auto-incrementing AP read accesses of the correct size.
-    bool result = updateCSW(ADDR_INC_SINGLE_ENABLED, CSW_SIZE_32BIT);
+    bool result = updateCSW(ADDR_INC_SINGLE_ENABLED, readSize);
     if (!result)
     {
-        logFailure("updateCSW(ADDR_INC_SINGLE_ENABLED, CSW_SIZE_32BIT)");
+        logFailure("updateCSW(ADDR_INC_SINGLE_ENABLED, readSize)");
         return 0;
     }
     // Set the starting address in the TAR.
@@ -689,7 +686,22 @@ uint32_t SWD::readTargetMemoryInternal(uint32_t address, uint8_t* pDest, uint32_
 
         if (!dummyRead)
         {
-            *(uint32_t*)pDest = curr;
+            // Reads are delayed by one transfer so this data is from the previous read address.
+            uint32_t prevAddress = address - sizeInBytes;
+            switch (readSize)
+            {
+                case TRANSFER_8BIT:
+                    *pDest = (curr >> (8 * (prevAddress & 0x3))) & 0xFF;
+                    break;
+                case TRANSFER_16BIT:
+                    *(uint16_t*)pDest = (curr >> (8 * (prevAddress & 0x2))) & 0xFFFF;
+                    break;
+                case TRANSFER_32BIT:
+                    *(uint32_t*)pDest = curr;
+                    break;
+                default:
+                    return 0;
+            }
             pDest += sizeInBytes;
             bytesRead += sizeInBytes;
         }
@@ -738,8 +750,6 @@ uint32_t SWD::writeTargetMemory(uint32_t address, const void* pvBuffer, uint32_t
 
 uint32_t SWD::writeTargetMemoryInternal(uint32_t address, const uint8_t* pSrc, uint32_t bufferSize, TransferSize writeSize)
 {
-    // UNDONE: Add support for sub-word transfers later.
-    assert ( writeSize == TRANSFER_32BIT );
     uint32_t sizeInBytes = writeSize / 8;
 
     assert ( pSrc != NULL );
@@ -756,10 +766,10 @@ uint32_t SWD::writeTargetMemoryInternal(uint32_t address, const uint8_t* pSrc, u
     }
 
     // Setup for auto-incrementing AP accesses of the correct size.
-    bool result = updateCSW(ADDR_INC_SINGLE_ENABLED, CSW_SIZE_32BIT);
+    bool result = updateCSW(ADDR_INC_SINGLE_ENABLED, writeSize);
     if (!result)
     {
-        logFailure("updateCSW(ADDR_INC_SINGLE_ENABLED, CSW_SIZE_32BIT)");
+        logFailure("updateCSW(ADDR_INC_SINGLE_ENABLED, writeSize)");
         return 0;
     }
     // Set the starting address in the TAR.
@@ -774,10 +784,25 @@ uint32_t SWD::writeTargetMemoryInternal(uint32_t address, const uint8_t* pSrc, u
     uint32_t startAddress = address;
     while (bytesPended < bufferSize)
     {
-        result = writeAP(AP_DRW, *(uint32_t*)pSrc);
+        uint32_t drwVal;
+        switch (writeSize)
+        {
+            case TRANSFER_8BIT:
+                drwVal = *pSrc << (8 * (address & 0x3));
+                break;
+            case TRANSFER_16BIT:
+                drwVal = *(uint16_t*)pSrc << (8 * (address & 0x2));
+                break;
+            case TRANSFER_32BIT:
+                drwVal = *(uint32_t*)pSrc;
+                break;
+            default:
+                return 0;
+        }
+        result = writeAP(AP_DRW, drwVal);
         if (!result)
         {
-            logFailure("writeAP(AP_DRW, )");
+            logFailure("writeAP(AP_DRW, drwVal)");
             return calculateTransferCount(startAddress, address);
         }
         pSrc += sizeInBytes;
@@ -787,12 +812,28 @@ uint32_t SWD::writeTargetMemoryInternal(uint32_t address, const uint8_t* pSrc, u
     return calculateTransferCount(startAddress, address);
 }
 
-bool SWD::updateCSW(CSW_AddrIncs addrInc, CSW_Sizes size)
+bool SWD::updateCSW(CSW_AddrIncs addrInc, TransferSize transferSize)
 {
+    CSW_Sizes cswSize;
+    switch (transferSize)
+    {
+        case TRANSFER_8BIT:
+            cswSize = CSW_SIZE_8BIT;
+            break;
+        case TRANSFER_16BIT:
+            cswSize = CSW_SIZE_16BIT;
+            break;
+        case TRANSFER_32BIT:
+            cswSize = CSW_SIZE_32BIT;
+            break;
+        default:
+            return false;
+    }
+
     const uint32_t addrIncMask = 3 << 4;
     const uint32_t sizeMask = 7 << 0;
     const uint32_t addrIncAndSizeMask = addrIncMask | sizeMask;
-    uint32_t bitsToUpdate = (addrInc << 4) | size;
+    uint32_t bitsToUpdate = (addrInc << 4) | cswSize;
     if (m_cswValid && (m_csw & addrIncAndSizeMask) == bitsToUpdate)
     {
         // The CSW bits are already set to the needed value.
@@ -1109,11 +1150,8 @@ bool SWD::handleTransferResponse(uint32_t ack, bool ignoreProtocolError, bool* p
         // Flag that we are handling a FAIL so that we don't infinite loop trying to clear error bits.
         errorf("%s:%u %s encountered ACK_FAIL.\n", __FILE__, __LINE__, __FUNCTION__);
         m_handlingError++;
-            uint32_t stat = 0xBAADFEED;
-            bool result = readDP(DP_CTRL_STAT, &stat);
-            // UNDONE:
-            printf("result: %s\n", result ? "true" : "false");
-            printf("  stat: 0x%08lX\n", stat);
+            uint32_t stat = 0;
+            readDP(DP_CTRL_STAT, &stat);
 
             // Clear the sticky errors via the ABORT register.
             uint32_t abortBitsToClear = 0;

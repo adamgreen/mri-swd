@@ -405,7 +405,7 @@ class SWD
         bool checkAP(uint32_t ap);
         uint32_t readTargetMemoryInternal(uint32_t address, uint8_t* pDest, uint32_t bufferSize, TransferSize readSize);
         uint32_t writeTargetMemoryInternal(uint32_t address, const uint8_t* pSrc, uint32_t bufferSize, TransferSize writeSize);
-        bool updateCSW(CSW_AddrIncs addrInc, CSW_Sizes size);
+        bool updateCSW(CSW_AddrIncs addrInc, TransferSize transferSize);
         uint32_t calculateTransferCount(uint32_t startAddress, uint32_t expectedAddress);
         bool read(SwdApOrDp APnDP, uint32_t address, uint32_t* pData);
         bool write(SwdApOrDp APnDP, uint32_t address, uint32_t data);
