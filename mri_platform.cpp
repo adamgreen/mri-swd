@@ -30,6 +30,7 @@ extern "C"
 
 
 // UNDONE: Maybe move these pin connections and TCP/IP port numbers out into their own config.h
+// UNDONE: Move other configurations parameters such as GDB packet size, etc.
 // SWD pin connections.
 #define SWCLK_PIN 0
 #define SWDIO_PIN 1
@@ -57,6 +58,23 @@ static const uint32_t floatRegisterCount = 33;
 static const uint32_t registerCountNoFPU = integerRegisterCount + specialRegisterCount;
 static const uint32_t registerCountFPU = registerCountNoFPU + floatRegisterCount;
 
+// Give friendly names to the indices of important registers in the context scatter gather list.
+const uint32_t R0 = 0;
+const uint32_t R1 = 1;
+const uint32_t R2 = 2;
+const uint32_t R3 = 3;
+const uint32_t R7 = 7;
+const uint32_t SP = 13;
+const uint32_t LR = 14;
+const uint32_t PC = 15;
+const uint32_t CPSR = 16;
+const uint32_t MSP = 17;
+const uint32_t PSP = 18;
+const uint32_t PRIMASK = 19;
+const uint32_t BASEPRI = 20;
+const uint32_t FAULTMASK = 21;
+const uint32_t CONTROL = 22;
+
 // CPU register context information is stored here.
 static uint32_t       g_contextRegisters[registerCountFPU];
 static ContextSection g_contextEntriesNoFPU = { .pValues = &g_contextRegisters[0], .count = registerCountNoFPU };
@@ -70,6 +88,13 @@ static void requestCpuToHalt();
 static bool readDHCSR(uint32_t* pValue);
 static bool writeDHCSR(uint32_t DHCSR_Value);
 static bool hasCpuHalted(uint32_t DHCSR_Val);
+static void saveContext();
+static bool readCpuRegister(uint32_t registerIndex, uint32_t* pValue);
+static void waitForRegisterTransferToComplete();
+static bool hasRegisterTransferCompleted(uint32_t DHCSR_Value);
+static void restoreContext();
+static bool writeCpuRegister(uint32_t registerIndex, uint32_t value);
+static void requestCpuToResume();
 
 
 void mainDebuggerLoop()
@@ -119,12 +144,10 @@ void mainDebuggerLoop()
 
         if (hasCpuHalted(DHCSR_Val))
         {
-            // UNDONE: Build up real context.
-            // UNDONE: Support chips with FPU as well.
-            (void)g_contextEntriesFPU;
-            mriContext_Init(&g_context, &g_contextEntriesNoFPU, 1);
+            saveContext();
             mriDebugException(&g_context);
-            // UNDONE: Take CPU out of halt mode.
+            restoreContext();
+            requestCpuToResume();
         }
     }
 }
@@ -169,9 +192,10 @@ static bool initSWD()
     return true;
 }
 
+static const uint32_t DHCSR_C_HALT_Bit = 1 << 1;
+
 static void requestCpuToHalt()
 {
-    const uint32_t DHCSR_C_HALT_Bit = 1 << 1;
     uint32_t DHCSR_Val = 0;
 
     readDHCSR(&DHCSR_Val);
@@ -213,6 +237,154 @@ static bool hasCpuHalted(uint32_t DHCSR_Val)
     return (DHCSR_Val & DHCSR_S_HALT_Bit) == DHCSR_S_HALT_Bit;
 }
 
+// The special registers: CONTROL, FAULTMASK, BASEPRI, and PRIMASK are accessed at this single DCRSR index.
+const uint32_t specialRegisterIndex = 0x14;
+
+static void saveContext()
+{
+    bool encounteredError = false;
+
+    // UNDONE: Support chips with FPU as well.
+    (void)g_contextEntriesFPU;
+    Context_Init(&g_context, &g_contextEntriesNoFPU, 1);
+
+    // Transfer R0 - PSP first.
+    for (uint32_t i = R0 ; i <= PSP ; i++)
+    {
+        uint32_t regValue = 0;
+        if (!readCpuRegister(i, &regValue))
+        {
+            encounteredError = true;
+        }
+        Context_Set(&g_context, i, regValue);
+    }
+
+    // Transfer CONTROL, FAULTMASK, BASEPRI, PRIMASK next. They are all accessed in the CPU via a single 32-bit entry.
+    uint32_t specialRegs = 0;
+    if (!readCpuRegister(specialRegisterIndex, &specialRegs))
+    {
+        encounteredError = true;
+    }
+    for (uint32_t i = 0 ; i < 4 ; i++)
+    {
+        Context_Set(&g_context, PRIMASK+i, (specialRegs >> (8 * i)) & 0xFF);
+    }
+
+    // UNDONE: Should transfer FPU registers.
+
+    if (encounteredError)
+    {
+        logFailure("Failed to read CPU register(s).");
+    }
+}
+
+// Debug Core Register Selector Register.
+static uint32_t DCRSR_Address = 0xE000EDF4;
+// Specifies the access type for the transfer: 0 for read, 1 for write.
+static uint32_t DCRSR_REGWnR_Bit = 1 << 16;
+// Specifies the ARM core register, special-purpose register, or Floating-point Extension register, to transfer.
+static uint32_t DCRSR_REGSEL_Mask = 0x7F;
+
+// Debug Core Register Data Register.
+static uint32_t DCRDR_Address = 0xE000EDF8;
+
+static bool readCpuRegister(uint32_t registerIndex, uint32_t* pValue)
+{
+    uint32_t DCRSR_Value = registerIndex & DCRSR_REGSEL_Mask;
+    if (!g_swd.writeTargetMemory(DCRSR_Address, &DCRSR_Value, sizeof(DCRSR_Value), SWD::TRANSFER_32BIT))
+    {
+        return false;
+    }
+
+    waitForRegisterTransferToComplete();
+
+    return g_swd.readTargetMemory(DCRDR_Address, pValue, sizeof(*pValue), SWD::TRANSFER_32BIT);
+}
+
+static void waitForRegisterTransferToComplete()
+{
+    uint32_t DHCSR_Value = 0;
+    do
+    {
+        if (!readDHCSR(&DHCSR_Value))
+        {
+            return;
+        }
+    } while (!hasRegisterTransferCompleted(DHCSR_Value));
+}
+
+static bool hasRegisterTransferCompleted(uint32_t DHCSR_Value)
+{
+    const uint32_t DHCSR_S_REGRDY_Bit = 1 << 16;
+    return (DHCSR_Value & DHCSR_S_REGRDY_Bit) == DHCSR_S_REGRDY_Bit;
+}
+
+static void restoreContext()
+{
+    bool encounteredError = false;
+
+    // UNDONE: Support chips with FPU as well.
+
+    // Transfer R0 - PSP first.
+    for (uint32_t i = R0 ; i <= PSP ; i++)
+    {
+        if (!writeCpuRegister(i, Context_Get(&g_context, i)))
+        {
+            encounteredError = true;
+        }
+    }
+
+    // Transfer CONTROL, FAULTMASK, BASEPRI, PRIMASK next. They are all accessed in the CPU via a single 32-bit entry.
+    uint32_t specialRegs = 0;
+    for (uint32_t i = 0 ; i < 4 ; i++)
+    {
+        specialRegs |= (Context_Get(&g_context, PRIMASK+i) & 0xFF) << (8 * i);
+    }
+    if (!writeCpuRegister(specialRegisterIndex, specialRegs))
+    {
+        encounteredError = true;
+    }
+
+    // UNDONE: Should transfer FPU registers.
+
+    if (encounteredError)
+    {
+        logFailure("Failed to write CPU register(s).");
+    }
+}
+
+static bool writeCpuRegister(uint32_t registerIndex, uint32_t value)
+{
+    if (!g_swd.writeTargetMemory(DCRDR_Address, &value, sizeof(value), SWD::TRANSFER_32BIT))
+    {
+        return false;
+    }
+
+    uint32_t DCRSR_Value = DCRSR_REGWnR_Bit | (registerIndex & DCRSR_REGSEL_Mask);
+    if (!g_swd.writeTargetMemory(DCRSR_Address, &DCRSR_Value, sizeof(DCRSR_Value), SWD::TRANSFER_32BIT))
+    {
+        return false;
+    }
+
+    waitForRegisterTransferToComplete();
+
+    return true;
+}
+
+static void requestCpuToResume()
+{
+    uint32_t DHCSR_Val = 0;
+
+    readDHCSR(&DHCSR_Val);
+
+    DHCSR_Val &= ~DHCSR_C_HALT_Bit;
+
+    if (!writeDHCSR(DHCSR_Val))
+    {
+        logFailure("Failed to clear C_HALT bit in DHCSR.");
+    }
+}
+
 
 
 
@@ -227,6 +399,8 @@ static bool hasCpuHalted(uint32_t DHCSR_Val)
 // with GDB wirelessly.
 // *********************************************************************************************************************
 static void waitToReceiveData(void);
+
+
 uint32_t Platform_CommHasReceiveData(void)
 {
     return !g_gdbSocket.m_tcpToMriQueue.isEmpty();
@@ -506,22 +680,12 @@ void Platform_EnteringDebugger(void)
 #ifdef UNDONE
     mriCortexMState.originalPC = Platform_GetProgramCounter();
     Platform_DisableSingleStep();
-    if (isExternalInterrupt(mriCortexMState.exceptionNumber))
-        setControlCFlag();
-    setActiveDebugFlag();
 #endif // UNDONE
 }
 
 void Platform_LeavingDebugger(void)
 {
     g_wasStopFromGDB = false;
-#ifdef UNDONE
-    checkStack();
-    clearControlCFlag();
-    clearActiveDebugFlag();
-    clearPendedFromFaultFlag();
-    clearMonitorPending();
-#endif // UNDONE
 }
 
 
@@ -549,6 +713,42 @@ uint32_t Platform_GetPacketBufferSize(void)
 {
     return sizeof(g_packetBuffer);
 }
+
+
+
+
+// *********************************************************************************************************************
+// Routine called by the MRI core to create the T response to be sent back to GDB on debug stops.
+// *********************************************************************************************************************
+static void sendRegisterForTResponse(Buffer* pBuffer, uint8_t registerOffset, uint32_t registerValue);
+static void writeBytesToBufferAsHex(Buffer* pBuffer, void* pBytes, size_t byteCount);
+
+
+void Platform_WriteTResponseRegistersToBuffer(Buffer* pBuffer)
+{
+    sendRegisterForTResponse(pBuffer, R7, Context_Get(&g_context, R7));
+    sendRegisterForTResponse(pBuffer, SP, Context_Get(&g_context, SP));
+    sendRegisterForTResponse(pBuffer, LR, Context_Get(&g_context, LR));
+    sendRegisterForTResponse(pBuffer, PC, Context_Get(&g_context, PC));
+}
+
+static void sendRegisterForTResponse(Buffer* pBuffer, uint8_t registerOffset, uint32_t registerValue)
+{
+    Buffer_WriteByteAsHex(pBuffer, registerOffset);
+    Buffer_WriteChar(pBuffer, ':');
+    writeBytesToBufferAsHex(pBuffer, &registerValue, sizeof(registerValue));
+    Buffer_WriteChar(pBuffer, ';');
+}
+
+static void writeBytesToBufferAsHex(Buffer* pBuffer, void* pBytes, size_t byteCount)
+{
+    uint8_t* pByte = (uint8_t*)pBytes;
+    size_t   i;
+
+    for (i = 0 ; i < byteCount ; i++)
+        Buffer_WriteByteAsHex(pBuffer, *pByte++);
+}
+
 
 
 
@@ -842,10 +1042,6 @@ uint32_t Platform_GetDeviceMemoryMapXmlSize(void)
 const char* Platform_GetDeviceMemoryMapXml(void)
 {
     return g_memoryMapXml;
-}
-
-void Platform_WriteTResponseRegistersToBuffer(Buffer* pBuffer)
-{
 }
 
 
