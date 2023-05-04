@@ -13,11 +13,12 @@
    limitations under the License.
 */
 // Use the RP2040's PIO state machines to implement the ARM Serial Wire Debug (SWD) low level signalling.
-#include "swd.h"
-#include <stdio.h>
+#define SWD_MODULE "swd.cpp"
+#include "logging.h"
 #include <string.h>
 #include <hardware/clocks.h>
 #include <swd.pio.h>
+#include "swd.h"
 
 
 // Array of known DPv2 targets.
@@ -27,8 +28,9 @@ static SWD::DPv2Targets g_knownDPv2Targets[] =
 };
 
 
+#ifdef UNDONE
 // Macros used to enable/disable logging of SWD error conditions.
-#define logFailure(X) errorf("%s:%u %s failed calling " X "\n", __FILE__, __LINE__, __FUNCTION__)
+#define logError(X) errorf("%s:%u %s failed calling " X "\n", __FILE__, __LINE__, __FUNCTION__)
 
 static int (*errorf)(const char* format, ...) = printf;
 
@@ -36,15 +38,16 @@ static int dummyf(const char* format, ...)
 {
     return 0;
 }
+#endif // UNDONE
 
 void SWD::disableErrorLogging()
 {
-    errorf = dummyf;
+    logErrorDisable();
 }
 
 void SWD::enableErrorLogging()
 {
-    errorf = printf;
+    logErrorEnable();
 }
 
 
@@ -173,7 +176,7 @@ bool SWD::sendLineReset()
     bool result = readDPIDR();
     if (!result)
     {
-        logFailure("readDPIDR()");
+        logError("Failed call to readDPIDR()");
     }
     return result;
 }
@@ -283,7 +286,7 @@ bool SWD::selectSwdTarget(DPv2Targets target)
     bool result = readDPIDR();
     if (!result)
     {
-        logFailure("readDPIDR()");
+        logError("Failed call to readDPIDR()");
         return false;
     }
 
@@ -292,14 +295,14 @@ bool SWD::selectSwdTarget(DPv2Targets target)
     result = readDP(DP_TARGETID, &targetId);
     if (!result)
     {
-        logFailure("readDP(DP_TARGETID, ...)");
+        logError("Failed call to readDP(DP_TARGETID, &targetId)");
         return false;
     }
     uint32_t dlpId = 0xBAADFEED;
     result = readDP(DP_DLPIDR, &dlpId);
     if (!result)
     {
-        logFailure("readDP(DP_DLPIDR, ...)");
+        logError("Failed call to readDP(DP_DLPIDR, &dlpId)");
         return false;
     }
 
@@ -309,9 +312,7 @@ bool SWD::selectSwdTarget(DPv2Targets target)
     uint32_t expectedTargetInfo = target & 0xFFFFFFFE;
     if (actualTargetInfo != expectedTargetInfo)
     {
-        errorf("error: Failed to verify target info. Expected:0x%08lX Actual:0x%08lX\n",
-            expectedTargetInfo,
-            actualTargetInfo);
+        logErrorF("Failed to verify target info. Expected:0x%08lX Actual:0x%08lX", expectedTargetInfo, actualTargetInfo);
         return false;
     }
 
@@ -408,19 +409,19 @@ bool SWD::initTargetForDebugging()
     bool result = controlPower(true, true);
     if (!result)
     {
-        logFailure("controlPower(true, true)");
+        logError("Failed to call controlPower(true, true)");
         return false;
     }
     result = enableOverrunDetection(true);
     if (!result)
     {
-        logFailure("enableOverrunDetection(true)");
+        logError("Failed to call enableOverrunDetection(true)");
         return false;
     }
     result = findDebugMemAP();
     if (!result)
     {
-        logFailure("findDebugMemAP()");
+        logError("Failed to call findDebugMemAP()");
         return false;
     }
 
@@ -449,7 +450,7 @@ bool SWD::controlPower(bool systemPower /* = true */, bool debugPower /* = true 
         bool result = readDP(DP_CTRL_STAT, &ctrlStat);
         if (!result)
         {
-            logFailure("readDP(DP_CTRL_STAT, ...");
+            logError("Failed to call readDP(DP_CTRL_STAT, &ctrlStat)");
             return false;
         }
         if ((ctrlStat & powerAckBits) == desiredPowerAckBits)
@@ -466,7 +467,7 @@ bool SWD::controlPower(bool systemPower /* = true */, bool debugPower /* = true 
             result = writeDP(DP_CTRL_STAT, ctrlStat);
             if (!result)
             {
-                logFailure("writeDP(DP_CTRL_STAT, ...");
+                logErrorF("Failed to call writeDP(DP_CTRL_STAT, 0x%lX)", ctrlStat);
                 return false;
             }
 
@@ -475,7 +476,7 @@ bool SWD::controlPower(bool systemPower /* = true */, bool debugPower /* = true 
     } while (absolute_time_diff_us(get_absolute_time(), endTime) > 0);
     if (!poweredUp)
     {
-        logFailure("TIMEOUT!");
+        logError("TIMEOUT!");
         return false;
     }
     return true;
@@ -490,7 +491,7 @@ bool SWD::enableOverrunDetection(bool enable)
     bool result = readDP(DP_CTRL_STAT, &ctrlStat);
     if (!result)
     {
-        logFailure("readDP(DP_CTRL_STAT, ...");
+        logError("Failed to call readDP(DP_CTRL_STAT, &ctrlStat)");
         return false;
     }
     if ((ctrlStat & overrunDetectMask) == overrunDetect)
@@ -505,7 +506,7 @@ bool SWD::enableOverrunDetection(bool enable)
     result = writeDP(DP_CTRL_STAT, ctrlStat);
     if (!result)
     {
-        logFailure("writeDP(DP_CTRL_STAT, ...");
+        logErrorF("Failed to call writeDP(DP_CTRL_STAT, 0x%lX)", ctrlStat);
     }
     return result;
 }
@@ -521,7 +522,7 @@ bool SWD::findDebugMemAP()
         }
     }
 
-    errorf("%s:%u %s didn't find MEM-AP.\n", __FILE__, __LINE__, __FUNCTION__);
+    logError("Didn't find MEM-AP.");
     return false;
 }
 
@@ -530,7 +531,7 @@ bool SWD::checkAP(uint32_t ap)
     bool result = selectAP(ap);
     if (!result)
     {
-        logFailure("selectAP()");
+        logErrorF("Failed to call selectAP(0x%lX)", ap);
         return false;
     }
 
@@ -542,21 +543,21 @@ bool SWD::checkAP(uint32_t ap)
     result = readAP(AP_BASE, &dummy);
     if (!result)
     {
-        logFailure("readAP(AP_BASE, ...)");
+        logError("Failed to call readAP(AP_BASE, &dummy)");
         return false;
     }
     uint32_t base = 0xBAADFEED;
     result = readAP(AP_IDR, &base);
     if (!result)
     {
-        logFailure("readAP(AP_IDR, ...)");
+        logError("Failed to call readAP(AP_IDR, &base)");
         return false;
     }
     uint32_t id = 0xBAADFEED;
     result = readDP(DP_RDBUFF, &id);
     if (!result)
     {
-        logFailure("readDP(DP_RDBUFF, ...)");
+        logError("Failed to call readDP(DP_RDBUFF, &id)");
         return false;
     }
 
@@ -576,24 +577,25 @@ bool SWD::checkAP(uint32_t ap)
                                           m_peripheralComponentIDs, sizeof(m_peripheralComponentIDs), TRANSFER_32BIT);
     if (bytesRead < sizeof(m_peripheralComponentIDs))
     {
-        logFailure("readTargetMemory(0xE00FFFD0, ...)");
+        logError("Failed to call readTargetMemory(0xE00FFFD0, ...)");
         return false;
     }
-    printf("peripheralComponentIDs[]={ ");
+    logDebug("peripheralComponentIDs[]=");
+    logDebug("{");
     for (size_t i = 0 ; i < count_of(m_peripheralComponentIDs) ; i++)
     {
-        printf("0x%08lX ", m_peripheralComponentIDs[i]);
+        logDebugF("    0x%08lX ", m_peripheralComponentIDs[i]);
     }
-    printf("}\n");
+    logDebug("}");
 
     // Read in the CPUID for the Cortex-M processor as well.
     bytesRead = readTargetMemory(0xE000ED00, &m_cpuID, sizeof(m_cpuID), TRANSFER_32BIT);
     if (bytesRead != sizeof(m_cpuID))
     {
-        logFailure("readTargetMemory(0xE000ED00, &m_cpuID, ...)");
+        logError("Failed to call readTargetMemory(0xE000ED00, &m_cpuID, ...)");
         return false;
     }
-    printf("CPUID=0x%08lX\n", m_cpuID);
+    logDebugF("CPUID=0x%08lX", m_cpuID);
 
     return true;
 }
@@ -611,14 +613,14 @@ uint32_t SWD::readTargetMemory(uint32_t address, void* pvBuffer, uint32_t buffer
         {
             if (retryCount < m_maxReadRetries)
             {
-                errorf("%s:%u %s read 0 bytes. Retrying!\n", __FILE__, __LINE__, __FUNCTION__);
+                logError("readTargetMemoryInternal() returned 0 bytes. Retrying!");
                 retryCount++;
                 m_totalMemoryReadRetries++;
                 continue;
             }
             else
             {
-                errorf("%s:%u %s read 0 bytes. Hit maximum retry\n", __FILE__, __LINE__, __FUNCTION__);
+                logError("readTargetMemoryInternal() returned 0 bytes. Hit maximum retry");
                 return totalBytesRead;
             }
         }
@@ -653,14 +655,14 @@ uint32_t SWD::readTargetMemoryInternal(uint32_t address, uint8_t* pDest, uint32_
     bool result = updateCSW(ADDR_INC_SINGLE_ENABLED, readSize);
     if (!result)
     {
-        logFailure("updateCSW(ADDR_INC_SINGLE_ENABLED, readSize)");
+        logErrorF("Failed to call updateCSW(ADDR_INC_SINGLE_ENABLED, %lu)", readSize);
         return 0;
     }
     // Set the starting address in the TAR.
     result = writeAP(AP_TAR, address);
     if (!result)
     {
-        logFailure("writeAP(AP_TAR, address)");
+        logErrorF("Failed to call writeAP(AP_TAR, 0x%08lx)", address);
         return 0;
     }
 
@@ -680,7 +682,7 @@ uint32_t SWD::readTargetMemoryInternal(uint32_t address, uint8_t* pDest, uint32_
         }
         if (!result)
         {
-            logFailure("readAP/DP()");
+            logError("Failed to call readAP/readDP()");
             return bytesRead;
         }
 
@@ -726,14 +728,14 @@ uint32_t SWD::writeTargetMemory(uint32_t address, const void* pvBuffer, uint32_t
         {
             if (retryCount < m_maxWriteRetries)
             {
-                errorf("%s:%u %s wrote 0 bytes. Retrying!\n", __FILE__, __LINE__, __FUNCTION__);
+                logError("Write returned 0 bytes. Retrying!");
                 retryCount++;
                 m_totalMemoryWriteRetries++;
                 continue;
             }
             else
             {
-                errorf("%s:%u %s wrote 0 bytes. Hit maximum retry\n", __FILE__, __LINE__, __FUNCTION__);
+                logError("Write returned 0 bytes. Hit maximum retry");
                 return totalBytesWritten;
             }
         }
@@ -769,14 +771,14 @@ uint32_t SWD::writeTargetMemoryInternal(uint32_t address, const uint8_t* pSrc, u
     bool result = updateCSW(ADDR_INC_SINGLE_ENABLED, writeSize);
     if (!result)
     {
-        logFailure("updateCSW(ADDR_INC_SINGLE_ENABLED, writeSize)");
+        logErrorF("Failed to call updateCSW(ADDR_INC_SINGLE_ENABLED, %lu)", writeSize);
         return 0;
     }
     // Set the starting address in the TAR.
     result = writeAP(AP_TAR, address);
     if (!result)
     {
-        logFailure("writeAP(AP_TAR, address)");
+        logErrorF("Failed to call writeAP(AP_TAR, 0x%08lX)", address);
         return 0;
     }
 
@@ -802,7 +804,7 @@ uint32_t SWD::writeTargetMemoryInternal(uint32_t address, const uint8_t* pSrc, u
         result = writeAP(AP_DRW, drwVal);
         if (!result)
         {
-            logFailure("writeAP(AP_DRW, drwVal)");
+            logErrorF("Failed to call writeAP(AP_DRW, 0x%lX)", drwVal);
             return calculateTransferCount(startAddress, address);
         }
         pSrc += sizeInBytes;
@@ -851,13 +853,13 @@ bool SWD::updateCSW(CSW_AddrIncs addrInc, TransferSize transferSize)
         bool result = readAP(AP_CSW, &dummy);
         if (!result)
         {
-            logFailure("readAP(AP_CSW, &dummy)");
+            logError("Failed to call readAP(AP_CSW, &dummy)");
             return false;
         }
         result = readDP(DP_RDBUFF, &csw);
         if (!result)
         {
-            logFailure("readDP(DP_RDBUFF, &csw)");
+            logError("Failed to call readDP(DP_RDBUFF, &csw)");
             return false;
         }
     }
@@ -865,7 +867,7 @@ bool SWD::updateCSW(CSW_AddrIncs addrInc, TransferSize transferSize)
     bool result = writeAP(AP_CSW, csw);
     if (!result)
     {
-        logFailure("writeAP(AP_CSW, csw)");
+        logErrorF("Failed to call writeAP(AP_CSW, 0x%08lX)", csw);
         return false;
     }
     // UNDONE: How do I make sure that this AP write has completed?
@@ -881,14 +883,14 @@ uint32_t SWD::calculateTransferCount(uint32_t startAddress, uint32_t expectedAdd
     bool result = readAP(AP_TAR, &dummy);
     if (!result)
     {
-        logFailure("readAP(AP_TAR,...)");
+        logError("Failed to call readAP(AP_TAR, &dummy)");
         return 0;
     }
     uint32_t tar = 0;
     result = readDP(DP_RDBUFF, &tar);
     if (!result)
     {
-        logFailure("readDP(DP_RDBUFF,...)");
+        logError("Failed to call readDP(DP_RDBUFF, &tar)");
         return 0;
     }
 
@@ -927,7 +929,7 @@ bool SWD::clearAbortErrorBits()
     bool result = writeDP(DP_ABORT, bitsToClear);
     if (!result)
     {
-        logFailure("writeDP(DP_ABORT, ...)");
+        logErrorF("Failed to call writeDP(DP_ABORT, 0x%08lX)", bitsToClear);
     }
     return result;
 }
@@ -976,7 +978,7 @@ bool SWD::readDPIDR()
     bool result = readDP(DP_DPIDR, &m_dpidr);
     if (!result)
     {
-        logFailure("readDP(DP_DPIDR, ...)");
+        logError("Failed to call readDP(DP_DPIDR, &m_dpidr)");
         m_dpidr = 0xFFFFFFFF;
         return false;
     }
@@ -1025,7 +1027,7 @@ bool SWD::read(SwdApOrDp APnDP, uint32_t address, uint32_t* pData)
 
     if (!selectBank(APnDP, address))
     {
-        logFailure("selectBank(APnDP, address)");
+        logErrorF("Failed to call selectBank(0x%lX, 0x%lX)", APnDP, address);
         return false;
     }
 
@@ -1055,7 +1057,8 @@ bool SWD::read(SwdApOrDp APnDP, uint32_t address, uint32_t* pData)
             {
                 continue;
             }
-            logFailure("handleTransferResponse()");
+            logErrorF("Failed call to handleTransferResponse(0x%lX, %s, &retryTransfer)",
+                      ack, address == DP_DPIDR ? "true" : "false");
             return false;
         }
         *pData = data;
@@ -1063,7 +1066,7 @@ bool SWD::read(SwdApOrDp APnDP, uint32_t address, uint32_t* pData)
     } while (absolute_time_diff_us(get_absolute_time(), endTime) > 0);
 
     // Get here if timeout has been encountered.
-    logFailure("TIMEOUT!");
+    logError("TIMEOUT!");
     return false;
 }
 
@@ -1074,7 +1077,7 @@ bool SWD::write(SwdApOrDp APnDP, uint32_t address, uint32_t data)
 
     if (!selectBank(APnDP, address))
     {
-        logFailure("selectBank(APnDP, address)");
+        logErrorF("Failed to call selectBank(0x%lX, 0x%08lX)", APnDP, address);
         return false;
     }
 
@@ -1100,14 +1103,15 @@ bool SWD::write(SwdApOrDp APnDP, uint32_t address, uint32_t data)
             {
                 continue;
             }
-            logFailure("handleTransferResponse()");
+            logErrorF("Failed to call handleTransferResponse(0x%lX, %s, &retryTransfer)",
+                       ack, address == DP_TARGETSEL ? "true" : "false");
             return false;
         }
         return true;
     } while (absolute_time_diff_us(get_absolute_time(), endTime) > 0);
 
     // Get here if timeout has been encountered.
-    logFailure("TIMEOUT!");
+    logError("TIMEOUT!");
     return false;
 }
 
@@ -1122,13 +1126,13 @@ bool SWD::handleTransferResponse(uint32_t ack, bool ignoreProtocolError, bool* p
     if (ack != ACK_OK && m_handlingError > 0)
     {
         // Just return error code with no retries if already trying to handle errors.
-        errorf("%s:%u %s ignoring failure 0x%lX while handling ACK_FAIL.\n", __FILE__, __LINE__, __FUNCTION__, ack);
+        logErrorF("Ignoring failure 0x%lX while handling ACK_FAIL.", ack);
         return false;
     }
     else if (ack == ACK_WAIT)
     {
         // Retry on wait responses.
-        errorf("%s:%u %s encountered ACK_WAIT.\n", __FILE__, __LINE__, __FUNCTION__);
+        logError("Encountered ACK_WAIT.");
         m_totalWaitRetries++;
         *pRetry = true;
         return false;
@@ -1136,7 +1140,7 @@ bool SWD::handleTransferResponse(uint32_t ack, bool ignoreProtocolError, bool* p
     else if (ack == ACK_PROT_ERROR)
     {
         // Send line reset and retry.
-        errorf("%s:%u %s encountered protocol error.\n", __FILE__, __LINE__, __FUNCTION__);
+        logError("Encountered protocol error.");
         if (!ignoreProtocolError)
         {
             handleProtocolAndParityErrors();
@@ -1148,10 +1152,10 @@ bool SWD::handleTransferResponse(uint32_t ack, bool ignoreProtocolError, bool* p
     else if (ack == ACK_FAIL)
     {
         // Flag that we are handling a FAIL so that we don't infinite loop trying to clear error bits.
-        errorf("%s:%u %s encountered ACK_FAIL.\n", __FILE__, __LINE__, __FUNCTION__);
         m_handlingError++;
             uint32_t stat = 0;
             readDP(DP_CTRL_STAT, &stat);
+            logErrorF("Encountered ACK_FAIL w/ DP_CTRL_STAT=0x%08lX.", stat);
 
             // Clear the sticky errors via the ABORT register.
             uint32_t abortBitsToClear = 0;
@@ -1178,7 +1182,7 @@ bool SWD::handleTransferResponse(uint32_t ack, bool ignoreProtocolError, bool* p
     else if (ack == ACK_PARITY)
     {
         // Send line reset and retry.
-        errorf("%s:%u %s encountered parity error.\n", __FILE__, __LINE__, __FUNCTION__);
+        logError("Encountered parity error.");
         handleProtocolAndParityErrors();
         m_totalParityErrorRetries++;
         *pRetry = true;
@@ -1197,7 +1201,7 @@ bool SWD::selectBank(SwdApOrDp APnDP, uint32_t address)
         result = selectDpBank(address);
         if (!result)
         {
-            logFailure("selectDpBank(address)");
+            logErrorF("Failed call to selectDpBank(0x%lX)", address);
         }
         return result;
     }
@@ -1206,7 +1210,7 @@ bool SWD::selectBank(SwdApOrDp APnDP, uint32_t address)
         result = selectApBank(address);
         if (!result)
         {
-            logFailure("selectApBank(address)");
+            logErrorF("Failed call to selectApBank(0x%lX)", address);
         }
         return result;
     }
@@ -1232,7 +1236,7 @@ bool SWD::selectDpBank(uint32_t address)
     bool result = updateSelect();
     if (!result)
     {
-        logFailure("updateSelect()");
+        logError("Failed call to updateSelect()");
         return false;
     }
     return true;
@@ -1251,7 +1255,7 @@ bool SWD::selectApBank(uint32_t address)
     bool result = updateSelect();
     if (!result)
     {
-        logFailure("updateSelect()");
+        logError("Failed call to updateSelect()");
         return false;
     }
     return true;
@@ -1269,7 +1273,7 @@ bool SWD::selectAP(uint8_t ap)
     bool result = updateSelect();
     if (!result)
     {
-        logFailure("updateSelect()");
+        logError("Failed call to updateSelect()");
         return false;
     }
     return true;
@@ -1301,7 +1305,7 @@ bool SWD::updateSelect()
     bool result = writeDP(DP_SELECT, selectValue);
     if (!result)
     {
-        logFailure("writeDP(DP_SELECT, ...)");
+        logErrorF("Failed call to writeDP(DP_SELECT, 0x%lX)", selectValue);
         m_ap = UNKNOWN_VAL;
         m_dpBank = UNKNOWN_VAL;
         m_apBank = UNKNOWN_VAL;

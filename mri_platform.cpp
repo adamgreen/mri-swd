@@ -13,11 +13,14 @@
    limitations under the License.
 */
 // Routines to expose the Cortex-M debug functionality via SWD to the mri debug core.
+#define PLATFORM_MODULE "mri_platform.cpp"
+#include "logging.h"
 #include <string.h>
 #include <stdio.h>
 #include "gdb_socket.h"
 #include "swd.h"
 #include "mri_platform.h"
+#include "config.h"
 
 // MRI C headers
 extern "C"
@@ -27,19 +30,6 @@ extern "C"
     #include <core/platforms.h>
     #include <core/semihost.h>
 }
-
-
-// UNDONE: Maybe move these pin connections and TCP/IP port numbers out into their own config.h
-// UNDONE: Move other configurations parameters such as GDB packet size, etc.
-// SWD pin connections.
-#define SWCLK_PIN 0
-#define SWDIO_PIN 1
-
-
-// Macros used to enable/disable logging of SWD error conditions.
-#define logFailure(X) errorf("%s:%u %s() - " X "\n", __FILE__, __LINE__, __FUNCTION__)
-
-static int (*errorf)(const char* format, ...) = printf;
 
 
 static SWD       g_swd;
@@ -103,15 +93,14 @@ void mainDebuggerLoop()
     bool wasSwdInitSuccessful = initSWD();
     if (!wasSwdInitSuccessful)
     {
-        printf("Failed to initialize SWD connection to debuggee.\n");
+        logError("Failed to initialize SWD connection to debuggee.");
         __breakpoint();
     }
 
     bool wasSocketInitSuccessful = g_gdbSocket.init();
     if (!wasSocketInitSuccessful)
     {
-        printf("Failed to initialize GDB socket.\n");
-        __breakpoint();
+        logError("Failed to initialize GDB socket.");
     }
 
     // Initialize the MRI core.
@@ -121,8 +110,7 @@ void mainDebuggerLoop()
     }
     __catch
     {
-        printf("Failed to initialize the MRI core.");
-        __breakpoint();
+        logError("Failed to initialize the MRI core.");
         return;
     }
 
@@ -156,7 +144,7 @@ static bool initSWD()
 {
     if (!g_swd.init(24000000, SWCLK_PIN, SWDIO_PIN))
     {
-        printf("Failed to initialize the SWD port.\n");
+        logError("Failed to initialize the SWD port.");
         return false;
     }
 
@@ -165,30 +153,30 @@ static bool initSWD()
     bool maybeDormant = !notDormant;
     if (notDormant)
     {
-        printf("Target already selected with DPIDR=0x%08lX\n", g_swd.getDPIDR());
+        logErrorF("Target already selected with DPIDR=0x%08lX", g_swd.getDPIDR());
     }
     else if (maybeDormant)
     {
         bool foundTarget = g_swd.searchForKnownSwdTarget();
         if (foundTarget)
         {
-            printf("Found target=0x%08X with DPIDR=0x%08lX\n", g_swd.getTarget(), g_swd.getDPIDR());
+            logErrorF("Found target=0x%08X with DPIDR=0x%08lX", g_swd.getTarget(), g_swd.getDPIDR());
         }
         else
         {
-            printf("SWD failed to switch SWD port out of dormant mode.\n");
+            logError("SWD failed to switch SWD port out of dormant mode.");
             return false;
         }
     }
 
-    printf("Initializing target's debug components...\n");
+    logInfo("Initializing target's debug components...");
     bool result = g_swd.initTargetForDebugging();
     if (!result)
     {
-        printf("Failed to initialize target's debug components.\n");
+        logError("Failed to initialize target's debug components.");
         return false;
     }
-    printf("Initialization complete!\n");
+    logInfo("Initialization complete!");
     return true;
 }
 
@@ -204,7 +192,7 @@ static void requestCpuToHalt()
 
     if (!writeDHCSR(DHCSR_Val))
     {
-        logFailure("Failed to set C_HALT bit in DHCSR.");
+        logError("Failed to set C_HALT bit in DHCSR.");
     }
 }
 
@@ -214,7 +202,7 @@ static bool readDHCSR(uint32_t* pValue)
 {
     if (!g_swd.readTargetMemory(DHCSR_Address, pValue, sizeof(*pValue), SWD::TRANSFER_32BIT))
     {
-        logFailure("Failed to read DHCSR register.");
+        logError("Failed to read DHCSR register.");
         return false;
     }
     return true;
@@ -274,7 +262,7 @@ static void saveContext()
 
     if (encounteredError)
     {
-        logFailure("Failed to read CPU register(s).");
+        logError("Failed to read CPU register(s).");
     }
 }
 
@@ -349,7 +337,7 @@ static void restoreContext()
 
     if (encounteredError)
     {
-        logFailure("Failed to write CPU register(s).");
+        logError("Failed to write CPU register(s).");
     }
 }
 
@@ -381,7 +369,7 @@ static void requestCpuToResume()
 
     if (!writeDHCSR(DHCSR_Val))
     {
-        logFailure("Failed to clear C_HALT bit in DHCSR.");
+        logError("Failed to clear C_HALT bit in DHCSR.");
     }
 }
 
@@ -501,7 +489,7 @@ static void enableDWTandITM()
 
     if (!g_swd.readTargetMemory(DEMCR_Address, &DEMCR_Value, sizeof(DEMCR_Value), SWD::TRANSFER_32BIT))
     {
-        logFailure("Failed to read DEMCR register.");
+        logError("Failed to read DEMCR register.");
         return;
     }
 
@@ -509,7 +497,7 @@ static void enableDWTandITM()
 
     if (!g_swd.writeTargetMemory(DEMCR_Address, &DEMCR_Value, sizeof(DEMCR_Value), SWD::TRANSFER_32BIT))
     {
-        logFailure("Failed to set DWTENA/TRCENA bit in DEMCR register.");
+        logError("Failed to set DWTENA/TRCENA bit in DEMCR register.");
         return;
     }
 }
@@ -537,7 +525,7 @@ static uint32_t getDWTComparatorCount()
 
     if (!g_swd.readTargetMemory(DWT_CTRL_Address, &DWT_CTRL_Value, sizeof(DWT_CTRL_Value), SWD::TRANSFER_32BIT))
     {
-        logFailure("Failed to read DWT_CTRL register.");
+        logError("Failed to read DWT_CTRL register.");
         return 0;
     }
     return (DWT_CTRL_Value >> 28) & 0xF;
@@ -557,7 +545,7 @@ static void clearDWTComparator(uint32_t comparatorAddress)
 
     if (!g_swd.readTargetMemory(comparatorAddress, &dwtComp, 3*sizeof(uint32_t), SWD::TRANSFER_32BIT))
     {
-        logFailure("Failed to read DWT_COMP/DWT_MASK/DWT_FUNCTION registers for clearing.");
+        logError("Failed to read DWT_COMP/DWT_MASK/DWT_FUNCTION registers for clearing.");
     }
 
     dwtComp.comp = 0;
@@ -569,7 +557,7 @@ static void clearDWTComparator(uint32_t comparatorAddress)
 
     if (!g_swd.writeTargetMemory(comparatorAddress, &dwtComp, 3*sizeof(uint32_t), SWD::TRANSFER_32BIT))
     {
-        logFailure("Failed to write DWT_FUNCTION register for clearing.");
+        logError("Failed to write DWT_COMP/DWT_MASK/DWT_FUNCTION registers for clearing.");
     }
 }
 
@@ -613,7 +601,7 @@ static uint32_t readFPControlRegister()
     uint32_t FP_CTRL_Value = 0;
     if (!g_swd.readTargetMemory(FP_CTRL_Address, &FP_CTRL_Value, sizeof(FP_CTRL_Value), SWD::TRANSFER_32BIT))
     {
-        logFailure("Failed to read FP_CTRL register.");
+        logError("Failed to read FP_CTRL register.");
         return 0;
     }
     return FP_CTRL_Value;
@@ -634,7 +622,7 @@ static void clearFPBComparator(uint32_t comparatorAddress)
     uint32_t comparatorValue = 0;
     if (!g_swd.writeTargetMemory(comparatorAddress, &comparatorValue, sizeof(comparatorValue), SWD::TRANSFER_32BIT))
     {
-        logFailure("Failed to write to FP comparator register.");
+        logError("Failed to write to FP comparator register.");
     }
 }
 
@@ -654,7 +642,7 @@ static void writeFPControlRegister(uint32_t FP_CTRL_Value)
 {
     if (!g_swd.writeTargetMemory(FP_CTRL_Address, &FP_CTRL_Value, sizeof(FP_CTRL_Value), SWD::TRANSFER_32BIT))
     {
-        logFailure("Failed to write FP_CTRL register.");
+        logError("Failed to write FP_CTRL register.");
     }
 }
 
@@ -664,7 +652,7 @@ static void enableHaltingDebug()
     const uint32_t DHCSR_C_DEBUGEN_Bit = 1 << 0;
     if (!writeDHCSR(DHCSR_C_DEBUGEN_Bit))
     {
-        logFailure("Failed to set C_DEBUGEN bit in DHCSR.");
+        logError("Failed to set C_DEBUGEN bit in DHCSR.");
     }
 }
 

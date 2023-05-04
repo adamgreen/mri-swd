@@ -13,6 +13,8 @@
    limitations under the License.
 */
 // MRI SWD - Main Module
+#define MAIN_MODULE "main.cpp"
+#include "logging.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -33,18 +35,18 @@ int main()
     // UNDONE: Giving time for serial terminal to reconnect.
     sleep_ms(2000);
 
-    printf("Starting up...\n");
+    logInfo("Starting up...");
 
     // UNDONE: What needs to be done if router goes away? Can we reconnect.
-    printf("Connecting to Wi-Fi router...\n");
+    logInfo("Connecting to Wi-Fi router...");
     bool result = connectToWiFiRouter();
     if (!result)
     {
-        printf("Failed to connect to Wi-Fi router.\n");
+        logError("Failed to connect to Wi-Fi router.");
         __breakpoint();
         return 1;
     }
-    printf("Connected.\n");
+    logInfo("Connected.");
 
     mainDebuggerLoop();
 
@@ -57,15 +59,13 @@ static bool connectToWiFiRouter()
 {
     if (cyw43_arch_init())
     {
-        printf("Wi-Fi chip failed to initialize.\n");
-        __breakpoint();
+        logError("Wi-Fi chip failed to initialize.");
         return false;
     }
     cyw43_arch_enable_sta_mode();
     if (cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASSWORD, CYW43_AUTH_WPA2_AES_PSK, 30000))
     {
-        printf("Failed to connect to Wi-Fi.\n");
-        __breakpoint();
+        logError("Failed to connect to Wi-Fi.");
         return false;
     }
 

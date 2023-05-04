@@ -18,23 +18,21 @@
 
 #include <lwip/tcp.h>
 #include "circular_queue.h"
+#include "config.h"
 
-// The default port number to which GDB can connect.
-#define MRI_SWD_BASE_PORT 4242
 
 class GDBSocket
 {
     public:
         GDBSocket();
 
-        bool init(uint16_t port = MRI_SWD_BASE_PORT);
+        bool init(uint16_t port = GDB_SOCKET_PORT_NUMBER);
         err_t send(const void* pBuffer, uint16_t bufferLength);
         uint32_t bytesInFlight() { return m_bytesInFlight; }
         err_t close();
         err_t closeClient();
 
         CircularQueue<256> m_tcpToMriQueue;
-// UNDONE:        CircularQueue<256> m_mriToTcpQueue;
 
     protected:
         err_t onAccept(tcp_pcb* pClientPCB, err_t error);
