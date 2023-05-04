@@ -66,6 +66,10 @@ static MriContext     g_context;
 
 // Forward Function Declarations.
 static bool initSWD();
+static void requestCpuToHalt();
+static bool readDHCSR(uint32_t* pValue);
+static bool writeDHCSR(uint32_t DHCSR_Value);
+static bool hasCpuHalted(uint32_t DHCSR_Val);
 
 
 void mainDebuggerLoop()
@@ -100,16 +104,27 @@ void mainDebuggerLoop()
     while (true)
     {
         bool haveGdbStopRequest = !g_gdbSocket.m_tcpToMriQueue.isEmpty();
-        // UNDONE: Read DHCSR to see if the CPU has halted. Can also tell us if it has stalled, reset, locked up,
         if (haveGdbStopRequest)
         {
             g_wasStopFromGDB = true;
-            // UNDONE: Request CPU halt and once it does halt, enter MRI.
+            requestCpuToHalt();
+        }
+
+        // Read the Debug Halting Control and Status Register to query current state of CPU.
+        uint32_t DHCSR_Val = 0;
+        if (!readDHCSR(&DHCSR_Val))
+        {
+            continue;
+        }
+
+        if (hasCpuHalted(DHCSR_Val))
+        {
             // UNDONE: Build up real context.
             // UNDONE: Support chips with FPU as well.
             (void)g_contextEntriesFPU;
             mriContext_Init(&g_context, &g_contextEntriesNoFPU, 1);
             mriDebugException(&g_context);
+            // UNDONE: Take CPU out of halt mode.
         }
     }
 }
@@ -152,6 +167,50 @@ static bool initSWD()
     }
     printf("Initialization complete!\n");
     return true;
+}
+
+static void requestCpuToHalt()
+{
+    const uint32_t DHCSR_C_HALT_Bit = 1 << 1;
+    uint32_t DHCSR_Val = 0;
+
+    readDHCSR(&DHCSR_Val);
+
+    DHCSR_Val |= DHCSR_C_HALT_Bit;
+
+    if (!writeDHCSR(DHCSR_Val))
+    {
+        logFailure("Failed to set C_HALT bit in DHCSR.");
+    }
+}
+
+static const uint32_t DHCSR_Address = 0xE000EDF0;
+
+static bool readDHCSR(uint32_t* pValue)
+{
+    if (!g_swd.readTargetMemory(DHCSR_Address, pValue, sizeof(*pValue), SWD::TRANSFER_32BIT))
+    {
+        logFailure("Failed to read DHCSR register.");
+        return false;
+    }
+    return true;
+}
+
+static bool writeDHCSR(uint32_t DHCSR_Value)
+{
+    // Upper 16-bits must contain DBGKEY for CPU to accept this write.
+    const uint32_t DHCSR_DBGKEY_Shift = 16;
+    const uint32_t DHCSR_DBGKEY_Mask = 0xFFFF << DHCSR_DBGKEY_Shift;
+    const uint32_t DHCSR_DBGKEY = 0xA05F << DHCSR_DBGKEY_Shift;
+    DHCSR_Value = (DHCSR_Value & ~DHCSR_DBGKEY_Mask) | DHCSR_DBGKEY;
+
+    return g_swd.writeTargetMemory(DHCSR_Address, &DHCSR_Value, sizeof(DHCSR_Value), SWD::TRANSFER_32BIT);
+}
+
+static bool hasCpuHalted(uint32_t DHCSR_Val)
+{
+    const uint32_t DHCSR_S_HALT_Bit = 1 << 17;
+    return (DHCSR_Val & DHCSR_S_HALT_Bit) == DHCSR_S_HALT_Bit;
 }
 
 
@@ -241,6 +300,7 @@ static uint32_t getFPBLiteralComparatorCount();
 static void clearFPBComparator(uint32_t comparatorAddress);
 static void enableFPB();
 static void writeFPControlRegister(uint32_t FP_CTRL_Value);
+static void enableHaltingDebug();
 
 
 void Platform_Init(Token* pParameterTokens)
@@ -248,6 +308,7 @@ void Platform_Init(Token* pParameterTokens)
     // UNDONE: I probably need to perform this for each core in a dual core system.
     // UNDONE: Need to enable HALT debugging on the Cortex-M queue.
     configureDWTandFPB();
+    enableHaltingDebug();
 }
 
 static void configureDWTandFPB()
@@ -420,6 +481,16 @@ static void writeFPControlRegister(uint32_t FP_CTRL_Value)
     if (!g_swd.writeTargetMemory(FP_CTRL_Address, &FP_CTRL_Value, sizeof(FP_CTRL_Value), SWD::TRANSFER_32BIT))
     {
         logFailure("Failed to write FP_CTRL register.");
+    }
+}
+
+static void enableHaltingDebug()
+{
+    /*  Enable halt mode debug.  Set to 1 to enable halt mode debugging. */
+    const uint32_t DHCSR_C_DEBUGEN_Bit = 1 << 0;
+    if (!writeDHCSR(DHCSR_C_DEBUGEN_Bit))
+    {
+        logFailure("Failed to set C_DEBUGEN bit in DHCSR.");
     }
 }
 
