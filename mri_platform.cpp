@@ -119,6 +119,7 @@ void mainDebuggerLoop()
         bool haveGdbStopRequest = !g_gdbSocket.m_tcpToMriQueue.isEmpty();
         if (haveGdbStopRequest)
         {
+            logInfo("GDB has requested a CPU halt.");
             g_wasStopFromGDB = true;
             requestCpuToHalt();
         }
@@ -132,10 +133,12 @@ void mainDebuggerLoop()
 
         if (hasCpuHalted(DHCSR_Val))
         {
+            logInfo("CPU has halted.");
             saveContext();
             mriDebugException(&g_context);
             restoreContext();
             requestCpuToResume();
+            logInfo("CPU execution has been resumed.");
         }
     }
 }
@@ -774,7 +777,7 @@ uint16_t Platform_MemRead16(const void* pv)
 uint8_t Platform_MemRead8(const void* pv)
 {
     g_wasMemoryExceptionEncountered = false;
-    uint16_t data = 0;
+    uint8_t data = 0;
     uint32_t bytesRead = g_swd.readTargetMemory((uint32_t)pv, &data, sizeof(data), SWD::TRANSFER_8BIT);
     if (bytesRead != sizeof(data))
     {

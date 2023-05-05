@@ -611,7 +611,14 @@ uint32_t SWD::readTargetMemory(uint32_t address, void* pvBuffer, uint32_t buffer
         uint32_t bytesRead = readTargetMemoryInternal(address, pBuffer, bytesLeft, readSize);
         if (bytesRead == 0)
         {
-            if (retryCount < m_maxReadRetries)
+            if (getLastReadWriteError() == SWD_FAULT_ERROR)
+            {
+                // This typically means that GDB tried to access an invalid memory location so don't bother to try
+                // again.
+                logInfoF("readTargetMemoryInternal() failed to read from address 0x%08lX.", address);
+                return totalBytesRead;
+            }
+            else if (retryCount < m_maxReadRetries)
             {
                 logError("readTargetMemoryInternal() returned 0 bytes. Retrying!");
                 retryCount++;
@@ -682,7 +689,11 @@ uint32_t SWD::readTargetMemoryInternal(uint32_t address, uint8_t* pDest, uint32_
         }
         if (!result)
         {
-            logError("Failed to call readAP/readDP()");
+            if (m_lastReadWriteError != SWD_FAULT_ERROR)
+            {
+                // Silencing errors on access violations and only reporting higher up the call stack.
+                logError("Failed to call readAP/readDP()");
+            }
             return bytesRead;
         }
 
@@ -726,7 +737,14 @@ uint32_t SWD::writeTargetMemory(uint32_t address, const void* pvBuffer, uint32_t
         uint32_t bytesWritten = writeTargetMemoryInternal(address, pBuffer, bytesLeft, writeSize);
         if (bytesWritten == 0)
         {
-            if (retryCount < m_maxWriteRetries)
+            if (getLastReadWriteError() == SWD_FAULT_ERROR)
+            {
+                // This typically means that GDB tried to access an invalid memory location so don't bother to try
+                // again.
+                logInfoF("writeTargetMemoryInternal() failed to write to address 0x%08lX.", address);
+                return totalBytesWritten;
+            }
+            else if (retryCount < m_maxWriteRetries)
             {
                 logError("Write returned 0 bytes. Retrying!");
                 retryCount++;
@@ -804,7 +822,11 @@ uint32_t SWD::writeTargetMemoryInternal(uint32_t address, const uint8_t* pSrc, u
         result = writeAP(AP_DRW, drwVal);
         if (!result)
         {
-            logErrorF("Failed to call writeAP(AP_DRW, 0x%lX)", drwVal);
+            if (m_lastReadWriteError != SWD_FAULT_ERROR)
+            {
+                // Silencing errors on access violations and only reporting higher up the call stack.
+                logErrorF("Failed to call writeAP(AP_DRW, 0x%lX)", drwVal);
+            }
             return calculateTransferCount(startAddress, address);
         }
         pSrc += sizeInBytes;
@@ -1057,8 +1079,12 @@ bool SWD::read(SwdApOrDp APnDP, uint32_t address, uint32_t* pData)
             {
                 continue;
             }
-            logErrorF("Failed call to handleTransferResponse(0x%lX, %s, &retryTransfer)",
-                      ack, address == DP_DPIDR ? "true" : "false");
+            if (m_lastReadWriteError != SWD_FAULT_ERROR)
+            {
+                // Silencing errors on access violations and only reporting higher up the call stack.
+                logErrorF("Failed call to handleTransferResponse(0x%lX, %s, &retryTransfer)",
+                        ack, address == DP_DPIDR ? "true" : "false");
+            }
             return false;
         }
         *pData = data;
@@ -1103,8 +1129,12 @@ bool SWD::write(SwdApOrDp APnDP, uint32_t address, uint32_t data)
             {
                 continue;
             }
-            logErrorF("Failed to call handleTransferResponse(0x%lX, %s, &retryTransfer)",
-                       ack, address == DP_TARGETSEL ? "true" : "false");
+            if (m_lastReadWriteError != SWD_FAULT_ERROR)
+            {
+                // Silencing errors on access violations and only reporting higher up the call stack.
+                logErrorF("Failed to call handleTransferResponse(0x%lX, %s, &retryTransfer)",
+                        ack, address == DP_TARGETSEL ? "true" : "false");
+            }
             return false;
         }
         return true;
@@ -1135,6 +1165,7 @@ bool SWD::handleTransferResponse(uint32_t ack, bool ignoreProtocolError, bool* p
         logError("Encountered ACK_WAIT.");
         m_totalWaitRetries++;
         *pRetry = true;
+        m_lastReadWriteError = SWD_WAIT;
         return false;
     }
     else if (ack == ACK_PROT_ERROR)
@@ -1147,6 +1178,7 @@ bool SWD::handleTransferResponse(uint32_t ack, bool ignoreProtocolError, bool* p
             m_totalProtocolErrorRetries++;
             *pRetry = true;
         }
+        m_lastReadWriteError = SWD_PROTOCOL;
         return false;
     }
     else if (ack == ACK_FAIL)
@@ -1155,24 +1187,34 @@ bool SWD::handleTransferResponse(uint32_t ack, bool ignoreProtocolError, bool* p
         m_handlingError++;
             uint32_t stat = 0;
             readDP(DP_CTRL_STAT, &stat);
-            logErrorF("Encountered ACK_FAIL w/ DP_CTRL_STAT=0x%08lX.", stat);
 
             // Clear the sticky errors via the ABORT register.
             uint32_t abortBitsToClear = 0;
             if (stat & STAT_STICKY_OVERRUN_BIT)
             {
                 abortBitsToClear |= ABORT_OVERRUN_ERROR_CLEAR_BIT;
-            }
-            if (stat & STAT_STICK_ERROR_BIT)
-            {
-                abortBitsToClear |= ABORT_STICKY_ERROR_CLEAR_BIT;
+                // Set this error code first since the other 2 have higher precedence and should overwrite this one.
+                m_lastReadWriteError = SWD_FAULT_OVERRUN;
             }
             if (stat & STAT_WRITE_DATA_ERROR_BIT)
             {
                 // Treat the same as read parity errors.
                 handleProtocolAndParityErrors();
                 m_totalParityErrorRetries++;
+                *pRetry = true;
                 abortBitsToClear |= ABORT_WRITE_DATA_ERROR_CLEAR_BIT;
+                m_lastReadWriteError = SWD_FAULT_WDATAERR;
+            }
+            if (stat & STAT_STICK_ERROR_BIT)
+            {
+                abortBitsToClear |= ABORT_STICKY_ERROR_CLEAR_BIT;
+                // Set this error code last as it is the most important one for the caller to know about.
+                m_lastReadWriteError = SWD_FAULT_ERROR;
+            }
+            if (m_lastReadWriteError != SWD_FAULT_ERROR)
+            {
+                // Silencing errors on access violations and only reporting higher up the call stack.
+                logErrorF("Encountered ACK_FAIL w/ DP_CTRL_STAT=0x%08lX.", stat);
             }
             writeDP(DP_ABORT, abortBitsToClear);
             m_totalFailErrors++;
@@ -1186,6 +1228,7 @@ bool SWD::handleTransferResponse(uint32_t ack, bool ignoreProtocolError, bool* p
         handleProtocolAndParityErrors();
         m_totalParityErrorRetries++;
         *pRetry = true;
+        m_lastReadWriteError = SWD_PARITY;
         return false;;
     }
 

@@ -252,6 +252,25 @@ class SWD
             return write(AP, address, data);
         }
 
+        // Error codes that can be returned by getLastReadWriteError() to give more information about a failed
+        // read or write call.
+        enum TransferError
+        {
+            SWD_SUCCESS = 0,
+            SWD_PROTOCOL,
+            SWD_WAIT,
+            SWD_PARITY,
+            SWD_FAULT_WDATAERR,
+            SWD_FAULT_ERROR,
+            SWD_FAULT_OVERRUN
+        };
+
+        // Fetch the cause of the last read or write call which has failed.
+        TransferError getLastReadWriteError()
+        {
+            return m_lastReadWriteError;
+        }
+
         // Method to select the AP.
         //
         // ap - The 8-bit AP id to be selected for future communications.
@@ -451,6 +470,7 @@ class SWD
         uint32_t        m_totalMemoryReadRetries = 0;
         uint32_t        m_totalMemoryWriteRetries = 0;
         uint32_t        m_handlingError = 0;
+        TransferError   m_lastReadWriteError = SWD_SUCCESS;
         SignalMode      m_signalMode = BIT_PATTERN;
         DPv2Targets     m_target = UNKNOWN;
         EnumTargetState m_targetEnumState = PARTNO_DESIGNER;
