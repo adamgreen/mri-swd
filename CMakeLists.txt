@@ -49,6 +49,12 @@ target_compile_definitions(mri-swd PRIVATE
     WIFI_PASSWORD=\"${WIFI_PASSWORD}\"
 )
 
+# Disable the printf()s in the WiFi driver, even when NDEBUG isn't set.
+set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} -DCYW43_DEBUG\\\(...\\\)=\\\(void\\\)0")
+target_compile_definitions(mri-swd PRIVATE
+    PICO_CYW43_ARCH_DEBUG_ENABLED=0
+)
+
 pico_generate_pio_header(mri-swd ${CMAKE_CURRENT_LIST_DIR}/swd.pio)
 
 target_sources(mri-swd PRIVATE
