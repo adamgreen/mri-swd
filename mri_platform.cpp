@@ -748,6 +748,7 @@ static void writeBytesToBufferAsHex(Buffer* pBuffer, void* pBytes, size_t byteCo
 // *********************************************************************************************************************
 // UNDONE: Need a standard way to read and write multiple words at once.
 //         Can probably move core/memory.c into here and re-implement to be more efficient.
+//         Be aware that the TAR read in calculateTransferCount() might return 0 once it goes past the end of valid memory.
 uint32_t Platform_MemRead32(const void* pv)
 {
     g_wasMemoryExceptionEncountered = false;

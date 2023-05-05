@@ -1079,9 +1079,14 @@ bool SWD::read(SwdApOrDp APnDP, uint32_t address, uint32_t* pData)
             {
                 continue;
             }
-            if (m_lastReadWriteError != SWD_FAULT_ERROR)
+            if (m_lastReadWriteError == SWD_FAULT_ERROR)
             {
-                // Silencing errors on access violations and only reporting higher up the call stack.
+                // Can silence these error messages by turning off debug level diagnostics in config.h
+                logDebugF("Failed call to handleTransferResponse(0x%lX, %s, &retryTransfer)",
+                          ack, address == DP_DPIDR ? "true" : "false");
+            }
+            else
+            {
                 logErrorF("Failed call to handleTransferResponse(0x%lX, %s, &retryTransfer)",
                         ack, address == DP_DPIDR ? "true" : "false");
             }
@@ -1129,9 +1134,14 @@ bool SWD::write(SwdApOrDp APnDP, uint32_t address, uint32_t data)
             {
                 continue;
             }
-            if (m_lastReadWriteError != SWD_FAULT_ERROR)
+            if (m_lastReadWriteError == SWD_FAULT_ERROR)
             {
-                // Silencing errors on access violations and only reporting higher up the call stack.
+                // Can silence these error messages by turning off debug level diagnostics in config.h
+                logDebugF("Failed to call handleTransferResponse(0x%lX, %s, &retryTransfer)",
+                          ack, address == DP_TARGETSEL ? "true" : "false");
+            }
+            else
+            {
                 logErrorF("Failed to call handleTransferResponse(0x%lX, %s, &retryTransfer)",
                         ack, address == DP_TARGETSEL ? "true" : "false");
             }
@@ -1211,9 +1221,13 @@ bool SWD::handleTransferResponse(uint32_t ack, bool ignoreProtocolError, bool* p
                 // Set this error code last as it is the most important one for the caller to know about.
                 m_lastReadWriteError = SWD_FAULT_ERROR;
             }
-            if (m_lastReadWriteError != SWD_FAULT_ERROR)
+            if (m_lastReadWriteError == SWD_FAULT_ERROR)
             {
-                // Silencing errors on access violations and only reporting higher up the call stack.
+                // Can silence these error messages by turning off debug level diagnostics in config.h
+                logDebugF("Encountered ACK_FAIL w/ DP_CTRL_STAT=0x%08lX.", stat);
+            }
+            else
+            {
                 logErrorF("Encountered ACK_FAIL w/ DP_CTRL_STAT=0x%08lX.", stat);
             }
             writeDP(DP_ABORT, abortBitsToClear);
