@@ -34,8 +34,10 @@ extern "C"
 
 static SWD       g_swd;
 static GDBSocket g_gdbSocket;
+static uint32_t  g_originalPC;
 static bool      g_wasStopFromGDB = false;
 static bool      g_wasMemoryExceptionEncountered = false;
+static bool      g_isSingleSteppingEnabled = false;
 
 
 // The number of special registers (msp, psp, primask, basepri, faultmask, and control) is 6.
@@ -84,6 +86,7 @@ static void waitForRegisterTransferToComplete();
 static bool hasRegisterTransferCompleted(uint32_t DHCSR_Value);
 static void restoreContext();
 static bool writeCpuRegister(uint32_t registerIndex, uint32_t value);
+static void enableSingleSteppingIfNeeded();
 static void requestCpuToResume();
 
 
@@ -138,8 +141,9 @@ void mainDebuggerLoop()
             saveContext();
             mriDebugException(&g_context);
             restoreContext();
+            enableSingleSteppingIfNeeded();
             requestCpuToResume();
-            logInfo("CPU execution has been resumed.");
+            logInfoF("CPU execution has been resumed. %s", g_isSingleSteppingEnabled ? "Single stepping enabled." : "");
         }
     }
 }
@@ -363,14 +367,36 @@ static bool writeCpuRegister(uint32_t registerIndex, uint32_t value)
     return true;
 }
 
+static void enableSingleSteppingIfNeeded()
+{
+    const uint32_t DHCSR_C_STEP_Bit = 1 << 2;
+    const uint32_t DHCSR_C_MASKINTS_Bit = 1 << 3;
+    const uint32_t bitsToEnableSingleStepWithInterruptsDisabled = DHCSR_C_STEP_Bit | DHCSR_C_MASKINTS_Bit;
+    uint32_t DHCSR_Val = 0;
+
+    readDHCSR(&DHCSR_Val);
+    if (g_isSingleSteppingEnabled)
+    {
+        DHCSR_Val |= bitsToEnableSingleStepWithInterruptsDisabled;
+    }
+    else
+    {
+        DHCSR_Val &= ~bitsToEnableSingleStepWithInterruptsDisabled;
+    }
+
+    if (!writeDHCSR(DHCSR_Val))
+    {
+        logErrorF("Failed to update C_STEP & C_MASKINTS bits in DHCSR to %s single stepping.",
+                     g_isSingleSteppingEnabled ? "enable" : "disable");
+    }
+}
+
 static void requestCpuToResume()
 {
     uint32_t DHCSR_Val = 0;
 
     readDHCSR(&DHCSR_Val);
-
     DHCSR_Val &= ~DHCSR_C_HALT_Bit;
-
     if (!writeDHCSR(DHCSR_Val))
     {
         logError("Failed to clear C_HALT bit in DHCSR.");
@@ -668,10 +694,8 @@ static void enableHaltingDebug()
 void Platform_EnteringDebugger(void)
 {
     g_wasMemoryExceptionEncountered = false;
-#ifdef UNDONE
-    mriCortexMState.originalPC = Platform_GetProgramCounter();
+    g_originalPC = Platform_GetProgramCounter();
     Platform_DisableSingleStep();
-#endif // UNDONE
 }
 
 void Platform_LeavingDebugger(void)
@@ -832,6 +856,109 @@ void Platform_SyncICacheToDCache(void *pv, uint32_t size)
 
 
 
+
+// *********************************************************************************************************************
+// Routines called by the MRI core to single stepping the CPU.
+// These implementation just use the g_isSingleSteppingEnabled global to track the single stepping state desired by
+// the MRI core and the actual single stepping is enabled in mainDebuggerLoop() just before the CPU is taken out of
+// halt mode to resume code execution.
+// *********************************************************************************************************************
+void Platform_EnableSingleStep(void)
+{
+    g_isSingleSteppingEnabled = true;
+}
+
+void Platform_DisableSingleStep(void)
+{
+    g_isSingleSteppingEnabled = false;
+}
+
+int Platform_IsSingleStepping(void)
+{
+    return g_isSingleSteppingEnabled;
+}
+
+
+
+
+// *********************************************************************************************************************
+// Routines called by the MRI core to access the CPU's program counter.
+// *********************************************************************************************************************
+static uint16_t getFirstHalfWordOfCurrentInstruction(void);
+static uint16_t throwingMemRead16(uint32_t address);
+static bool isInstruction32Bit(uint16_t firstWordOfInstruction);
+
+
+uint32_t Platform_GetProgramCounter(void)
+{
+    return Context_Get(&g_context, PC);
+}
+
+void Platform_SetProgramCounter(uint32_t newPC)
+{
+    Context_Set(&g_context, PC, newPC);
+}
+
+void Platform_AdvanceProgramCounterToNextInstruction(void)
+{
+    uint16_t  firstWordOfCurrentInstruction;
+
+    __try
+    {
+        firstWordOfCurrentInstruction = getFirstHalfWordOfCurrentInstruction();
+    }
+    __catch
+    {
+        // Will get here if PC isn't pointing to valid memory so don't bother to advance.
+        clearExceptionCode();
+        return;
+    }
+
+    if (isInstruction32Bit(firstWordOfCurrentInstruction))
+    {
+        /* 32-bit Instruction. */
+        Platform_SetProgramCounter(Platform_GetProgramCounter() + sizeof(uint32_t));
+    }
+    else
+    {
+        /* 16-bit Instruction. */
+        Platform_SetProgramCounter(Platform_GetProgramCounter() + sizeof(uint16_t));
+    }
+}
+
+static uint16_t getFirstHalfWordOfCurrentInstruction(void)
+{
+    return throwingMemRead16(Platform_GetProgramCounter());
+}
+
+static uint16_t throwingMemRead16(uint32_t address)
+{
+    uint16_t instructionWord = Platform_MemRead16((const uint16_t*)address);
+    if (Platform_WasMemoryFaultEncountered())
+    {
+        __throw_and_return(memFaultException, 0);
+    }
+    return instructionWord;
+}
+
+static bool isInstruction32Bit(uint16_t firstWordOfInstruction)
+{
+    uint16_t maskedOffUpper5BitsOfWord = firstWordOfInstruction & 0xF800;
+
+    // 32-bit instructions start with 0b11101, 0b11110, 0b11111 according to page A5-152 of the
+    // ARMv7-M Architecture Manual.
+    return !!(maskedOffUpper5BitsOfWord == 0xE800 ||
+              maskedOffUpper5BitsOfWord == 0xF000 ||
+              maskedOffUpper5BitsOfWord == 0xF800);
+}
+
+int Platform_WasProgramCounterModifiedByUser(void)
+{
+    return Platform_GetProgramCounter() != g_originalPC;
+}
+
+
+
 // *********************************************************************************************************************
 // Routines called by the MRI core to set and clear breakpoints.
 // *********************************************************************************************************************
@@ -852,8 +979,6 @@ static uint32_t findFreeFPBBreakpointComparator();
 static bool isFPBComparatorEnabled(uint32_t comparator);
 static bool isFPBComparatorEnabledRevision1(uint32_t comparator);
 static bool isFPBComparatorEnabledRevision2(uint32_t comparator);
-static uint16_t throwingMemRead16(uint32_t address);
-static bool isInstruction32Bit(uint16_t firstWordOfInstruction);
 static uint32_t disableFPBBreakpointComparator(uint32_t breakpointAddress, bool is32BitInstruction);
 
 
@@ -1138,27 +1263,6 @@ __throws void Platform_SetHardwareBreakpoint(uint32_t address)
     }
 }
 
-static uint16_t throwingMemRead16(uint32_t address)
-{
-    uint16_t instructionWord = Platform_MemRead16((const uint16_t*)address);
-    if (Platform_WasMemoryFaultEncountered())
-    {
-        __throw_and_return(memFaultException, 0);
-    }
-    return instructionWord;
-}
-
-static bool isInstruction32Bit(uint16_t firstWordOfInstruction)
-{
-    uint16_t maskedOffUpper5BitsOfWord = firstWordOfInstruction & 0xF800;
-
-    // 32-bit instructions start with 0b11101, 0b11110, 0b11111 according to page A5-152 of the
-    // ARMv7-M Architecture Manual.
-    return !!(maskedOffUpper5BitsOfWord == 0xE800 ||
-              maskedOffUpper5BitsOfWord == 0xF000 ||
-              maskedOffUpper5BitsOfWord == 0xF800);
-}
-
 __throws void Platform_ClearHardwareBreakpointOfGdbKind(uint32_t address, uint32_t kind)
 {
     bool is32BitInstruction = false;
@@ -1237,39 +1341,6 @@ PlatformTrapReason Platform_GetTrapReason(void)
 
 void Platform_DisplayFaultCauseToGdbConsole(void)
 {
-}
-
-
-
-void Platform_EnableSingleStep(void)
-{
-}
-
-void Platform_DisableSingleStep(void)
-{
-}
-
-int Platform_IsSingleStepping(void)
-{
-    return false;
-}
-
-uint32_t Platform_GetProgramCounter(void)
-{
-    return 0;
-}
-
-void Platform_SetProgramCounter(uint32_t newPC)
-{
-}
-
-void Platform_AdvanceProgramCounterToNextInstruction(void)
-{
-}
-
-int Platform_WasProgramCounterModifiedByUser(void)
-{
-    return 0;
 }
 
 
