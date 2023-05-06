@@ -130,6 +130,7 @@ void mainDebuggerLoop()
         {
             continue;
         }
+        // UNDONE: Should check the reset, sleep, lockup, retire bits in the DHCSR as well.
 
         if (hasCpuHalted(DHCSR_Val))
         {
@@ -471,7 +472,6 @@ static void enableHaltingDebug();
 void Platform_Init(Token* pParameterTokens)
 {
     // UNDONE: I probably need to perform this for each core in a dual core system.
-    // UNDONE: Need to enable HALT debugging on the Cortex-M queue.
     configureDWTandFPB();
     enableHaltingDebug();
 }
@@ -737,7 +737,9 @@ static void writeBytesToBufferAsHex(Buffer* pBuffer, void* pBytes, size_t byteCo
     size_t   i;
 
     for (i = 0 ; i < byteCount ; i++)
+    {
         Buffer_WriteByteAsHex(pBuffer, *pByte++);
+    }
 }
 
 
@@ -824,6 +826,390 @@ int Platform_WasMemoryFaultEncountered()
 }
 
 void Platform_SyncICacheToDCache(void *pv, uint32_t size)
+{
+    // UNDONE: Implement and test on Portenta-H7.
+}
+
+
+
+// *********************************************************************************************************************
+// Routines called by the MRI core to set and clear breakpoints.
+// *********************************************************************************************************************
+static bool doesKindIndicate32BitInstruction(uint32_t kind);
+static uint32_t enableFPBBreakpoint(uint32_t breakpointAddress, bool is32BitInstruction);
+static uint32_t findFPBBreakpointComparator(uint32_t breakpointAddress, bool is32BitInstruction);
+static uint32_t calculateFPBComparatorValue(uint32_t breakpointAddress, bool is32BitInstruction);
+static bool isBreakpointAddressInvalid(uint32_t breakpointAddress);
+static uint32_t getFPBRevision();
+static bool isAddressOdd(uint32_t address);
+static bool isAddressAboveLowestHalfGig(uint32_t address);
+static uint32_t calculateFPBComparatorValueRevision1(uint32_t breakpointAddress, bool is32BitInstruction);
+static uint32_t calculateFPBComparatorReplaceValue(uint32_t breakpointAddress, bool is32BitInstruction);
+static bool isAddressInUpperHalfword(uint32_t address);
+static uint32_t calculateFPBComparatorValueRevision2(uint32_t breakpointAddress);
+static uint32_t maskOffFPBComparatorReservedBits(uint32_t comparatorValue);
+static uint32_t findFreeFPBBreakpointComparator();
+static bool isFPBComparatorEnabled(uint32_t comparator);
+static bool isFPBComparatorEnabledRevision1(uint32_t comparator);
+static bool isFPBComparatorEnabledRevision2(uint32_t comparator);
+static uint16_t throwingMemRead16(uint32_t address);
+static bool isInstruction32Bit(uint16_t firstWordOfInstruction);
+static uint32_t disableFPBBreakpointComparator(uint32_t breakpointAddress, bool is32BitInstruction);
+
+
+__throws void Platform_SetHardwareBreakpointOfGdbKind(uint32_t address, uint32_t kind)
+{
+    bool is32BitInstruction = false;
+
+    __try
+    {
+        is32BitInstruction = doesKindIndicate32BitInstruction(kind);
+    }
+    __catch
+    {
+        __rethrow;
+    }
+
+    uint32_t FPBBreakpointComparator = enableFPBBreakpoint(address, is32BitInstruction);
+    if (FPBBreakpointComparator == 0)
+    {
+        __throw(exceededHardwareResourcesException);
+    }
+}
+
+static bool doesKindIndicate32BitInstruction(uint32_t kind)
+{
+    switch (kind)
+    {
+        case 2:
+            return false;
+        case 3:
+        case 4:
+            return true;
+        default:
+            __throw_and_return(invalidArgumentException, false);
+    }
+}
+
+static uint32_t enableFPBBreakpoint(uint32_t breakpointAddress, bool is32BitInstruction)
+{
+    uint32_t existingFPBBreakpoint = findFPBBreakpointComparator(breakpointAddress, is32BitInstruction);
+    if (existingFPBBreakpoint != 0)
+    {
+        // This breakpoint is already set so just return pointer to existing comparator.
+        return existingFPBBreakpoint;
+    }
+
+    uint32_t freeFPBBreakpointComparator = findFreeFPBBreakpointComparator();
+    if (freeFPBBreakpointComparator == 0)
+    {
+        // All FPB breakpoint comparator slots are used so return NULL as error indicator.
+        logInfoF("No free hardware breakpoints for setting breakpoint at address 0x%08lX.", breakpointAddress);
+        return 0;
+    }
+
+    uint32_t comparatorValue = calculateFPBComparatorValue(breakpointAddress, is32BitInstruction);
+    if (!g_swd.writeTargetMemory(freeFPBBreakpointComparator, &comparatorValue, sizeof(comparatorValue), SWD::TRANSFER_32BIT))
+    {
+        logErrorF("Failed to set breakpoint at address 0x%08lX.", breakpointAddress);
+        return 0;
+    }
+    return freeFPBBreakpointComparator;
+}
+
+uint32_t FPB_COMP_ARRAY_Address = 0xE0002008;
+
+static uint32_t findFPBBreakpointComparator(uint32_t breakpointAddress, bool is32BitInstruction)
+{
+    uint32_t comparatorValueForThisBreakpoint = calculateFPBComparatorValue(breakpointAddress, is32BitInstruction);
+    uint32_t codeComparatorCount = getFPBCodeComparatorCount();
+    uint32_t currentComparatorAddress = FPB_COMP_ARRAY_Address;
+    for (uint32_t i = 0 ; i < codeComparatorCount ; i++)
+    {
+        uint32_t currentComparatorValue = 0;
+        if (!g_swd.readTargetMemory(currentComparatorAddress, &currentComparatorValue, sizeof(currentComparatorValue), SWD::TRANSFER_32BIT))
+        {
+            logErrorF("Failed to read from FPB comparator at address 0x%08lX.", currentComparatorAddress);
+            return 0;
+        }
+        uint32_t maskOffReservedBits = maskOffFPBComparatorReservedBits(currentComparatorValue);
+        if (comparatorValueForThisBreakpoint == maskOffReservedBits)
+        {
+            return currentComparatorAddress;
+        }
+
+        currentComparatorAddress += sizeof(uint32_t);
+    }
+
+    // Return NULL if no FPB comparator is already enabled for this breakpoint.
+    return 0;
+}
+
+// Flash Patch breakpoint architecture revision. 0 for revision 1 and 1 for revision 2.
+uint32_t FP_CTRL_REVISION2 = 0x1;
+
+static uint32_t calculateFPBComparatorValue(uint32_t breakpointAddress, bool is32BitInstruction)
+{
+    if (isBreakpointAddressInvalid(breakpointAddress))
+    {
+        return (uint32_t)~0U;
+    }
+    if (getFPBRevision() == FP_CTRL_REVISION2)
+    {
+        return calculateFPBComparatorValueRevision2(breakpointAddress);
+    }
+    else
+    {
+        return calculateFPBComparatorValueRevision1(breakpointAddress, is32BitInstruction);
+    }
+}
+
+static bool isBreakpointAddressInvalid(uint32_t breakpointAddress)
+{
+    if (getFPBRevision() == FP_CTRL_REVISION2)
+    {
+        // On revision 2, can set breakpoint at any address in the 4GB range, except for at an odd addresses.
+        return isAddressOdd(breakpointAddress);
+    }
+    else
+    {
+        // On revision 1, can only set a breakpoint on addresses where the upper 3-bits are all 0 (upper 3.5GB is off
+        // limits) and the address is half-word aligned.
+        return isAddressAboveLowestHalfGig(breakpointAddress) || isAddressOdd(breakpointAddress);
+    }
+}
+
+static uint32_t getFPBRevision()
+{
+    // Flash Patch breakpoint architecture revision. 0 for revision 1 and 1 for revision 2.
+    uint32_t FP_CTRL_REV_Shift = 28;
+    uint32_t FP_CTRL_REV_Mask = (0xF << FP_CTRL_REV_Shift);
+
+    uint32_t controlValue = readFPControlRegister();
+    return ((controlValue & FP_CTRL_REV_Mask) >> FP_CTRL_REV_Shift);
+}
+
+static bool isAddressOdd(uint32_t address)
+{
+    return !!(address & 0x1);
+}
+
+static bool isAddressAboveLowestHalfGig(uint32_t address)
+{
+    return !!(address & 0xE0000000);
+}
+
+//  Specified bits 28:2 of the address to be use for match on this comparator.
+uint32_t FP_COMP_COMP_Shift = 2;
+uint32_t FP_COMP_COMP_Mask = (0x07FFFFFF << FP_COMP_COMP_Shift);
+//  Enables this comparator.  Set to 1 to enable.
+uint32_t FP_COMP_ENABLE_Bit = 1 << 0;
+
+static uint32_t calculateFPBComparatorValueRevision1(uint32_t breakpointAddress, bool is32BitInstruction)
+{
+    uint32_t    comparatorValue;
+    comparatorValue = (breakpointAddress & FP_COMP_COMP_Mask);
+    comparatorValue |= FP_COMP_ENABLE_Bit;
+    comparatorValue |= calculateFPBComparatorReplaceValue(breakpointAddress, is32BitInstruction);
+
+    return comparatorValue;
+}
+
+static uint32_t calculateFPBComparatorReplaceValue(uint32_t breakpointAddress, bool is32BitInstruction)
+{
+    //  Defines the behaviour for code address comparators.
+    uint32_t FP_COMP_REPLACE_Shift = 30;
+    // Breakpoint on lower halfword.
+    uint32_t FP_COMP_REPLACE_BREAK_LOWER = 0x1U << FP_COMP_REPLACE_Shift;
+    // Breakpoint on upper halfword.
+    uint32_t FP_COMP_REPLACE_BREAK_UPPER = 0x2U << FP_COMP_REPLACE_Shift;
+    // Breakpoint on word.
+    uint32_t FP_COMP_REPLACE_BREAK = 0x3U << FP_COMP_REPLACE_Shift;
+
+    if (is32BitInstruction)
+    {
+        return FP_COMP_REPLACE_BREAK;
+    }
+    else if (isAddressInUpperHalfword(breakpointAddress))
+    {
+        return FP_COMP_REPLACE_BREAK_UPPER;
+    }
+    else
+    {
+        return FP_COMP_REPLACE_BREAK_LOWER;
+    }
+}
+
+static bool isAddressInUpperHalfword(uint32_t address)
+{
+    return !!(address & 0x2);
+}
+
+// FlashPatch Comparator Register Bits for revision 2.
+//  Enables this comparator for flash patching when FP_COMP_BE is 0. Set to 1 to enable.
+uint32_t FP_COMP_FE_Bit = 1 << 31;
+//  Enables this comparator as a breakpoint.  Set to 1 to enable.
+uint32_t FP_COMP_BE_Bit = 1 << 0;
+
+static uint32_t calculateFPBComparatorValueRevision2(uint32_t breakpointAddress)
+{
+    return breakpointAddress | FP_COMP_BE_Bit;
+}
+
+static uint32_t maskOffFPBComparatorReservedBits(uint32_t comparatorValue)
+{
+    //  Defines the behaviour for code address comparators.
+    uint32_t FP_COMP_REPLACE_Shift = 30;
+    uint32_t FP_COMP_REPLACE_Mask = 0x3U << FP_COMP_REPLACE_Shift;
+
+    if (getFPBRevision() == FP_CTRL_REVISION2)
+    {
+        return comparatorValue;
+    }
+    else
+    {
+        return (comparatorValue & (FP_COMP_REPLACE_Mask | FP_COMP_COMP_Mask | FP_COMP_ENABLE_Bit));
+    }
+}
+
+static uint32_t findFreeFPBBreakpointComparator()
+{
+    uint32_t currentComparatorAddress = FPB_COMP_ARRAY_Address;
+    uint32_t codeComparatorCount = getFPBCodeComparatorCount();
+    for (uint32_t i = 0 ; i < codeComparatorCount ; i++)
+    {
+        uint32_t currentComparatorValue = 0;
+        if (!g_swd.readTargetMemory(currentComparatorAddress, &currentComparatorValue, sizeof(currentComparatorValue), SWD::TRANSFER_32BIT))
+        {
+            logErrorF("Failed to read from FPB comparator at address 0x%08lX.", currentComparatorAddress);
+            return 0;
+        }
+        if (!isFPBComparatorEnabled(currentComparatorValue))
+        {
+            return currentComparatorAddress;
+        }
+
+        currentComparatorAddress += sizeof(uint32_t);
+    }
+
+    // Return 0 if no FPB breakpoint comparators are free.
+    return 0;
+}
+
+static bool isFPBComparatorEnabled(uint32_t comparator)
+{
+    if (getFPBRevision() == FP_CTRL_REVISION2)
+    {
+        return isFPBComparatorEnabledRevision2(comparator);
+    }
+    else
+    {
+        return isFPBComparatorEnabledRevision1(comparator);
+    }
+}
+
+static bool isFPBComparatorEnabledRevision1(uint32_t comparator)
+{
+    return !!(comparator & FP_COMP_ENABLE_Bit);
+}
+
+static bool isFPBComparatorEnabledRevision2(uint32_t comparator)
+{
+    return !!((comparator & FP_COMP_BE_Bit) || (comparator & FP_COMP_FE_Bit));
+}
+
+__throws void Platform_SetHardwareBreakpoint(uint32_t address)
+{
+    uint16_t  firstInstructionWord = 0;
+     __try
+    {
+        firstInstructionWord = throwingMemRead16(address);
+    }
+    __catch
+    {
+        __rethrow;
+    }
+
+    uint32_t FPBBreakpointComparator = enableFPBBreakpoint(address, isInstruction32Bit(firstInstructionWord));
+    if (FPBBreakpointComparator == 0)
+    {
+        logInfoF("Failed to set breakpoint at address 0x%08lX.", address);
+        __throw(exceededHardwareResourcesException);
+    }
+}
+
+static uint16_t throwingMemRead16(uint32_t address)
+{
+    uint16_t instructionWord = Platform_MemRead16((const uint16_t*)address);
+    if (Platform_WasMemoryFaultEncountered())
+    {
+        __throw_and_return(memFaultException, 0);
+    }
+    return instructionWord;
+}
+
+static bool isInstruction32Bit(uint16_t firstWordOfInstruction)
+{
+    uint16_t maskedOffUpper5BitsOfWord = firstWordOfInstruction & 0xF800;
+
+    // 32-bit instructions start with 0b11101, 0b11110, 0b11111 according to page A5-152 of the
+    // ARMv7-M Architecture Manual.
+    return !!(maskedOffUpper5BitsOfWord == 0xE800 ||
+              maskedOffUpper5BitsOfWord == 0xF000 ||
+              maskedOffUpper5BitsOfWord == 0xF800);
+}
+
+__throws void Platform_ClearHardwareBreakpointOfGdbKind(uint32_t address, uint32_t kind)
+{
+    bool is32BitInstruction = false;
+    __try
+    {
+        is32BitInstruction = doesKindIndicate32BitInstruction(kind);
+    }
+    __catch
+    {
+        __rethrow;
+    }
+
+    disableFPBBreakpointComparator(address, is32BitInstruction);
+}
+
+static uint32_t disableFPBBreakpointComparator(uint32_t breakpointAddress, bool is32BitInstruction)
+{
+    uint32_t existingFPBBreakpoint = findFPBBreakpointComparator(breakpointAddress, is32BitInstruction);
+    if (existingFPBBreakpoint != 0)
+    {
+        clearFPBComparator(existingFPBBreakpoint);
+    }
+
+    return existingFPBBreakpoint;
+}
+
+__throws void Platform_ClearHardwareBreakpoint(uint32_t address)
+{
+    uint16_t  firstInstructionWord;
+
+     __try
+    {
+        firstInstructionWord = throwingMemRead16(address);
+    }
+    __catch
+        __rethrow;
+
+    disableFPBBreakpointComparator(address, isInstruction32Bit(firstInstructionWord));
+}
+
+
+
+
+// *********************************************************************************************************************
+// Routines called by the MRI core to set and clear breakpoints and watch points.
+// *********************************************************************************************************************
+__throws void Platform_SetHardwareWatchpoint(uint32_t address, uint32_t size,  PlatformWatchpointType type)
+{
+}
+
+__throws void Platform_ClearHardwareWatchpoint(uint32_t address, uint32_t size,  PlatformWatchpointType type)
 {
 }
 
@@ -1034,32 +1420,6 @@ uint32_t Platform_GetDeviceMemoryMapXmlSize(void)
 const char* Platform_GetDeviceMemoryMapXml(void)
 {
     return g_memoryMapXml;
-}
-
-
-
-__throws void Platform_SetHardwareBreakpointOfGdbKind(uint32_t address, uint32_t kind)
-{
-}
-
-__throws void Platform_SetHardwareBreakpoint(uint32_t address)
-{
-}
-
-__throws void Platform_ClearHardwareBreakpointOfGdbKind(uint32_t address, uint32_t kind)
-{
-}
-
-__throws void Platform_ClearHardwareBreakpoint(uint32_t address)
-{
-}
-
-__throws void Platform_SetHardwareWatchpoint(uint32_t address, uint32_t size,  PlatformWatchpointType type)
-{
-}
-
-__throws void Platform_ClearHardwareWatchpoint(uint32_t address, uint32_t size,  PlatformWatchpointType type)
-{
 }
 
 
