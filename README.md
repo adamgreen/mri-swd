@@ -3,7 +3,7 @@
 MRI-SWD is debug hardware which allows the [GNU debugger](https://www.sourceware.org/gdb/), GDB, to debug Cortex-M based microcontrollers via the SWD debug port.
 
 ## Important Notes
-* __[5/4/2023]:__ This GitHub repository is just a placeholder for now. The code found within is just me getting basic SWD and gdb communications up and running. It only supports read/writing of memory and CPU registers at this time. I will plumb in more of the actual debug abilities over the upcoming weeks.
+* __[5/6/2023]:__ This GitHub repository is just a placeholder for now. The code found within is just me getting basic SWD and gdb communications up and running. It only supports basic GDB commands at this time. I will plumb in more of the actual debug abilities over the upcoming weeks.
 * The initial goal is to just be able to debug and program the  dual core [RP2040 microcontroller](https://www.raspberrypi.com/products/rp2040/). I will add other microcontrollers in the future. For example, I have an nRF52 based development board sitting just next to the [Pico](https://www.raspberrypi.com/products/raspberry-pi-pico/) so it will get some testing as well.
 * The initial target for this mri-swd firmware is to run on the low cost [Pico W](https://www.adafruit.com/product/5526) using its WiFi capabilities to wirelessly communicate with GDB. No intermediate program like OpenOCD will be required since the mri remote debug stub functionality will be running on the Pico W itself.
 
