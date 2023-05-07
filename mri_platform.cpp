@@ -1000,6 +1000,7 @@ __throws void Platform_SetHardwareBreakpointOfGdbKind(uint32_t address, uint32_t
     {
         __throw(exceededHardwareResourcesException);
     }
+    logInfoF("Hardware breakpoint set at address 0x%08lX.", address);
 }
 
 static bool doesKindIndicate32BitInstruction(uint32_t kind)
@@ -1258,9 +1259,9 @@ __throws void Platform_SetHardwareBreakpoint(uint32_t address)
     uint32_t FPBBreakpointComparator = enableFPBBreakpoint(address, isInstruction32Bit(firstInstructionWord));
     if (FPBBreakpointComparator == 0)
     {
-        logInfoF("Failed to set breakpoint at address 0x%08lX.", address);
         __throw(exceededHardwareResourcesException);
     }
+    logInfoF("Hardware breakpoint set at address 0x%08lX.", address);
 }
 
 __throws void Platform_ClearHardwareBreakpointOfGdbKind(uint32_t address, uint32_t kind)
@@ -1284,6 +1285,7 @@ static uint32_t disableFPBBreakpointComparator(uint32_t breakpointAddress, bool 
     if (existingFPBBreakpoint != 0)
     {
         clearFPBComparator(existingFPBBreakpoint);
+        logInfoF("Hardware breakpoint cleared at address 0x%08lX.", breakpointAddress);
     }
 
     return existingFPBBreakpoint;
@@ -1309,12 +1311,359 @@ __throws void Platform_ClearHardwareBreakpoint(uint32_t address)
 // *********************************************************************************************************************
 // Routines called by the MRI core to set and clear breakpoints and watch points.
 // *********************************************************************************************************************
+static uint32_t convertWatchpointTypeToCortexMType(PlatformWatchpointType type);
+static bool isValidDWTComparatorSetting(uint32_t watchpointAddress,
+                                       uint32_t watchpointSize,
+                                       uint32_t watchpointType);
+static bool isValidDWTComparatorSize(uint32_t watchpointSize);
+static bool isPowerOf2(uint32_t value);
+static bool isValidDWTComparatorAddress(uint32_t watchpointAddress, uint32_t watchpointSize);
+static bool isAddressAlignedToSize(uint32_t address, uint32_t size);
+static bool isValidDWTComparatorType(uint32_t watchpointType);
+static uint32_t enableDWTWatchpoint(uint32_t watchpointAddress,
+                                    uint32_t watchpointSize,
+                                    uint32_t watchpointType);
+static uint32_t findDWTComparator(uint32_t watchpointAddress,
+                                  uint32_t watchpointSize,
+                                  uint32_t watchpointType);
+static bool doesDWTComparatorMatch(uint32_t comparatorAddress,
+                                   uint32_t address,
+                                   uint32_t size,
+                                   uint32_t function);
+static bool doesDWTComparatorFunctionMatch(uint32_t comparatorAddress, uint32_t function);
+static uint32_t maskOffDWTFunctionBits(uint32_t functionValue);
+static bool doesDWTComparatorAddressMatch(uint32_t comparatorAddress, uint32_t address);
+static bool doesDWTComparatorMaskMatch(uint32_t comparatorAddress, uint32_t size);
+static uint32_t calculateLog2(uint32_t value);
+static uint32_t findFreeDWTComparator();
+static bool isDWTComparatorFree(uint32_t comparatorAddress);
+static bool attemptToSetDWTComparator(uint32_t comparatorAddress,
+                                      uint32_t watchpointAddress,
+                                      uint32_t watchpointSize,
+                                      uint32_t watchpointType);
+static bool attemptToSetDWTComparatorMask(uint32_t comparatorAddress, uint32_t watchpointSize);
+static uint32_t disableDWTWatchpoint(uint32_t watchpointAddress,
+                                     uint32_t watchpointSize,
+                                     uint32_t watchpointType);
+
+
 __throws void Platform_SetHardwareWatchpoint(uint32_t address, uint32_t size,  PlatformWatchpointType type)
 {
+    uint32_t nativeType = convertWatchpointTypeToCortexMType(type);
+    if (!isValidDWTComparatorSetting(address, size, nativeType))
+    {
+        __throw(invalidArgumentException);
+    }
+
+    uint32_t comparatorAddress = enableDWTWatchpoint(address, size, nativeType);
+    if (comparatorAddress == 0)
+    {
+        __throw(exceededHardwareResourcesException);
+    }
+    logInfoF("Hardware watchpoint set at address 0x%08lX.", address);
+}
+
+//  Selects action to be taken on match.
+//      Data Read Watchpoint
+static const uint32_t DWT_COMP_FUNCTION_FUNCTION_DATA_READ = 0x5;
+//      Data Write Watchpoint
+static const uint32_t DWT_COMP_FUNCTION_FUNCTION_DATA_WRITE = 0x6;
+//      Data Read/Write Watchpoint
+static const uint32_t DWT_COMP_FUNCTION_FUNCTION_DATA_READWRITE = 0x7;
+
+static uint32_t convertWatchpointTypeToCortexMType(PlatformWatchpointType type)
+{
+    switch (type)
+    {
+    case MRI_PLATFORM_WRITE_WATCHPOINT:
+        return DWT_COMP_FUNCTION_FUNCTION_DATA_WRITE;
+    case MRI_PLATFORM_READ_WATCHPOINT:
+        return DWT_COMP_FUNCTION_FUNCTION_DATA_READ;
+    case MRI_PLATFORM_READWRITE_WATCHPOINT:
+        return DWT_COMP_FUNCTION_FUNCTION_DATA_READWRITE;
+    default:
+        return 0;
+    }
+}
+
+static bool isValidDWTComparatorSetting(uint32_t watchpointAddress,
+                                        uint32_t watchpointSize,
+                                        uint32_t watchpointType)
+{
+    return isValidDWTComparatorSize(watchpointSize) &&
+           isValidDWTComparatorAddress(watchpointAddress, watchpointSize) &&
+           isValidDWTComparatorType(watchpointType);
+}
+
+static bool isValidDWTComparatorSize(uint32_t watchpointSize)
+{
+    return isPowerOf2(watchpointSize);
+}
+
+static bool isPowerOf2(uint32_t value)
+{
+    return (value & (value - 1)) == 0;
+}
+
+static bool isValidDWTComparatorAddress(uint32_t watchpointAddress, uint32_t watchpointSize)
+{
+    return isAddressAlignedToSize(watchpointAddress, watchpointSize);
+}
+
+static bool isAddressAlignedToSize(uint32_t address, uint32_t size)
+{
+    uint32_t addressMask = ~(size - 1);
+    return address == (address & addressMask);
+}
+
+static bool isValidDWTComparatorType(uint32_t watchpointType)
+{
+    return (watchpointType == DWT_COMP_FUNCTION_FUNCTION_DATA_READ) ||
+           (watchpointType == DWT_COMP_FUNCTION_FUNCTION_DATA_WRITE) ||
+           (watchpointType == DWT_COMP_FUNCTION_FUNCTION_DATA_READWRITE);
+}
+
+static uint32_t enableDWTWatchpoint(uint32_t watchpointAddress,
+                                    uint32_t watchpointSize,
+                                    uint32_t watchpointType)
+{
+    uint32_t comparatorAddress = findDWTComparator(watchpointAddress, watchpointSize, watchpointType);
+    if (comparatorAddress != 0)
+    {
+        // This watchpoint has already been set so return a pointer to it.
+        return comparatorAddress;
+    }
+
+    comparatorAddress = findFreeDWTComparator();
+    if (comparatorAddress == 0)
+    {
+        // There are no free comparators left.
+        logInfoF("No free hardware watchpoints for setting watchpoint at address 0x%08lX.", watchpointAddress);
+        return 0;
+    }
+
+    if (!attemptToSetDWTComparator(comparatorAddress, watchpointAddress, watchpointSize, watchpointType))
+    {
+        // Failed set due to the size being larger than supported by CPU.
+        logInfoF("Failed to set watchpoint at address 0x%08lX of size %lu bytes.", watchpointAddress, watchpointSize);
+        return 0;
+    }
+
+    // Successfully configured a free comparator for this watchpoint.
+    return comparatorAddress;
+}
+
+static const uint32_t DWT_COMP_ARRAY = 0xE0001020;
+
+static uint32_t findDWTComparator(uint32_t watchpointAddress,
+                                  uint32_t watchpointSize,
+                                  uint32_t watchpointType)
+{
+    uint32_t currentComparatorAddress = DWT_COMP_ARRAY;
+    uint32_t comparatorCount = getDWTComparatorCount();
+    for (uint32_t i = 0 ; i < comparatorCount ; i++)
+    {
+        if (doesDWTComparatorMatch(currentComparatorAddress, watchpointAddress, watchpointSize, watchpointType))
+        {
+            return currentComparatorAddress;
+        }
+
+        currentComparatorAddress += sizeof(DWT_COMP_Type);
+    }
+
+    // Return NULL if no DWT comparator is already enabled for this watchpoint.
+    return 0;
+}
+
+static bool doesDWTComparatorMatch(uint32_t comparatorAddress,
+                                   uint32_t address,
+                                   uint32_t size,
+                                   uint32_t function)
+{
+    return doesDWTComparatorFunctionMatch(comparatorAddress, function) &&
+           doesDWTComparatorAddressMatch(comparatorAddress, address) &&
+           doesDWTComparatorMaskMatch(comparatorAddress, size);
+}
+
+static bool doesDWTComparatorFunctionMatch(uint32_t comparatorAddress, uint32_t function)
+{
+    uint32_t functionValue = 0;
+    if (!g_swd.readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, function), &functionValue, sizeof(functionValue), SWD::TRANSFER_32BIT))
+    {
+        logError("Failed to read DWT function register.");
+        return false;
+    }
+    uint32_t importantFunctionBits = maskOffDWTFunctionBits(functionValue);
+
+    return importantFunctionBits == function;
+}
+
+//  Selects action to be taken on match.
+static const uint32_t DWT_COMP_FUNCTION_FUNCTION_Mask = 0xF;
+
+static uint32_t maskOffDWTFunctionBits(uint32_t functionValue)
+{
+    // Data Watchpoint and Trace Comparator Function Bits.
+    //  Data Address Linked Index 1.
+    const uint32_t DWT_COMP_FUNCTION_DATAVADDR1_Bit = 0xF << 16;
+    //  Data Address Linked Index 0.
+    const uint32_t DWT_COMP_FUNCTION_DATAVADDR0_Bit = 0xF << 12;
+    //  Selects size for data value matches.
+    const uint32_t DWT_COMP_FUNCTION_DATAVSIZE_Mask = 3 << 10;
+    //  Data Value Match.  Set to 0 for address compare and 1 for data value compare.
+    const uint32_t DWT_COMP_FUNCTION_DATAVMATCH_Bit = 1 << 8;
+    //  Cycle Count Match.  Set to 1 for enabling cycle count match and 0 otherwise.  Only valid on comparator 0.
+    const uint32_t DWT_COMP_FUNCTION_CYCMATCH_Bit = 1 << 7;
+    //  Enable Data Trace Address offset packets.  0 to disable.
+    const uint32_t DWT_COMP_FUNCTION_EMITRANGE_Bit = 1 << 5;
+
+    return functionValue & (DWT_COMP_FUNCTION_DATAVADDR1_Bit |
+                            DWT_COMP_FUNCTION_DATAVADDR0_Bit |
+                            DWT_COMP_FUNCTION_DATAVSIZE_Mask |
+                            DWT_COMP_FUNCTION_DATAVMATCH_Bit |
+                            DWT_COMP_FUNCTION_CYCMATCH_Bit |
+                            DWT_COMP_FUNCTION_EMITRANGE_Bit |
+                            DWT_COMP_FUNCTION_FUNCTION_Mask);
+
+}
+
+static bool doesDWTComparatorAddressMatch(uint32_t comparatorAddress, uint32_t address)
+{
+    uint32_t compValue = 0;
+    if (!g_swd.readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, comp), &compValue, sizeof(compValue), SWD::TRANSFER_32BIT))
+    {
+        logError("Failed to read DWT comparator register.");
+        return false;
+    }
+    return compValue == address;
+}
+
+static bool doesDWTComparatorMaskMatch(uint32_t comparatorAddress, uint32_t size)
+{
+    uint32_t maskValue = 0;
+    if (!g_swd.readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, mask), &maskValue, sizeof(maskValue), SWD::TRANSFER_32BIT))
+    {
+        logError("Failed to read DWT mask register.");
+        return false;
+    }
+    return maskValue == calculateLog2(size);
+}
+
+static uint32_t calculateLog2(uint32_t value)
+{
+    uint32_t log2 = 0;
+
+    while (value > 1)
+    {
+        value >>= 1;
+        log2++;
+    }
+
+    return log2;
+}
+
+static uint32_t findFreeDWTComparator()
+{
+    uint32_t currentComparatorAddress = DWT_COMP_ARRAY;
+    uint32_t comparatorCount = getDWTComparatorCount();
+    for (uint32_t i = 0 ; i < comparatorCount ; i++)
+    {
+        if (isDWTComparatorFree(currentComparatorAddress))
+        {
+            return currentComparatorAddress;
+        }
+        currentComparatorAddress += sizeof(DWT_COMP_Type);
+    }
+
+    // Return NULL if there are no free DWT comparators.
+    return 0;
+}
+
+static bool isDWTComparatorFree(uint32_t comparatorAddress)
+{
+    //  Selects action to be taken on match.
+    //      Disabled
+    const uint32_t DWT_COMP_FUNCTION_FUNCTION_DISABLED = 0x0;
+
+    uint32_t functionValue = 0;
+    if (!g_swd.readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, function), &functionValue, sizeof(functionValue), SWD::TRANSFER_32BIT))
+    {
+        logError("Failed to read DWT function register.");
+        return false;
+    }
+    return (functionValue & DWT_COMP_FUNCTION_FUNCTION_Mask) == DWT_COMP_FUNCTION_FUNCTION_DISABLED;
+}
+
+static bool attemptToSetDWTComparator(uint32_t comparatorAddress,
+                                      uint32_t watchpointAddress,
+                                      uint32_t watchpointSize,
+                                      uint32_t watchpointType)
+{
+    if (!attemptToSetDWTComparatorMask(comparatorAddress, watchpointSize))
+    {
+        logErrorF("Failed to set DWT mask register to a size of %lu bytes.", watchpointSize);
+        return false;
+    }
+    if (!g_swd.writeTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, comp), &watchpointAddress, sizeof(watchpointAddress), SWD::TRANSFER_32BIT))
+    {
+        logError("Failed to write DWT comparator register.");
+        return false;
+    }
+    if (!g_swd.writeTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, function), &watchpointType, sizeof(watchpointType), SWD::TRANSFER_32BIT))
+    {
+        logError("Failed to write DWT function register.");
+        return false;
+    }
+    return true;
+}
+
+static bool attemptToSetDWTComparatorMask(uint32_t comparatorAddress, uint32_t watchpointSize)
+{
+    uint32_t maskBitCount;
+
+    maskBitCount = calculateLog2(watchpointSize);
+    if (!g_swd.writeTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, mask), &maskBitCount, sizeof(maskBitCount), SWD::TRANSFER_32BIT))
+    {
+        logError("Failed to write DWT mask register.");
+        return false;
+    }
+
+    // Processor may limit number of bits to be masked off so check.
+    uint32_t maskValue = 0;
+    if (!g_swd.readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, mask), &maskValue, sizeof(maskValue), SWD::TRANSFER_32BIT))
+    {
+        logError("Failed to read DWT mask register.");
+        return false;
+    }
+    return maskValue == maskBitCount;
 }
 
 __throws void Platform_ClearHardwareWatchpoint(uint32_t address, uint32_t size,  PlatformWatchpointType type)
 {
+    uint32_t nativeType = convertWatchpointTypeToCortexMType(type);
+
+    if (!isValidDWTComparatorSetting(address, size, nativeType))
+    {
+        __throw(invalidArgumentException);
+    }
+
+    disableDWTWatchpoint(address, size, nativeType);
+}
+
+static uint32_t disableDWTWatchpoint(uint32_t watchpointAddress,
+                                     uint32_t watchpointSize,
+                                     uint32_t watchpointType)
+{
+    uint32_t comparatorAddress = findDWTComparator(watchpointAddress, watchpointSize, watchpointType);
+    if (comparatorAddress == 0)
+    {
+        // This watchpoint not set so return NULL.
+        return 0;
+    }
+
+    logInfoF("Hardware watchpoint cleared at address 0x%08lX.", watchpointAddress);
+    clearDWTComparator(comparatorAddress);
+    return comparatorAddress;
 }
 
 
