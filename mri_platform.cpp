@@ -483,11 +483,11 @@ struct DWT_COMP_Type
 static void enableWatchpointBreakpointAndVectorCatchSupport();
 static void enableDWTandVectorCatches();
 static void initDWT();
-static void clearDWTComparators();
+static uint32_t clearDWTComparators();
 static uint32_t getDWTComparatorCount();
 static void clearDWTComparator(uint32_t comparatorAddress);
 static void initFPB();
-static void clearFPBComparators();
+static uint32_t clearFPBComparators();
 static uint32_t getFPBCodeComparatorCount();
 static uint32_t readFPControlRegister();
 static uint32_t getFPBLiteralComparatorCount();
@@ -559,10 +559,11 @@ static void enableDWTandVectorCatches()
 
 static void initDWT()
 {
-    clearDWTComparators();
+    uint32_t watchpointCount = clearDWTComparators();
+    logInfoF("CPU supports %lu hardware watchpoints.", watchpointCount);
 }
 
-static void clearDWTComparators()
+static uint32_t clearDWTComparators()
 {
     uint32_t DWT_COMP_Address = 0xE0001020;
     uint32_t comparatorCount = getDWTComparatorCount();
@@ -571,6 +572,7 @@ static void clearDWTComparators()
         clearDWTComparator(DWT_COMP_Address);
         DWT_COMP_Address += sizeof(DWT_COMP_Type);
     }
+    return comparatorCount;
 }
 
 static uint32_t getDWTComparatorCount()
@@ -619,11 +621,12 @@ static void clearDWTComparator(uint32_t comparatorAddress)
 
 static void initFPB()
 {
-    clearFPBComparators();
+    uint32_t breakpointCount = clearFPBComparators();
+    logInfoF("CPU supports %lu hardware breakpoints.", breakpointCount);
     enableFPB();
 }
 
-static void clearFPBComparators()
+static uint32_t clearFPBComparators()
 {
     uint32_t currentComparatorAddress = 0xE0002008;
     uint32_t codeComparatorCount = getFPBCodeComparatorCount();
@@ -634,6 +637,7 @@ static void clearFPBComparators()
         clearFPBComparator(currentComparatorAddress);
         currentComparatorAddress += sizeof(uint32_t);
     }
+    return codeComparatorCount;
 }
 
 static uint32_t getFPBCodeComparatorCount()
