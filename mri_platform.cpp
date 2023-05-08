@@ -29,6 +29,7 @@ extern "C"
     #include <core/mri.h>
     #include <core/platforms.h>
     #include <core/semihost.h>
+    #include <core/signal.h>
 }
 
 
@@ -38,7 +39,7 @@ static uint32_t  g_originalPC;
 static bool      g_wasStopFromGDB = false;
 static bool      g_wasMemoryExceptionEncountered = false;
 static bool      g_isSingleSteppingEnabled = false;
-
+static PlatformTrapReason g_trapReason;
 
 // The number of special registers (msp, psp, primask, basepri, faultmask, and control) is 6.
 static const uint32_t specialRegisterCount = 6;
@@ -367,10 +368,11 @@ static bool writeCpuRegister(uint32_t registerIndex, uint32_t value)
     return true;
 }
 
+static const uint32_t DHCSR_C_STEP_Bit = 1 << 2;
+static const uint32_t DHCSR_C_MASKINTS_Bit = 1 << 3;
+
 static void enableSingleSteppingIfNeeded()
 {
-    const uint32_t DHCSR_C_STEP_Bit = 1 << 2;
-    const uint32_t DHCSR_C_MASKINTS_Bit = 1 << 3;
     const uint32_t bitsToEnableSingleStepWithInterruptsDisabled = DHCSR_C_STEP_Bit | DHCSR_C_MASKINTS_Bit;
     uint32_t DHCSR_Val = 0;
 
@@ -478,8 +480,8 @@ struct DWT_COMP_Type
 
 // Forward declarations for functions used by Platform_Init() to initialize the data watchpoint (DWT) and code
 // breakpoint units (called BP on ARMv6M and FPB on ARMv7M) on Cortex-M devices.
-static void configureDWTandFPB();
-static void enableDWTandITM();
+static void enableWatchpointBreakpointAndVectorCatchSupport();
+static void enableDWTandVectorCatches();
 static void initDWT();
 static void clearDWTComparators();
 static uint32_t getDWTComparatorCount();
@@ -498,22 +500,46 @@ static void enableHaltingDebug();
 void Platform_Init(Token* pParameterTokens)
 {
     // UNDONE: I probably need to perform this for each core in a dual core system.
-    configureDWTandFPB();
+    enableWatchpointBreakpointAndVectorCatchSupport();
     enableHaltingDebug();
 }
 
-static void configureDWTandFPB()
+static void enableWatchpointBreakpointAndVectorCatchSupport()
 {
-    enableDWTandITM();
+    enableDWTandVectorCatches();
     initDWT();
     initFPB();
 }
 
-static void enableDWTandITM()
+static void enableDWTandVectorCatches()
 {
+    // Debug Exception and Monitor Control Register, DEMCR
+    const uint32_t DEMCR_Address = 0xE000EDFC;
     // DEMCR_DWTENA is the name on ARMv6M and it is called TRCENA on ARMv7M.
     const uint32_t DEMCR_DWTENA_Bit = 1 << 24;
-    const uint32_t DEMCR_Address = 0xE000EDFC;
+    // Enable Halting debug trap on a HardFault exception.
+    const uint32_t DEMCR_VC_HARDERR_Bit = 1 << 10;
+    // Enable Halting debug trap on a fault occurring during exception entry or exception return.
+    const uint32_t DEMCR_VC_INTERR_Bit = 1 << 9;
+    // Enable Halting debug trap on a BusFault exception.
+    const uint32_t DEMCR_VC_BUSERR_Bit = 1 << 8;
+    // Enable Halting debug trap on a UsageFault exception caused by a state information error, for example an
+    // Undefined Instruction exception.
+    const uint32_t DEMCR_VC_STATERR_Bit = 1 << 7;
+    // Enable Halting debug trap on a UsageFault exception caused by a checking error, for example an alignment
+    // check error.
+    const uint32_t DEMCR_VC_CHKERR_Bit = 1 << 6;
+    // Enable Halting debug trap on a UsageFault caused by an access to a coprocessor.
+    const uint32_t DEMCR_VC_NOCPERR_Bit = 1 << 5;
+    // Enable Halting debug trap on a MemManage exception.
+    const uint32_t DEMCR_VC_MMERR_Bit = 1 << 4;
+    // Enable Reset Vector Catch. This causes a Local reset to halt a running system.
+    const uint32_t DEMCR_VC_CORERESET_Bit = 1 << 0;
+    // Catch all of the vectors.
+    const uint32_t allVectorCatchBits = DEMCR_VC_HARDERR_Bit | DEMCR_VC_INTERR_Bit | DEMCR_VC_BUSERR_Bit |
+                                        DEMCR_VC_STATERR_Bit | DEMCR_VC_CHKERR_Bit | DEMCR_VC_NOCPERR_Bit |
+                                        DEMCR_VC_MMERR_Bit | DEMCR_VC_CORERESET_Bit;
+
     uint32_t DEMCR_Value = 0;
 
     if (!g_swd.readTargetMemory(DEMCR_Address, &DEMCR_Value, sizeof(DEMCR_Value), SWD::TRANSFER_32BIT))
@@ -522,11 +548,11 @@ static void enableDWTandITM()
         return;
     }
 
-    DEMCR_Value |= DEMCR_DWTENA_Bit;
+    DEMCR_Value |= DEMCR_DWTENA_Bit | allVectorCatchBits;
 
     if (!g_swd.writeTargetMemory(DEMCR_Address, &DEMCR_Value, sizeof(DEMCR_Value), SWD::TRANSFER_32BIT))
     {
-        logError("Failed to set DWTENA/TRCENA bit in DEMCR register.");
+        logError("Failed to set DWTENA/TRCENA and vector catch bits in DEMCR register.");
         return;
     }
 }
@@ -560,6 +586,9 @@ static uint32_t getDWTComparatorCount()
     return (DWT_CTRL_Value >> 28) & 0xF;
 }
 
+//  Selects action to be taken on match.
+static const uint32_t DWT_COMP_FUNCTION_FUNCTION_Mask = 0xF;
+
 static void clearDWTComparator(uint32_t comparatorAddress)
 {
     //  Matched.  Read-only.  Set to 1 to indicate that this comparator has been matched.  Cleared on read.
@@ -568,8 +597,6 @@ static void clearDWTComparator(uint32_t comparatorAddress)
     const uint32_t DWT_COMP_FUNCTION_CYCMATCH_Bit = 1 << 7;
     //  Enable Data Trace Address offset packets.  0 to disable.
     const uint32_t DWT_COMP_FUNCTION_EMITRANGE_Bit = 1 << 5;
-    //  Selects action to be taken on match.
-    const uint32_t DWT_COMP_FUNCTION_FUNCTION_Mask = 0xF;
     DWT_COMP_Type dwtComp;
 
     if (!g_swd.readTargetMemory(comparatorAddress, &dwtComp, 3*sizeof(uint32_t), SWD::TRANSFER_32BIT))
@@ -691,17 +718,167 @@ static void enableHaltingDebug()
 // *********************************************************************************************************************
 // Routines called by the MRI core each time the CPU is halted and resumed.
 // *********************************************************************************************************************
+static PlatformTrapReason cacheTrapReason(void);
+static bool readDFSR(uint32_t* pDFSR);
+static PlatformTrapReason findMatchedWatchpoint(void);
+static PlatformTrapReason getReasonFromMatchComparator(uint32_t comparatorAddress, uint32_t function);
+static void clearDFSR();
+static bool writeDFSR(uint32_t dfsr);
+
+
 void Platform_EnteringDebugger(void)
 {
     g_wasMemoryExceptionEncountered = false;
     g_originalPC = Platform_GetProgramCounter();
     Platform_DisableSingleStep();
+    g_trapReason = cacheTrapReason();
 }
+
+// Debug Fault Status Register, DFSR
+static const uint32_t DFSR_Address = 0xE000ED30;
+// Indicates an asynchronous debug event generated because of EDBGRQ being asserted.
+static const uint32_t DFSR_EXTERNAL_Bit = 1 << 4;
+// Indicates whether a vector catch debug event was generated.
+static const uint32_t DFSR_VCATCH_Bit = 1 << 3;
+// Indicates a debug event generated by the DWT.
+static const uint32_t DFSR_DWTTRAP_Bit = 1 << 2;
+// Indicates a debug event generated by a BKPT instruction or breakpoint match in the DWT.
+static const uint32_t DFSR_BKPT_Bit = 1 << 1;
+// Indicates a debug event generated by a C_HALT or C_STEP request, triggered by a write to the DHCSR.
+static const uint32_t DFSR_HALTED_Bit = 1 << 0;
+
+static PlatformTrapReason cacheTrapReason(void)
+{
+    PlatformTrapReason reason = { MRI_PLATFORM_TRAP_TYPE_UNKNOWN, 0x00000000 };
+    uint32_t debugFaultStatus = 0;
+    if (!readDFSR(&debugFaultStatus))
+    {
+        return reason;
+    }
+
+    if (debugFaultStatus & DFSR_BKPT_Bit)
+    {
+        /* Was caused by hardware or software breakpoint. If PC points to BKPT then report as software breakpoint. */
+        if (Platform_TypeOfCurrentInstruction() == MRI_PLATFORM_INSTRUCTION_HARDCODED_BREAKPOINT)
+            reason.type = MRI_PLATFORM_TRAP_TYPE_SWBREAK;
+        else
+            reason.type = MRI_PLATFORM_TRAP_TYPE_HWBREAK;
+    }
+    else if (debugFaultStatus & DFSR_DWTTRAP_Bit)
+    {
+        reason = findMatchedWatchpoint();
+    }
+    return reason;
+}
+
+static bool readDFSR(uint32_t* pDFSR)
+{
+    if (!g_swd.readTargetMemory(DFSR_Address, pDFSR, sizeof(*pDFSR), SWD::TRANSFER_32BIT))
+    {
+        logError("Failed to read DFSR.");
+        return false;
+    }
+    return true;
+}
+
+// Base address of the DWT comp register array.
+static const uint32_t DWT_COMP_ARRAY = 0xE0001020;
+
+//  Matched.  Read-only.  Set to 1 to indicate that this comparator has been matched.  Cleared on read.
+static const uint32_t DWT_COMP_FUNCTION_MATCHED = 1 << 24;
+
+static PlatformTrapReason findMatchedWatchpoint(void)
+{
+    PlatformTrapReason reason = { MRI_PLATFORM_TRAP_TYPE_UNKNOWN, 0x00000000 };
+    uint32_t currentComparatorAddress = DWT_COMP_ARRAY;
+    uint32_t comparatorCount = getDWTComparatorCount();
+    for (uint32_t i = 0 ; i < comparatorCount ; i++)
+    {
+        uint32_t function = 0;
+        if (!g_swd.readTargetMemory(currentComparatorAddress + offsetof(DWT_COMP_Type, function), &function, sizeof(function), SWD::TRANSFER_32BIT))
+        {
+            logError("Failed to read DWT function register.");
+            return reason;
+        }
+        if (function & DWT_COMP_FUNCTION_MATCHED)
+        {
+            reason = getReasonFromMatchComparator(currentComparatorAddress, function);
+        }
+        currentComparatorAddress += sizeof(DWT_COMP_Type);
+    }
+    return reason;
+}
+
+//  Selects action to be taken on match.
+//      Data Read Watchpoint
+static const uint32_t DWT_COMP_FUNCTION_FUNCTION_DATA_READ = 0x5;
+//      Data Write Watchpoint
+static const uint32_t DWT_COMP_FUNCTION_FUNCTION_DATA_WRITE = 0x6;
+//      Data Read/Write Watchpoint
+static const uint32_t DWT_COMP_FUNCTION_FUNCTION_DATA_READWRITE = 0x7;
+
+static PlatformTrapReason getReasonFromMatchComparator(uint32_t comparatorAddress, uint32_t function)
+{
+    PlatformTrapReason reason = { MRI_PLATFORM_TRAP_TYPE_UNKNOWN, 0x00000000 };
+    switch (function & DWT_COMP_FUNCTION_FUNCTION_Mask)
+    {
+    case DWT_COMP_FUNCTION_FUNCTION_DATA_READ:
+        reason.type = MRI_PLATFORM_TRAP_TYPE_RWATCH;
+        break;
+    case DWT_COMP_FUNCTION_FUNCTION_DATA_WRITE:
+        reason.type = MRI_PLATFORM_TRAP_TYPE_WATCH;
+        break;
+    case DWT_COMP_FUNCTION_FUNCTION_DATA_READWRITE:
+        reason.type = MRI_PLATFORM_TRAP_TYPE_AWATCH;
+        break;
+    default:
+        reason.type = MRI_PLATFORM_TRAP_TYPE_UNKNOWN;
+        break;
+    }
+
+    uint32_t compValue = 0;
+    if (!g_swd.readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, comp), &compValue, sizeof(compValue), SWD::TRANSFER_32BIT))
+    {
+        logError("Failed to read DWT comp register.");
+        return reason;
+    }
+    reason.address = compValue;
+
+    return reason;
+}
+
 
 void Platform_LeavingDebugger(void)
 {
     g_wasStopFromGDB = false;
+    clearDFSR();
 }
+
+static void clearDFSR()
+{
+    uint32_t dfsr = 0;
+    if (!readDFSR(&dfsr))
+    {
+        logError("Failed to read DFSR to clear it.");
+        return;
+    }
+    if (!writeDFSR(dfsr))
+    {
+        logError("Failed to write DFSR to clear it.");
+        return;
+    }
+}
+
+static bool writeDFSR(uint32_t dfsr)
+{
+    if (!g_swd.writeTargetMemory(DFSR_Address, &dfsr, sizeof(dfsr), SWD::TRANSFER_32BIT))
+    {
+        logError("Failed to write to DFSR.");
+        return false;
+    }
+    return true;
+}
+
 
 
 
@@ -1363,14 +1540,6 @@ __throws void Platform_SetHardwareWatchpoint(uint32_t address, uint32_t size,  P
     logInfoF("Hardware watchpoint set at address 0x%08lX.", address);
 }
 
-//  Selects action to be taken on match.
-//      Data Read Watchpoint
-static const uint32_t DWT_COMP_FUNCTION_FUNCTION_DATA_READ = 0x5;
-//      Data Write Watchpoint
-static const uint32_t DWT_COMP_FUNCTION_FUNCTION_DATA_WRITE = 0x6;
-//      Data Read/Write Watchpoint
-static const uint32_t DWT_COMP_FUNCTION_FUNCTION_DATA_READWRITE = 0x7;
-
 static uint32_t convertWatchpointTypeToCortexMType(PlatformWatchpointType type)
 {
     switch (type)
@@ -1453,8 +1622,6 @@ static uint32_t enableDWTWatchpoint(uint32_t watchpointAddress,
     return comparatorAddress;
 }
 
-static const uint32_t DWT_COMP_ARRAY = 0xE0001020;
-
 static uint32_t findDWTComparator(uint32_t watchpointAddress,
                                   uint32_t watchpointSize,
                                   uint32_t watchpointType)
@@ -1497,9 +1664,6 @@ static bool doesDWTComparatorFunctionMatch(uint32_t comparatorAddress, uint32_t 
 
     return importantFunctionBits == function;
 }
-
-//  Selects action to be taken on match.
-static const uint32_t DWT_COMP_FUNCTION_FUNCTION_Mask = 0xF;
 
 static uint32_t maskOffDWTFunctionBits(uint32_t functionValue)
 {
@@ -1668,28 +1832,123 @@ static uint32_t disableDWTWatchpoint(uint32_t watchpointAddress,
 
 
 
-
-uint32_t Platform_HandleGDBCommand(Buffer* pBuffer)
-{
-    // UNDONE: Can remove this if we don't end up using it but I think we will for FLASH loading.
-    return 0;
-}
-
+// *********************************************************************************************************************
+// Routines called by the MRI core when dealing with exception/fault causes.
+// *********************************************************************************************************************
+// Looks like this could be 9 bits on ARMv7-M or 6 bits on ARMv6-M. User the smaller count here.
+static const uint32_t IPSR_Mask = (1 << 6) - 1;
 
 
 uint8_t Platform_DetermineCauseOfException(void)
 {
-    return 0;
+    uint32_t DFSR_Value = 0;
+    if (!g_swd.readTargetMemory(DFSR_Address, &DFSR_Value, sizeof(DFSR_Value), SWD::TRANSFER_32BIT))
+    {
+        logError("Failed to read DFSR register.");
+        // NOTE: Catch all signal will be SIGSTOP.
+        return SIGSTOP;
+    }
+
+    // If VCATCH bit is set then look at CPSR to determine which exception handler was caught.
+    if (DFSR_Value & DFSR_VCATCH_Bit)
+    {
+        uint32_t exceptionNumber = Context_Get(&g_context, CPSR) & IPSR_Mask;
+        switch(exceptionNumber)
+        {
+        case 2:
+            // NMI
+            logInfo("Exception caught: NMI.");
+            return SIGINT;
+        case 3:
+            // HardFault
+            logInfo("Exception caught: Hard Fault.");
+            return SIGSEGV;
+        case 4:
+            // MemManage
+            logInfo("Exception caught: Mem Manage.");
+            return SIGSEGV;
+        case 5:
+            // BusFault
+            logInfo("Exception caught: Bus Fault.");
+            return SIGBUS;
+        case 6:
+            // UsageFault
+            logInfo("Exception caught: Usage Fault.");
+            return SIGILL;
+        default:
+            // NOTE: Catch all signal for a vector/interrupt catch will be SIGINT.
+            logInfo("Exception caught: Unknown.");
+            return SIGINT;
+        }
+    }
+
+    // Check the other bits in the DFSR if VCATCH wasn't set.
+    if (DFSR_Value & DFSR_EXTERNAL_Bit)
+    {
+        logInfo("Debug event caught: External.");
+        return SIGSTOP;
+    }
+    else if (DFSR_Value & DFSR_DWTTRAP_Bit)
+    {
+        logInfo("Debug event caught: Watchpoint.");
+        return SIGTRAP;
+    }
+    else if (DFSR_Value & DFSR_BKPT_Bit)
+    {
+        logInfo("Debug event caught: Breakpoint.");
+        return SIGTRAP;
+    }
+    else if (DFSR_Value & DFSR_HALTED_Bit)
+    {
+        uint32_t DHCSR_Value = 0;
+        readDHCSR(&DHCSR_Value);
+        if (DHCSR_Value & DHCSR_C_STEP_Bit)
+        {
+            logInfo("Debug event caught: Single Step.");
+            return SIGTRAP;
+        }
+        logInfo("Debug event caught: Halted.");
+        return SIGINT;
+    }
+
+    // NOTE: Default catch all signal is SIGSTOP.
+    logInfo("Debug event caught: Unknown.");
+    return SIGSTOP;
 }
 
 PlatformTrapReason Platform_GetTrapReason(void)
 {
-    PlatformTrapReason reason = { MRI_PLATFORM_TRAP_TYPE_UNKNOWN, 0 };
-    return reason;
+    return g_trapReason;
 }
 
 void Platform_DisplayFaultCauseToGdbConsole(void)
 {
+    // UNDONE: Nothing to do on ARMv6-M since these registers belong to ARMv7-M.
+#ifdef UNDONE
+    uint32_t exceptionNumber = Context_Get(&g_context, CPSR) & IPSR_Mask;
+    switch (exceptionNumber)
+    {
+    case 3:
+        /* HardFault */
+        displayHardFaultCauseToGdbConsole();
+        break;
+    case 4:
+        /* MemManage */
+        displayMemFaultCauseToGdbConsole();
+        break;
+    case 5:
+        /* BusFault */
+        displayBusFaultCauseToGdbConsole();
+        break;
+    case 6:
+        /* UsageFault */
+        displayUsageFaultCauseToGdbConsole();
+        break;
+    default:
+        return;
+    }
+    WriteStringToGdbConsole("\n");
+#endif // UNDONE
 }
 
 
@@ -1865,6 +2124,15 @@ void Platform_SetSemihostCallReturnAndErrnoValues(int returnValue, int errNo)
 
 void Platform_ResetDevice(void)
 {
+}
+
+
+
+
+uint32_t Platform_HandleGDBCommand(Buffer* pBuffer)
+{
+    // UNDONE: Can remove this if we don't end up using it but I think we will for FLASH loading.
+    return 0;
 }
 
 
