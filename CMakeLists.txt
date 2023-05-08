@@ -84,7 +84,6 @@ target_sources(mri-swd PRIVATE
     mri/core/context.c
     mri/core/gdb_console.c
     mri/core/libc.c
-    mri/core/memory.c
     mri/core/mri.c
     mri/core/packet.c
     mri/core/token.c

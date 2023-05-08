@@ -30,6 +30,7 @@ extern "C"
     #include <core/platforms.h>
     #include <core/semihost.h>
     #include <core/signal.h>
+    #include <core/memory.h>
 }
 
 
@@ -898,7 +899,7 @@ static bool writeDFSR(uint32_t dfsr)
 //      = 1 + 2 * 4 * 56 + 4 = 453
 // *********************************************************************************************************************
 // UNDONE: Should I make this larger to maybe improve FLASHing performance?
-static char g_packetBuffer[512];
+static char g_packetBuffer[PACKET_SIZE];
 
 char* Platform_GetPacketBuffer(void)
 {
@@ -1033,6 +1034,276 @@ int Platform_WasMemoryFaultEncountered()
 void Platform_SyncICacheToDCache(void *pv, uint32_t size)
 {
     // UNDONE: Implement and test on Portenta-H7.
+}
+
+
+
+
+// *********************************************************************************************************************
+// Routines called by the MRI core to read and write memory on the target device.
+// Replaces routines from memory.c to make them faster.
+// *********************************************************************************************************************
+// UNDONE: Be aware that the TAR read in calculateTransferCount() might return 0 once it goes past the end of valid memory.
+static uint32_t readMemoryBytesIntoHexBuffer(Buffer* pBuffer, const void*  pvMemory, uint32_t readByteCount);
+static uint32_t readMemoryHalfWordIntoHexBuffer(Buffer* pBuffer, const void*  pvMemory);
+static int isNotHalfWordAligned(const void* pvMemory);
+static uint32_t readMemoryWordIntoHexBuffer(Buffer* pBuffer, const void* pvMemory);
+static int isWordAligned(uint32_t value);
+uint32_t ReadMemoryIntoHexBuffer(Buffer* pBuffer, const void* pvMemory, uint32_t readByteCount)
+{
+    switch (readByteCount)
+    {
+    case 2:
+        return readMemoryHalfWordIntoHexBuffer(pBuffer, pvMemory);
+    case 4:
+        return readMemoryWordIntoHexBuffer(pBuffer, pvMemory);
+    default:
+        return readMemoryBytesIntoHexBuffer(pBuffer, pvMemory, readByteCount);
+    }
+}
+
+static uint32_t readMemoryBytesIntoHexBuffer(Buffer* pBuffer, const void*  pvMemory, uint32_t readByteCount)
+{
+    // Hex digit buffer is twice the size of binary buffer.
+    uint8_t  buffer[PACKET_SIZE/2];
+    assert ( readByteCount <= count_of(buffer) );
+    if (readByteCount > count_of(buffer))
+    {
+        readByteCount = count_of(buffer);
+    }
+
+    uint32_t bytesRead = 0;
+    if (isWordAligned(readByteCount) && isWordAligned((uint32_t)pvMemory))
+    {
+        bytesRead = g_swd.readTargetMemory((uint32_t)pvMemory, buffer, readByteCount, SWD::TRANSFER_32BIT);
+    }
+    else
+    {
+        bytesRead = g_swd.readTargetMemory((uint32_t)pvMemory, buffer, readByteCount, SWD::TRANSFER_8BIT);
+    }
+    writeBytesToBufferAsHex(pBuffer, buffer, bytesRead);
+
+    return bytesRead;
+}
+
+static uint32_t readMemoryHalfWordIntoHexBuffer(Buffer* pBuffer, const void* pvMemory)
+{
+    uint16_t value;
+
+    if (isNotHalfWordAligned(pvMemory))
+        return readMemoryBytesIntoHexBuffer(pBuffer, pvMemory, 2);
+
+    value = Platform_MemRead16(pvMemory);
+    if (Platform_WasMemoryFaultEncountered())
+        return 0;
+    writeBytesToBufferAsHex(pBuffer, &value, sizeof(value));
+
+    return sizeof(value);
+}
+
+static int isNotHalfWordAligned(const void* pvMemory)
+{
+    return (size_t)pvMemory & 1;
+}
+
+static uint32_t readMemoryWordIntoHexBuffer(Buffer* pBuffer, const void* pvMemory)
+{
+    uint32_t value;
+
+    if (!isWordAligned((uint32_t)pvMemory))
+        return readMemoryBytesIntoHexBuffer(pBuffer, pvMemory, 4);
+
+    value = Platform_MemRead32(pvMemory);
+    if (Platform_WasMemoryFaultEncountered())
+        return 0;
+    writeBytesToBufferAsHex(pBuffer, &value, sizeof(value));
+
+    return sizeof(value);
+}
+
+static int isWordAligned(uint32_t value)
+{
+    return (value & 3) == 0;
+}
+
+
+static int writeHexBufferToByteMemory(Buffer* pBuffer, void* pvMemory, uint32_t writeByteCount);
+static int writeHexBufferToHalfWordMemory(Buffer* pBuffer, void* pvMemory);
+static int readBytesFromHexBuffer(Buffer* pBuffer, void* pv, size_t length);
+static int writeHexBufferToWordMemory(Buffer* pBuffer, void* pvMemory);
+int WriteHexBufferToMemory(Buffer* pBuffer, void* pvMemory, uint32_t writeByteCount)
+{
+    switch (writeByteCount)
+    {
+    case 2:
+        return writeHexBufferToHalfWordMemory(pBuffer, pvMemory);
+    case 4:
+        return writeHexBufferToWordMemory(pBuffer, pvMemory);
+    default:
+        return writeHexBufferToByteMemory(pBuffer, pvMemory, writeByteCount);
+    }
+}
+
+static int writeHexBufferToByteMemory(Buffer* pBuffer, void* pvMemory, uint32_t writeByteCount)
+{
+    // Hex digit buffer is twice the size of binary buffer.
+    uint8_t  buffer[PACKET_SIZE/2];
+    assert ( writeByteCount <= count_of(buffer) );
+    if (writeByteCount > count_of(buffer))
+    {
+        writeByteCount = count_of(buffer);
+    }
+    if (readBytesFromHexBuffer(pBuffer, buffer, writeByteCount) == 0)
+    {
+        return 0;
+    }
+
+    uint32_t bytesWritten = 0;
+    if (isWordAligned(writeByteCount) && isWordAligned((uint32_t)pvMemory))
+    {
+        bytesWritten = g_swd.writeTargetMemory((uint32_t)pvMemory, buffer, writeByteCount, SWD::TRANSFER_32BIT);
+    }
+    else
+    {
+        bytesWritten = g_swd.writeTargetMemory((uint32_t)pvMemory, buffer, writeByteCount, SWD::TRANSFER_8BIT);
+    }
+
+    return bytesWritten;
+}
+
+static int writeHexBufferToHalfWordMemory(Buffer* pBuffer, void* pvMemory)
+{
+    uint16_t value;
+
+    if (isNotHalfWordAligned(pvMemory))
+        return writeHexBufferToByteMemory(pBuffer, pvMemory, 2);
+
+    if (!readBytesFromHexBuffer(pBuffer, &value, sizeof(value)))
+        return 0;
+
+    Platform_MemWrite16(pvMemory, value);
+    if (Platform_WasMemoryFaultEncountered())
+        return 0;
+
+    return 1;
+}
+
+static int readBytesFromHexBuffer(Buffer* pBuffer, void* pv, size_t length)
+{
+    uint8_t* pBytes = (uint8_t*)pv;
+    while (length--)
+    {
+        __try
+            *pBytes++ = Buffer_ReadByteAsHex(pBuffer);
+        __catch
+            __rethrow_and_return(0);
+    }
+    return 1;
+}
+
+static int writeHexBufferToWordMemory(Buffer* pBuffer, void* pvMemory)
+{
+    uint32_t value;
+
+    if (!isWordAligned((uint32_t)pvMemory))
+        return writeHexBufferToByteMemory(pBuffer, pvMemory, 4);
+
+    if (!readBytesFromHexBuffer(pBuffer, &value, sizeof(value)))
+        return 0;
+
+    Platform_MemWrite32(pvMemory, value);
+    if (Platform_WasMemoryFaultEncountered())
+        return 0;
+
+    return 1;
+}
+
+
+static int  writeBinaryBufferToByteMemory(Buffer*  pBuffer, void* pvMemory, uint32_t writeByteCount);
+static int  writeBinaryBufferToHalfWordMemory(Buffer* pBuffer, void* pvMemory);
+static int readBytesFromBinaryBuffer(Buffer*  pBuffer, void* pvMemory, uint32_t writeByteCount);
+static int  writeBinaryBufferToWordMemory(Buffer* pBuffer, void* pvMemory);
+int WriteBinaryBufferToMemory(Buffer* pBuffer, void* pvMemory, uint32_t writeByteCount)
+{
+    switch (writeByteCount)
+    {
+    case 2:
+        return writeBinaryBufferToHalfWordMemory(pBuffer, pvMemory);
+    case 4:
+        return writeBinaryBufferToWordMemory(pBuffer, pvMemory);
+    default:
+        return writeBinaryBufferToByteMemory(pBuffer, pvMemory, writeByteCount);
+    }
+}
+
+static int writeBinaryBufferToByteMemory(Buffer*  pBuffer, void* pvMemory, uint32_t writeByteCount)
+{
+    uint8_t* p = (uint8_t*) pvMemory;
+
+    while (writeByteCount-- > 0)
+    {
+        char currChar;
+
+        __try
+            currChar = Buffer_ReadChar(pBuffer);
+        __catch
+            __rethrow_and_return(0);
+
+        Platform_MemWrite8(p++, (uint8_t)currChar);
+        if (Platform_WasMemoryFaultEncountered())
+            return 0;
+    }
+
+    return 1;
+}
+
+static int writeBinaryBufferToHalfWordMemory(Buffer* pBuffer, void* pvMemory)
+{
+    uint16_t value;
+
+    if (isNotHalfWordAligned(pvMemory))
+        return writeBinaryBufferToByteMemory(pBuffer, pvMemory, 2);
+
+    if (!readBytesFromBinaryBuffer(pBuffer, &value, sizeof(value)))
+        return 0;
+
+    Platform_MemWrite16(pvMemory, value);
+    if (Platform_WasMemoryFaultEncountered())
+        return 0;
+
+    return 1;
+}
+
+static int readBytesFromBinaryBuffer(Buffer*  pBuffer, void* pvMemory, uint32_t writeByteCount)
+{
+    uint8_t* p = (uint8_t*) pvMemory;
+
+    while (writeByteCount-- > 0)
+    {
+        __try
+            *p++ = Buffer_ReadChar(pBuffer);
+        __catch
+            __rethrow_and_return(0);
+    }
+
+    return 1;
+}
+
+static int writeBinaryBufferToWordMemory(Buffer* pBuffer, void* pvMemory)
+{
+    uint32_t value;
+
+    if (!isWordAligned((uint32_t)pvMemory))
+        return writeBinaryBufferToByteMemory(pBuffer, pvMemory, 4);
+
+    if (!readBytesFromBinaryBuffer(pBuffer, &value, sizeof(value)))
+        return 0;
+
+    Platform_MemWrite32(pvMemory, value);
+    if (Platform_WasMemoryFaultEncountered())
+        return 0;
+
+    return 1;
 }
 
 

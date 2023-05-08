@@ -45,4 +45,16 @@
 #define LOGGING_GDB_SOCKET_ERROR_ENABLED 1
 #define LOGGING_GDB_SOCKET_DEBUG_ENABLED 0
 
+
+// Size of the packet buffer to use for communicating with GDB.
+// Must be large enough to contain a 'G' packet sent from GDB to update all of the CPU registers in the context at once.
+// This is:
+//      1 (byte for 'G' itself) +
+//        [ 2 (text hex digits per byte) *
+//          4 (bytes per 32-bit word) *
+//          56 (registers store in context for CPU w/ FPU) ] +
+//      4 (bytes for packet overhead of '$', '#', and 2 hex digit checksum)
+//      = 1 + 2 * 4 * 56 + 4 = 453
+#define PACKET_SIZE (2 * 1024)
+
 #endif // CONFIG_H_
