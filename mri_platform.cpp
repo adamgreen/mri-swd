@@ -34,14 +34,6 @@ extern "C"
 }
 
 
-static SWD       g_swd;
-static GDBSocket g_gdbSocket;
-static uint32_t  g_originalPC;
-static bool      g_wasStopFromGDB = false;
-static bool      g_wasMemoryExceptionEncountered = false;
-static bool      g_isSingleSteppingEnabled = false;
-static PlatformTrapReason g_trapReason;
-
 // The number of special registers (msp, psp, primask, basepri, faultmask, and control) is 6.
 static const uint32_t specialRegisterCount = 6;
 // The number of integer registers (R0-R12,SP,LR,PC,XPSR) is 17.
@@ -75,12 +67,22 @@ static ContextSection g_contextEntriesNoFPU = { .pValues = &g_contextRegisters[0
 static ContextSection g_contextEntriesFPU = { .pValues = &g_contextRegisters[0], .count = registerCountFPU };
 static MriContext     g_context;
 
+static SWD       g_swd;
+static GDBSocket g_gdbSocket;
+static uint32_t  g_originalPC;
+static bool      g_wasStopFromGDB = false;
+static bool      g_wasMemoryExceptionEncountered = false;
+static bool      g_isSingleSteppingEnabled = false;
+static bool      g_isResetting = false;
+static PlatformTrapReason g_trapReason;
+
 
 // Forward Function Declarations.
 static bool initSWD();
 static void requestCpuToHalt();
 static bool readDHCSR(uint32_t* pValue);
 static bool writeDHCSR(uint32_t DHCSR_Value);
+static bool isDeviceResetting(uint32_t DHCSR_Value);
 static bool hasCpuHalted(uint32_t DHCSR_Val);
 static void saveContext();
 static bool readCpuRegister(uint32_t registerIndex, uint32_t* pValue);
@@ -135,17 +137,31 @@ void mainDebuggerLoop()
         {
             continue;
         }
-        // UNDONE: Should check the reset, sleep, lockup, retire bits in the DHCSR as well.
 
-        if (hasCpuHalted(DHCSR_Val))
+        if (isDeviceResetting(DHCSR_Val))
+        {
+            logInfo("Device RESET detected.");
+            g_isResetting = false;
+            continue;
+        }
+        // UNDONE: Should check the sleep, lockup, retire bits in the DHCSR as well.
+
+        if (!g_isResetting && hasCpuHalted(DHCSR_Val))
         {
             logInfo("CPU has halted.");
             saveContext();
             mriDebugException(&g_context);
-            restoreContext();
-            enableSingleSteppingIfNeeded();
-            requestCpuToResume();
-            logInfoF("CPU execution has been resumed. %s", g_isSingleSteppingEnabled ? "Single stepping enabled." : "");
+            if (g_isResetting)
+            {
+                logInfo("GDB has requested device reset.");
+            }
+            else
+            {
+                restoreContext();
+                enableSingleSteppingIfNeeded();
+                requestCpuToResume();
+                logInfoF("CPU execution has been resumed. %s", g_isSingleSteppingEnabled ? "Single stepping enabled." : "");
+            }
         }
     }
 }
@@ -227,6 +243,13 @@ static bool writeDHCSR(uint32_t DHCSR_Value)
     DHCSR_Value = (DHCSR_Value & ~DHCSR_DBGKEY_Mask) | DHCSR_DBGKEY;
 
     return g_swd.writeTargetMemory(DHCSR_Address, &DHCSR_Value, sizeof(DHCSR_Value), SWD::TRANSFER_32BIT);
+}
+
+static bool isDeviceResetting(uint32_t DHCSR_Value)
+{
+    const uint32_t S_RESET_ST_Bit = 1 << 25;
+
+    return !!(DHCSR_Value & S_RESET_ST_Bit);
 }
 
 static bool hasCpuHalted(uint32_t DHCSR_Val)
@@ -2228,6 +2251,9 @@ void Platform_DisplayFaultCauseToGdbConsole(void)
 
 
 
+// *********************************************************************************************************************
+// Routines called by the MRI core to retrieve the XML describing the CPU's register context.
+// *********************************************************************************************************************
 /* NOTE: This is the original version of the following XML which has had things stripped to reduce the amount of
          FLASH consumed by the debug monitor.  This includes the removal of the copyright comment.
 <?xml version="1.0"?>
@@ -2356,6 +2382,9 @@ const char* mriPlatform_GetTargetXml(void)
 
 
 
+// *********************************************************************************************************************
+// Routines called by the MRI core to retrieve the XML describing the CPU's memory layout.
+// *********************************************************************************************************************
 // UNDONE: This is the RP2040 memory layout.
 static const char g_memoryMapXml[] = "<?xml version=\"1.0\"?>"
                                      "<!DOCTYPE memory-map PUBLIC \"+//IDN gnu.org//DTD GDB Memory Map V1.0//EN\" \"http://sourceware.org/gdb/gdb-memory-map.dtd\">"
@@ -2378,6 +2407,36 @@ const char* Platform_GetDeviceMemoryMapXml(void)
 
 
 
+// *********************************************************************************************************************
+// Routines called by the MRI core to reset the device.
+// *********************************************************************************************************************
+// UNDONE: May want to override and do this earlier since the MRI core does it after trying to restart the device.
+void Platform_ResetDevice(void)
+{
+    const uint32_t AIRCR_Address = 0xE000ED0C;
+    const uint32_t AIRCR_KEY_Shift = 16;
+    const uint32_t AIRCR_KEY_Mask = 0xFFFF << AIRCR_KEY_Shift;
+    const uint32_t AIRCR_KEY_VALUE = 0x05FA << AIRCR_KEY_Shift;
+    const uint32_t AIRCR_SYSRESETREQ_Bit = 1 << 2;
+    uint32_t AIRCR_Value = 0;
+    if (!g_swd.readTargetMemory(AIRCR_Address, &AIRCR_Value, sizeof(AIRCR_Value), SWD::TRANSFER_32BIT))
+    {
+        logError("Failed to read AIRCR register for device reset.");
+    }
+
+    // Clear out the existing key value and use the special ones to enable writes.
+    // Then set the SYSRESETREQ bit to request a device reset.
+    AIRCR_Value = (AIRCR_Value & ~AIRCR_KEY_Mask) | AIRCR_KEY_VALUE | AIRCR_SYSRESETREQ_Bit;
+
+    if (!g_swd.writeTargetMemory(AIRCR_Address, &AIRCR_Value, sizeof(AIRCR_Value), SWD::TRANSFER_32BIT))
+    {
+        logError("Failed to write AIRCR register for device reset.");
+    }
+    g_isResetting = true;
+}
+
+
+
 PlatformInstructionType Platform_TypeOfCurrentInstruction(void)
 {
     return MRI_PLATFORM_INSTRUCTION_OTHER;
@@ -2392,12 +2451,6 @@ PlatformSemihostParameters Platform_GetSemihostCallParameters(void)
 }
 
 void Platform_SetSemihostCallReturnAndErrnoValues(int returnValue, int errNo)
-{
-}
-
-
-
-void Platform_ResetDevice(void)
 {
 }
 
