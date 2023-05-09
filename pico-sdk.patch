@@ -1,0 +1,18 @@
+--- a/src/rp2_common/pico_async_context/async_context_threadsafe_background.c
++++ b/src/rp2_common/pico_async_context/async_context_threadsafe_background.c
+@@ -94,13 +94,14 @@ typedef struct sync_func_call{
+     uint32_t rc;
+ } sync_func_call_t;
+
++#if ASYNC_CONTEXT_THREADSAFE_BACKGROUND_MULTI_CORE
+ static void handle_sync_func_call(async_context_t *context, async_when_pending_worker_t *worker) {
+     sync_func_call_t *call = (sync_func_call_t *)worker;
+     call->rc = call->func(call->param);
+     sem_release(&call->sem);
+     async_context_remove_when_pending_worker(context, worker);
+ }
+-
++#endif // ASYNC_CONTEXT_THREADSAFE_BACKGROUND_MULTI_CORE
+
+ static void lock_release(async_context_threadsafe_background_t *self) {
+     bool outermost = 1 == recursive_mutex_enter_count(&self->lock_mutex);

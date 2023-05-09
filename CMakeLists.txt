@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.26)
 if (PICO_SDK_PATH_OVERRIDE)
     set(PICO_SDK_PATH ${PICO_SDK_PATH_OVERRIDE})
 else()
-    file(REAL_PATH ../pico-sdk PICO_SDK_PATH BASE_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}")
+    file(REAL_PATH pico-sdk PICO_SDK_PATH BASE_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}")
 endif()
 
 # Pull in SDK (must be before project)
