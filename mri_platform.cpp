@@ -96,10 +96,6 @@ static void requestCpuToResume();
 
 void mainDebuggerLoop()
 {
-gpio_init_mask(7 << 2);
-gpio_clr_mask(7 << 2);
-gpio_set_dir_out_masked(7 << 2);
-
     // UNDONE: Need to handle clock rates other than 24MHz.
     bool wasSwdInitSuccessful = initSWD();
     if (!wasSwdInitSuccessful)
@@ -1091,7 +1087,6 @@ uint32_t ReadMemoryIntoHexBuffer(Buffer* pBuffer, const void* pvMemory, uint32_t
 static uint32_t readMemoryBytesIntoHexBuffer(Buffer* pBuffer, const void*  pvMemory, uint32_t readByteCount)
 {
     // Hex digit buffer is twice the size of binary buffer.
-gpio_set_mask(1 << 3);
     uint8_t  buffer[PACKET_SIZE/2];
     assert ( readByteCount <= count_of(buffer) );
     if (readByteCount > count_of(buffer))
@@ -1109,7 +1104,6 @@ gpio_set_mask(1 << 3);
         bytesRead = g_swd.readTargetMemory((uint32_t)pvMemory, buffer, readByteCount, SWD::TRANSFER_8BIT);
     }
     writeBytesToBufferAsHex(pBuffer, buffer, bytesRead);
-gpio_clr_mask(1 << 3);
 
     return bytesRead;
 }

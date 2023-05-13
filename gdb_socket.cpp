@@ -132,7 +132,6 @@ err_t GDBSocket::onRecv(tcp_pcb* pPCB, pbuf* pBuf, err_t error)
         logInfo("GDB has disconnected.");
         return closeClient();
     }
-gpio_set_mask(1 << 2);
     // this method is callback from lwIP, so cyw43_arch_lwip_begin is not required, however you
     // can use this method to cause an assertion in debug mode, if this method is called when
     // cyw43_arch_lwip_begin IS needed
@@ -153,7 +152,6 @@ gpio_set_mask(1 << 2);
         tcp_recved(pPCB, pBuf->tot_len);
     }
     pbuf_free(pBuf);
-gpio_clr_mask(1 << 2);
     return ERR_OK;
 }
 
@@ -163,10 +161,6 @@ err_t GDBSocket::send(const void* pBuffer, uint16_t bufferLength)
     const uint16_t minPacketLength = 4;
     bool isPacketData = bufferLength >= minPacketLength;
 
-if (isPacketData)
-{
-    gpio_set_mask(1 << 4);
-}
     logDebugF("Writing %d bytes to client", bufferLength);
     while (bufferLength > 0)
     {
@@ -214,10 +208,5 @@ err_t GDBSocket::onSent(struct tcp_pcb* pPCB, u16_t length)
 {
     logDebugF("tcp_server_sent %u bytes", length);
     atomic_u32_sub(&m_bytesInFlight, length);
-
-if (m_bytesInFlight == 0)
-{
-    gpio_clr_mask(1 << 4);
-}
     return ERR_OK;
 }
