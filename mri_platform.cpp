@@ -1063,8 +1063,7 @@ void Platform_SyncICacheToDCache(void *pv, uint32_t size)
 
 
 // *********************************************************************************************************************
-// Routines called by the MRI core to read and write memory on the target device.
-// Replaces routines from memory.c to make them faster.
+// Replacements for routines from memory.c to make them faster.
 // *********************************************************************************************************************
 // UNDONE: Be aware that the TAR read in calculateTransferCount() might return 0 once it goes past the end of valid memory.
 static uint32_t readMemoryBytesIntoHexBuffer(Buffer* pBuffer, const void*  pvMemory, uint32_t readByteCount);
@@ -1784,7 +1783,7 @@ __throws void Platform_ClearHardwareBreakpoint(uint32_t address)
 
 
 // *********************************************************************************************************************
-// Routines called by the MRI core to set and clear breakpoints and watch points.
+// Routines called by the MRI core to set and clear watch points.
 // *********************************************************************************************************************
 static uint32_t convertWatchpointTypeToCortexMType(PlatformWatchpointType type);
 static bool isValidDWTComparatorSetting(uint32_t watchpointAddress,
