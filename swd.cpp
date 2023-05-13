@@ -63,9 +63,7 @@ bool SWD::init(PIO pio, uint32_t frequency, uint32_t swclkPin, uint32_t swdioPin
     {
         return false;
     }
-
     m_pio = pio;
-    m_programOffset = pio_add_program(m_pio, &swd_program);
 
     // Find an unused state machine in the PIO to run the SWD I/O code.
     const bool panicIfNotAvailable = true;
@@ -82,6 +80,52 @@ bool SWD::init(PIO pio, uint32_t frequency, uint32_t swclkPin, uint32_t swdioPin
     m_swclkPin = swclkPin;
     m_swdioPin = swdioPin;
 
+    // Load the PIO program.
+    // If the PIO clock can be run at 4x the desired SWD frequency then 1 delay cycle will need to be added to each
+    // instruction which contains side setting of the SWCLK. Why do this? Because it allows the non-side setting
+    // instructions to run twice as fast and waste less time between actual bit read/writes.
+    uint32_t cpuFrequency = clock_get_hz(clk_sys);
+    float frequencyScale = 2.0f;
+    if (frequency <= cpuFrequency / 4)
+    {
+        // Modify program to enable 4x PIO clock rate.
+        uint16_t programInstructions[count_of(swd_program_instructions)];
+        for (size_t i = 0 ; i < count_of(swd_program_instructions) ; i++)
+        {
+            // If this bit is set in a PIO instruction then it is side setting the clock signal and should have an extra
+            // delay cycle added to allow running the PIO clock twice as fast.
+            const uint16_t optionalSideSetBit = 1 << 12;
+            // The delay bits start at this bit offset.
+            const uint32_t delayShift = 8;
+            // Asserting this value into an instruction will add 1 delay cycle.
+            const uint32_t delayOfOne = 1 << delayShift;
+
+            uint16_t instr = swd_program_instructions[i];
+            if (instr & optionalSideSetBit)
+            {
+                // Add 1 cycle of delay to this instruction before storing in RAM.
+                programInstructions[i] = instr | delayOfOne;
+            }
+            else
+            {
+                // Not side setting SWCLK so just copy as is.
+                programInstructions[i] = instr;
+            }
+        }
+
+        // Load modified program into PIO.
+        pio_program swdProgram = swd_program;
+        swdProgram.instructions = programInstructions;
+        m_programOffset = pio_add_program(m_pio, &swdProgram);
+        frequencyScale = 4.0f;
+    }
+    else
+    {
+        // Load original program into PIO.
+        m_programOffset = pio_add_program(m_pio, &swd_program);
+        frequencyScale = 2.0f;
+    }
+
     // Configure both SWDIO and SWCLK pins to be output pin controlled by PIO and default them both to be
     // output enabled. Start out with both SWDIO and SWCLK high.
     pio_sm_set_pins_with_mask(m_pio, m_stateMachine, 0xFFFFFFFF, (1 << swdioPin) | (1 << swclkPin));
@@ -93,7 +137,7 @@ bool SWD::init(PIO pio, uint32_t frequency, uint32_t swclkPin, uint32_t swdioPin
     gpio_pull_up(swclkPin);
     gpio_pull_up(swdioPin);
 
-    // Configure the state machine to run the SWD code.
+    // Fetch the default state machine configuration for running this PIO program on a state machine.
     pio_sm_config smConfig = swd_program_get_default_config(m_programOffset);
 
     // Side Set needs to be configured for the SWCLK pin.
@@ -121,8 +165,8 @@ bool SWD::init(PIO pio, uint32_t frequency, uint32_t swclkPin, uint32_t swdioPin
     // INPUT pin to SWDIO as well.
     sm_config_set_in_pins(&smConfig, swdioPin);
 
-    // Set the SWCLK frequncy by setting the PIO state machine clock divisor.
-    sm_config_set_clkdiv(&smConfig, (float)clock_get_hz(clk_sys) / ((float)frequency * 2.0f));
+    // Set the SWCLK frequency by setting the PIO state machine clock divisor.
+    sm_config_set_clkdiv(&smConfig, (float)cpuFrequency / ((float)frequency * frequencyScale));
 
     // Complete the state machine configuration.
     pio_sm_init(m_pio, m_stateMachine, m_programOffset, &smConfig);
