@@ -159,24 +159,47 @@ err_t GDBSocket::send(const void* pBuffer, uint16_t bufferLength)
 {
     // Minimum packet is $#00
     const uint16_t minPacketLength = 4;
-    // UNDONE: Should call tcp_sndbuf() to figure out maximum data to send.
+    bool isPacketData = bufferLength >= minPacketLength;
+
     logDebugF("Writing %d bytes to client", bufferLength);
-    cyw43_arch_lwip_begin();
-        err_t error = tcp_write(m_pClientPCB, pBuffer, bufferLength, TCP_WRITE_FLAG_COPY);
-        if (bufferLength >= minPacketLength)
-        {
-            // Send data now if it is long enough to be a packet for which GDB is waiting.
-            // UNDONE: Just ignoring errors for now.
-            tcp_output(m_pClientPCB);
-        }
-    cyw43_arch_lwip_end();
-    if (error != ERR_OK)
+    while (bufferLength > 0)
     {
-        logErrorF("Failed call to tcp_write(m_pClientPCB, 0x%08lX, %u, TCP_WRITE_FLAG_COPY)", pBuffer, bufferLength);
-        // UNDONE: Might not want to call close on this error path.
-        return closeClient();
+        cyw43_arch_lwip_begin();
+            err_t error = ERR_OK;
+            uint32_t maxBytesToSend = tcp_sndbuf(m_pClientPCB);
+            logDebugF("tcp_sndbuf() returned %lu", maxBytesToSend);
+            if (maxBytesToSend > 0)
+            {
+                bool outputNow = false;
+                uint32_t bytesToSend = bufferLength;
+                if (bytesToSend > maxBytesToSend)
+                {
+                    bytesToSend = maxBytesToSend;
+                    outputNow = true;
+                }
+
+                error = tcp_write(m_pClientPCB, pBuffer, bytesToSend, TCP_WRITE_FLAG_COPY);
+                if (error == ERR_OK)
+                {
+                    atomic_u32_add(&m_bytesInFlight, bytesToSend);
+                    bufferLength -= bytesToSend;
+                    pBuffer = (const uint8_t*)pBuffer + bytesToSend;
+                    if (outputNow || (bufferLength == 0 && isPacketData))
+                    {
+                        // Send data now if it is long enough to be a packet for which GDB is waiting.
+                        // UNDONE: Just ignoring errors for now.
+                        tcp_output(m_pClientPCB);
+                    }
+                }
+            }
+        cyw43_arch_lwip_end();
+
+        if (error != ERR_OK)
+        {
+            logErrorF("Failed call to tcp_write(m_pClientPCB, 0x%08lX, %u, TCP_WRITE_FLAG_COPY) with error %d", pBuffer, bufferLength, error);
+            return error;
+        }
     }
-    atomic_u32_add(&m_bytesInFlight, bufferLength);
 
     return ERR_OK;
 }

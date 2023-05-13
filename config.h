@@ -41,7 +41,7 @@
 #define LOGGING_PLATFORM_ERROR_ENABLED 1
 #define LOGGING_PLATFORM_DEBUG_ENABLED 1
 
-// platform.cpp logging
+// gdb_socket.cpp logging
 #define LOGGING_GDB_SOCKET_ERROR_ENABLED 1
 #define LOGGING_GDB_SOCKET_DEBUG_ENABLED 0
 
@@ -55,6 +55,8 @@
 //          56 (registers store in context for CPU w/ FPU) ] +
 //      4 (bytes for packet overhead of '$', '#', and 2 hex digit checksum)
 //      = 1 + 2 * 4 * 56 + 4 = 453
-#define PACKET_SIZE (2 * 1024)
+// Using (2*7k)+4 for now as that aligns the reads up to the 1k boundaries that SWD uses with the TAR but is
+// less than the 16k limit that GDB doesn't seem to like going over.
+#define PACKET_SIZE ((2 * 7 * 1024)+4)
 
 #endif // CONFIG_H_

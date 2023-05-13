@@ -1,8 +1,6 @@
 #ifndef _LWIPOPTS_EXAMPLE_COMMONH_H
 #define _LWIPOPTS_EXAMPLE_COMMONH_H
 
-#include "config.h"
-
 // Common settings used in most of the pico_w examples
 // (see https://www.nongnu.org/lwip/2_1_x/group__lwip__opts.html for details)
 
@@ -21,7 +19,7 @@
 #define MEM_LIBC_MALLOC             0
 #endif
 #define MEM_ALIGNMENT               4
-#define MEM_SIZE                    ((PACKET_SIZE * 3) / 2)
+#define MEM_SIZE                    (((14*1024)*3)/2)
 #define MEMP_NUM_TCP_SEG            50
 #define MEMP_NUM_ARP_QUEUE          10
 #define PBUF_POOL_SIZE              24

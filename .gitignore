@@ -4,5 +4,6 @@ _deps
 cmake-*
 build/
 wifi_config.cmake
+perf/perf-pc/perf-pc
 *.paint
 .DS_Store
