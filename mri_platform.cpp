@@ -174,25 +174,29 @@ static bool initSWD()
         return false;
     }
 
-    bool notDormant = false;
-    notDormant = g_swd.sendJtagToSwdSequence();
-    bool maybeDormant = !notDormant;
-    if (notDormant)
+    // Put any DPv2 targets into dormant mode. Go through this step so that we don't mistakenly activate power on
+    // something like the RP2040 Rescue DP if it managed to get itself selected during a previous debug attempt.
+    // Should be ignored by older SWD target DPs.
+    g_swd.switchJtagIntoDormantMode();
+    g_swd.switchSwdIntoDormantMode();
+
+    // Search through all known SWD DPv2 targets to see if any are found.
+    // If that fails, try detecting SWD targets which don't go dormant, after making to switch SWJ-DP targets into SWD
+    // mode.
+    if (g_swd.searchForKnownSwdTarget())
     {
-        logErrorF("Target already selected with DPIDR=0x%08lX", g_swd.getDPIDR());
+        // Have found one of the SWD DPv2 targets known by this debugger.
+        logInfoF("Found DPv2 SWD Target=0x%08X with DPIDR=0x%08lX", g_swd.getTarget(), g_swd.getDPIDR());
     }
-    else if (maybeDormant)
+    else if (g_swd.sendJtagToSwdSequence())
     {
-        bool foundTarget = g_swd.searchForKnownSwdTarget();
-        if (foundTarget)
-        {
-            logErrorF("Found target=0x%08X with DPIDR=0x%08lX", g_swd.getTarget(), g_swd.getDPIDR());
-        }
-        else
-        {
-            logError("SWD failed to switch SWD port out of dormant mode.");
-            return false;
-        }
+        // Have found a non-dormant SWD target.
+        logInfoF("Found SWD Target with DPIDR=0x%08lX", g_swd.getDPIDR());
+    }
+    else
+    {
+        logError("No SWD Targets found.");
+        return false;
     }
 
     logInfo("Initializing target's debug components...");

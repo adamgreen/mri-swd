@@ -78,6 +78,9 @@ class SWD
         // Method to place DPv2 JTAG-DP ports into dormant mode by sending special bit sequence.
         void switchJtagIntoDormantMode();
 
+        // Method to place DPv2 SWD ports into dormant mode by sending special bit sequence.
+        void switchSwdIntoDormantMode();
+
         // Method to wakeup dormant DPv2 SW-DP ports by sending special bit sequence.
         void switchSwdOutOfDormantMode();
 

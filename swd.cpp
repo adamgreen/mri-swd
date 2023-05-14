@@ -311,6 +311,24 @@ void SWD::switchJtagIntoDormantMode()
     writeAndOptionalReadPIO(dataToSend, count_of(dataToSend), NULL, 0);
 }
 
+void SWD::switchSwdIntoDormantMode()
+{
+    setBitPatternSignalMode();
+
+    const uint32_t swd2dsSelectionSequence = 0xE3BC;
+    uint32_t dataToSend[] =
+    {
+        // Need to send atleast 50 cycles with SWDIO high before sending SWD to DS sequence.
+        50-1,
+        -1UL,
+        -1UL,
+        // Send the 16-bit SWD to DS selection sequence.
+        16-1,
+        swd2dsSelectionSequence
+    };
+    writeAndOptionalReadPIO(dataToSend, count_of(dataToSend), NULL, 0);
+}
+
 bool SWD::selectSwdTarget(DPv2Targets target)
 {
     // If this target is already selected then just return.
