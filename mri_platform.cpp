@@ -79,6 +79,8 @@ static PlatformTrapReason g_trapReason;
 
 // Forward Function Declarations.
 static bool initSWD();
+static bool waitForSwdAttach(uint32_t delayBetweenAttempts_ms);
+static bool attemptSwdAttach();
 static void requestCpuToHalt();
 static bool readDHCSR(uint32_t* pValue);
 static bool writeDHCSR(uint32_t DHCSR_Value);
@@ -168,12 +170,43 @@ void mainDebuggerLoop()
 
 static bool initSWD()
 {
+    bool returnCode = false;
+
     if (!g_swd.init(24000000, SWCLK_PIN, SWDIO_PIN))
     {
         logError("Failed to initialize the SWD port.");
         return false;
     }
 
+    returnCode = attemptSwdAttach();
+    if (!returnCode)
+    {
+        returnCode = waitForSwdAttach(DELAY_BETWEEN_SWD_ATTACH_ATTEMPTS_MS);
+    }
+
+    return returnCode;
+}
+
+static bool waitForSwdAttach(uint32_t delayBetweenAttempts_ms)
+{
+    logInfo("Waiting for SWD target to be attached and powered up.");
+
+    logErrorDisable();
+    bool targetFound;
+    do
+    {
+        sleep_ms(delayBetweenAttempts_ms);
+        putchar('.'); fflush(stdout);
+        targetFound = attemptSwdAttach();
+    } while (!targetFound);
+    putchar('\n');
+    logErrorEnable();
+
+    return true;
+}
+
+static bool attemptSwdAttach()
+{
     // Put any DPv2 targets into dormant mode. Go through this step so that we don't mistakenly activate power on
     // something like the RP2040 Rescue DP if it managed to get itself selected during a previous debug attempt.
     // Should be ignored by older SWD target DPs.

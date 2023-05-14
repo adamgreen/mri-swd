@@ -28,6 +28,11 @@
 #define SWDIO_PIN 1
 
 
+// Amount of time in ms to delay between attempts to attach to a SWD target (ie. to recover from it not being powered
+// up).
+#define DELAY_BETWEEN_SWD_ATTACH_ATTEMPTS_MS 1000
+
+
 // Set each of these to 1 or 0 to enable or disable error/debug logging for each of the modules.
 // swd.cpp logging
 #define LOGGING_SWD_ERROR_ENABLED 1
