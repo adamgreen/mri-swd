@@ -31,6 +31,7 @@ extern "C"
     #include <core/semihost.h>
     #include <core/signal.h>
     #include <core/memory.h>
+    #include <core/cmd_common.h>
 }
 
 
@@ -74,6 +75,7 @@ static bool      g_wasStopFromGDB = false;
 static bool      g_wasMemoryExceptionEncountered = false;
 static bool      g_isSingleSteppingEnabled = false;
 static bool      g_isResetting = false;
+static bool      g_isInDebugger = false;
 static PlatformTrapReason g_trapReason;
 
 
@@ -85,7 +87,10 @@ static void innerDebuggerLoop();
 static void requestCpuToHalt();
 static bool readDHCSRWithRetry(uint32_t* pValue, uint32_t timeout_ms);
 static bool readDHCSR(uint32_t* pValue);
+static uint32_t readTargetMemory(uint32_t address, void* pvBuffer, uint32_t bufferSize, SWD::TransferSize readSize);
+static void handleUnrecoverableSwdError();
 static bool writeDHCSR(uint32_t DHCSR_Value);
+static uint32_t writeTargetMemory(uint32_t address, const void* pvBuffer, uint32_t bufferSize, SWD::TransferSize writeSize);
 static bool isDeviceResetting(uint32_t DHCSR_Value);
 static bool hasCpuHalted(uint32_t DHCSR_Val);
 static void saveContext();
@@ -111,6 +116,7 @@ void mainDebuggerLoop()
 
     g_isSwdConnected = false;
     g_isNetworkConnected = false;
+    g_isInDebugger = false;
     while (true)
     {
         if (!g_isSwdConnected)
@@ -252,7 +258,11 @@ static void innerDebuggerLoop()
             logInfo("CPU has halted.");
             saveContext();
             mriDebugException(&g_context);
-            if (g_isResetting)
+            if (!g_isSwdConnected)
+            {
+                continue;
+            }
+            else if (g_isResetting)
             {
                 logInfo("GDB has requested device reset.");
             }
@@ -307,12 +317,41 @@ static const uint32_t DHCSR_Address = 0xE000EDF0;
 
 static bool readDHCSR(uint32_t* pValue)
 {
-    if (!g_swd.readTargetMemory(DHCSR_Address, pValue, sizeof(*pValue), SWD::TRANSFER_32BIT))
+    if (!readTargetMemory(DHCSR_Address, pValue, sizeof(*pValue), SWD::TRANSFER_32BIT))
     {
         logError("Failed to read DHCSR register.");
         return false;
     }
     return true;
+}
+
+static uint32_t readTargetMemory(uint32_t address, void* pvBuffer, uint32_t bufferSize, SWD::TransferSize readSize)
+{
+    if (!g_isSwdConnected)
+    {
+        return 0;
+    }
+
+    uint32_t bytesRead = g_swd.readTargetMemory(address, pvBuffer, bufferSize, readSize);
+    if (bytesRead == 0 && g_swd.getLastReadWriteError() == SWD::SWD_PROTOCOL)
+    {
+        handleUnrecoverableSwdError();
+    }
+    return bytesRead;
+}
+
+static void handleUnrecoverableSwdError()
+{
+    if (!g_isInDebugger)
+    {
+        return;
+    }
+
+    logErrorF("Encountered unrecoverable read/write error %d.", g_swd.getLastReadWriteError());
+    const uint8_t emptyPacket[] = "+$#00";
+    g_gdbSocket.m_tcpToMriQueue.init();
+    g_gdbSocket.m_tcpToMriQueue.write(emptyPacket, sizeof(emptyPacket)-1);
+    g_isSwdConnected = false;
 }
 
 static bool writeDHCSR(uint32_t DHCSR_Value)
@@ -323,7 +362,22 @@ static bool writeDHCSR(uint32_t DHCSR_Value)
     const uint32_t DHCSR_DBGKEY = 0xA05F << DHCSR_DBGKEY_Shift;
     DHCSR_Value = (DHCSR_Value & ~DHCSR_DBGKEY_Mask) | DHCSR_DBGKEY;
 
-    return g_swd.writeTargetMemory(DHCSR_Address, &DHCSR_Value, sizeof(DHCSR_Value), SWD::TRANSFER_32BIT);
+    return writeTargetMemory(DHCSR_Address, &DHCSR_Value, sizeof(DHCSR_Value), SWD::TRANSFER_32BIT);
+}
+
+static uint32_t writeTargetMemory(uint32_t address, const void* pvBuffer, uint32_t bufferSize, SWD::TransferSize writeSize)
+{
+    if (!g_isSwdConnected)
+    {
+        return 0;
+    }
+
+    uint32_t bytesWritten = g_swd.writeTargetMemory(address, pvBuffer, bufferSize, writeSize);
+    if (bytesWritten == 0 && g_swd.getLastReadWriteError() == SWD::SWD_PROTOCOL)
+    {
+        handleUnrecoverableSwdError();
+    }
+    return bytesWritten;
 }
 
 static bool isDeviceResetting(uint32_t DHCSR_Value)
@@ -393,14 +447,14 @@ static uint32_t DCRDR_Address = 0xE000EDF8;
 static bool readCpuRegister(uint32_t registerIndex, uint32_t* pValue)
 {
     uint32_t DCRSR_Value = registerIndex & DCRSR_REGSEL_Mask;
-    if (!g_swd.writeTargetMemory(DCRSR_Address, &DCRSR_Value, sizeof(DCRSR_Value), SWD::TRANSFER_32BIT))
+    if (!writeTargetMemory(DCRSR_Address, &DCRSR_Value, sizeof(DCRSR_Value), SWD::TRANSFER_32BIT))
     {
         return false;
     }
 
     waitForRegisterTransferToComplete();
 
-    return g_swd.readTargetMemory(DCRDR_Address, pValue, sizeof(*pValue), SWD::TRANSFER_32BIT);
+    return readTargetMemory(DCRDR_Address, pValue, sizeof(*pValue), SWD::TRANSFER_32BIT);
 }
 
 static void waitForRegisterTransferToComplete()
@@ -457,13 +511,13 @@ static void restoreContext()
 
 static bool writeCpuRegister(uint32_t registerIndex, uint32_t value)
 {
-    if (!g_swd.writeTargetMemory(DCRDR_Address, &value, sizeof(value), SWD::TRANSFER_32BIT))
+    if (!writeTargetMemory(DCRDR_Address, &value, sizeof(value), SWD::TRANSFER_32BIT))
     {
         return false;
     }
 
     uint32_t DCRSR_Value = DCRSR_REGWnR_Bit | (registerIndex & DCRSR_REGSEL_Mask);
-    if (!g_swd.writeTargetMemory(DCRSR_Address, &DCRSR_Value, sizeof(DCRSR_Value), SWD::TRANSFER_32BIT))
+    if (!writeTargetMemory(DCRSR_Address, &DCRSR_Value, sizeof(DCRSR_Value), SWD::TRANSFER_32BIT))
     {
         return false;
     }
@@ -647,7 +701,7 @@ static void enableDWTandVectorCatches()
 
     uint32_t DEMCR_Value = 0;
 
-    if (!g_swd.readTargetMemory(DEMCR_Address, &DEMCR_Value, sizeof(DEMCR_Value), SWD::TRANSFER_32BIT))
+    if (!readTargetMemory(DEMCR_Address, &DEMCR_Value, sizeof(DEMCR_Value), SWD::TRANSFER_32BIT))
     {
         logError("Failed to read DEMCR register.");
         return;
@@ -655,7 +709,7 @@ static void enableDWTandVectorCatches()
 
     DEMCR_Value |= DEMCR_DWTENA_Bit | allVectorCatchBits;
 
-    if (!g_swd.writeTargetMemory(DEMCR_Address, &DEMCR_Value, sizeof(DEMCR_Value), SWD::TRANSFER_32BIT))
+    if (!writeTargetMemory(DEMCR_Address, &DEMCR_Value, sizeof(DEMCR_Value), SWD::TRANSFER_32BIT))
     {
         logError("Failed to set DWTENA/TRCENA and vector catch bits in DEMCR register.");
         return;
@@ -685,7 +739,7 @@ static uint32_t getDWTComparatorCount()
     uint32_t DWT_CTRL_Address = 0xE0001000;
     uint32_t DWT_CTRL_Value = 0;
 
-    if (!g_swd.readTargetMemory(DWT_CTRL_Address, &DWT_CTRL_Value, sizeof(DWT_CTRL_Value), SWD::TRANSFER_32BIT))
+    if (!readTargetMemory(DWT_CTRL_Address, &DWT_CTRL_Value, sizeof(DWT_CTRL_Value), SWD::TRANSFER_32BIT))
     {
         logError("Failed to read DWT_CTRL register.");
         return 0;
@@ -706,7 +760,7 @@ static void clearDWTComparator(uint32_t comparatorAddress)
     const uint32_t DWT_COMP_FUNCTION_EMITRANGE_Bit = 1 << 5;
     DWT_COMP_Type dwtComp;
 
-    if (!g_swd.readTargetMemory(comparatorAddress, &dwtComp, 3*sizeof(uint32_t), SWD::TRANSFER_32BIT))
+    if (!readTargetMemory(comparatorAddress, &dwtComp, 3*sizeof(uint32_t), SWD::TRANSFER_32BIT))
     {
         logError("Failed to read DWT_COMP/DWT_MASK/DWT_FUNCTION registers for clearing.");
     }
@@ -718,7 +772,7 @@ static void clearDWTComparator(uint32_t comparatorAddress)
                                      DWT_COMP_FUNCTION_EMITRANGE_Bit |
                                      DWT_COMP_FUNCTION_FUNCTION_Mask);
 
-    if (!g_swd.writeTargetMemory(comparatorAddress, &dwtComp, 3*sizeof(uint32_t), SWD::TRANSFER_32BIT))
+    if (!writeTargetMemory(comparatorAddress, &dwtComp, 3*sizeof(uint32_t), SWD::TRANSFER_32BIT))
     {
         logError("Failed to write DWT_COMP/DWT_MASK/DWT_FUNCTION registers for clearing.");
     }
@@ -764,7 +818,7 @@ static const uint32_t FP_CTRL_Address = 0xE0002000;
 static uint32_t readFPControlRegister()
 {
     uint32_t FP_CTRL_Value = 0;
-    if (!g_swd.readTargetMemory(FP_CTRL_Address, &FP_CTRL_Value, sizeof(FP_CTRL_Value), SWD::TRANSFER_32BIT))
+    if (!readTargetMemory(FP_CTRL_Address, &FP_CTRL_Value, sizeof(FP_CTRL_Value), SWD::TRANSFER_32BIT))
     {
         logError("Failed to read FP_CTRL register.");
         return 0;
@@ -785,7 +839,7 @@ static uint32_t getFPBLiteralComparatorCount()
 static void clearFPBComparator(uint32_t comparatorAddress)
 {
     uint32_t comparatorValue = 0;
-    if (!g_swd.writeTargetMemory(comparatorAddress, &comparatorValue, sizeof(comparatorValue), SWD::TRANSFER_32BIT))
+    if (!writeTargetMemory(comparatorAddress, &comparatorValue, sizeof(comparatorValue), SWD::TRANSFER_32BIT))
     {
         logError("Failed to write to FP comparator register.");
     }
@@ -805,7 +859,7 @@ static void enableFPB()
 
 static void writeFPControlRegister(uint32_t FP_CTRL_Value)
 {
-    if (!g_swd.writeTargetMemory(FP_CTRL_Address, &FP_CTRL_Value, sizeof(FP_CTRL_Value), SWD::TRANSFER_32BIT))
+    if (!writeTargetMemory(FP_CTRL_Address, &FP_CTRL_Value, sizeof(FP_CTRL_Value), SWD::TRANSFER_32BIT))
     {
         logError("Failed to write FP_CTRL register.");
     }
@@ -837,6 +891,7 @@ static bool writeDFSR(uint32_t dfsr);
 
 void Platform_EnteringDebugger(void)
 {
+    g_isInDebugger = true;
     g_wasMemoryExceptionEncountered = false;
     g_originalPC = Platform_GetProgramCounter();
     Platform_DisableSingleStep();
@@ -882,7 +937,7 @@ static PlatformTrapReason cacheTrapReason(void)
 
 static bool readDFSR(uint32_t* pDFSR)
 {
-    if (!g_swd.readTargetMemory(DFSR_Address, pDFSR, sizeof(*pDFSR), SWD::TRANSFER_32BIT))
+    if (!readTargetMemory(DFSR_Address, pDFSR, sizeof(*pDFSR), SWD::TRANSFER_32BIT))
     {
         logError("Failed to read DFSR.");
         return false;
@@ -904,7 +959,7 @@ static PlatformTrapReason findMatchedWatchpoint(void)
     for (uint32_t i = 0 ; i < comparatorCount ; i++)
     {
         uint32_t function = 0;
-        if (!g_swd.readTargetMemory(currentComparatorAddress + offsetof(DWT_COMP_Type, function), &function, sizeof(function), SWD::TRANSFER_32BIT))
+        if (!readTargetMemory(currentComparatorAddress + offsetof(DWT_COMP_Type, function), &function, sizeof(function), SWD::TRANSFER_32BIT))
         {
             logError("Failed to read DWT function register.");
             return reason;
@@ -946,7 +1001,7 @@ static PlatformTrapReason getReasonFromMatchComparator(uint32_t comparatorAddres
     }
 
     uint32_t compValue = 0;
-    if (!g_swd.readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, comp), &compValue, sizeof(compValue), SWD::TRANSFER_32BIT))
+    if (!readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, comp), &compValue, sizeof(compValue), SWD::TRANSFER_32BIT))
     {
         logError("Failed to read DWT comp register.");
         return reason;
@@ -961,6 +1016,7 @@ void Platform_LeavingDebugger(void)
 {
     g_wasStopFromGDB = false;
     clearDFSR();
+    g_isInDebugger = false;
 }
 
 static void clearDFSR()
@@ -980,7 +1036,7 @@ static void clearDFSR()
 
 static bool writeDFSR(uint32_t dfsr)
 {
-    if (!g_swd.writeTargetMemory(DFSR_Address, &dfsr, sizeof(dfsr), SWD::TRANSFER_32BIT))
+    if (!writeTargetMemory(DFSR_Address, &dfsr, sizeof(dfsr), SWD::TRANSFER_32BIT))
     {
         logError("Failed to write to DFSR.");
         return false;
@@ -1065,7 +1121,7 @@ uint32_t Platform_MemRead32(const void* pv)
 {
     g_wasMemoryExceptionEncountered = false;
     uint32_t data = 0;
-    uint32_t bytesRead = g_swd.readTargetMemory((uint32_t)pv, &data, sizeof(data), SWD::TRANSFER_32BIT);
+    uint32_t bytesRead = readTargetMemory((uint32_t)pv, &data, sizeof(data), SWD::TRANSFER_32BIT);
     if (bytesRead != sizeof(data))
     {
         g_wasMemoryExceptionEncountered = true;
@@ -1078,7 +1134,7 @@ uint16_t Platform_MemRead16(const void* pv)
 {
     g_wasMemoryExceptionEncountered = false;
     uint16_t data = 0;
-    uint32_t bytesRead = g_swd.readTargetMemory((uint32_t)pv, &data, sizeof(data), SWD::TRANSFER_16BIT);
+    uint32_t bytesRead = readTargetMemory((uint32_t)pv, &data, sizeof(data), SWD::TRANSFER_16BIT);
     if (bytesRead != sizeof(data))
     {
         g_wasMemoryExceptionEncountered = true;
@@ -1091,7 +1147,7 @@ uint8_t Platform_MemRead8(const void* pv)
 {
     g_wasMemoryExceptionEncountered = false;
     uint8_t data = 0;
-    uint32_t bytesRead = g_swd.readTargetMemory((uint32_t)pv, &data, sizeof(data), SWD::TRANSFER_8BIT);
+    uint32_t bytesRead = readTargetMemory((uint32_t)pv, &data, sizeof(data), SWD::TRANSFER_8BIT);
     if (bytesRead != sizeof(data))
     {
         g_wasMemoryExceptionEncountered = true;
@@ -1103,7 +1159,7 @@ uint8_t Platform_MemRead8(const void* pv)
 void Platform_MemWrite32(void* pv, uint32_t value)
 {
     g_wasMemoryExceptionEncountered = false;
-    uint32_t bytesWritten = g_swd.writeTargetMemory((uint32_t)pv, &value, sizeof(value), SWD::TRANSFER_32BIT);
+    uint32_t bytesWritten = writeTargetMemory((uint32_t)pv, &value, sizeof(value), SWD::TRANSFER_32BIT);
     if (bytesWritten != sizeof(value))
     {
         g_wasMemoryExceptionEncountered = true;
@@ -1113,7 +1169,7 @@ void Platform_MemWrite32(void* pv, uint32_t value)
 void Platform_MemWrite16(void* pv, uint16_t value)
 {
     g_wasMemoryExceptionEncountered = false;
-    uint32_t bytesWritten = g_swd.writeTargetMemory((uint32_t)pv, &value, sizeof(value), SWD::TRANSFER_16BIT);
+    uint32_t bytesWritten = writeTargetMemory((uint32_t)pv, &value, sizeof(value), SWD::TRANSFER_16BIT);
     if (bytesWritten != sizeof(value))
     {
         g_wasMemoryExceptionEncountered = true;
@@ -1123,7 +1179,7 @@ void Platform_MemWrite16(void* pv, uint16_t value)
 void Platform_MemWrite8(void* pv, uint8_t value)
 {
     g_wasMemoryExceptionEncountered = false;
-    uint32_t bytesWritten = g_swd.writeTargetMemory((uint32_t)pv, &value, sizeof(value), SWD::TRANSFER_8BIT);
+    uint32_t bytesWritten = writeTargetMemory((uint32_t)pv, &value, sizeof(value), SWD::TRANSFER_8BIT);
     if (bytesWritten != sizeof(value))
     {
         g_wasMemoryExceptionEncountered = true;
@@ -1178,11 +1234,11 @@ static uint32_t readMemoryBytesIntoHexBuffer(Buffer* pBuffer, const void*  pvMem
     uint32_t bytesRead = 0;
     if (isWordAligned(readByteCount) && isWordAligned((uint32_t)pvMemory))
     {
-        bytesRead = g_swd.readTargetMemory((uint32_t)pvMemory, buffer, readByteCount, SWD::TRANSFER_32BIT);
+        bytesRead = readTargetMemory((uint32_t)pvMemory, buffer, readByteCount, SWD::TRANSFER_32BIT);
     }
     else
     {
-        bytesRead = g_swd.readTargetMemory((uint32_t)pvMemory, buffer, readByteCount, SWD::TRANSFER_8BIT);
+        bytesRead = readTargetMemory((uint32_t)pvMemory, buffer, readByteCount, SWD::TRANSFER_8BIT);
     }
     writeBytesToBufferAsHex(pBuffer, buffer, bytesRead);
 
@@ -1264,11 +1320,11 @@ static int writeHexBufferToByteMemory(Buffer* pBuffer, void* pvMemory, uint32_t 
     uint32_t bytesWritten = 0;
     if (isWordAligned(writeByteCount) && isWordAligned((uint32_t)pvMemory))
     {
-        bytesWritten = g_swd.writeTargetMemory((uint32_t)pvMemory, buffer, writeByteCount, SWD::TRANSFER_32BIT);
+        bytesWritten = writeTargetMemory((uint32_t)pvMemory, buffer, writeByteCount, SWD::TRANSFER_32BIT);
     }
     else
     {
-        bytesWritten = g_swd.writeTargetMemory((uint32_t)pvMemory, buffer, writeByteCount, SWD::TRANSFER_8BIT);
+        bytesWritten = writeTargetMemory((uint32_t)pvMemory, buffer, writeByteCount, SWD::TRANSFER_8BIT);
     }
 
     return bytesWritten;
@@ -1322,6 +1378,7 @@ static int writeHexBufferToWordMemory(Buffer* pBuffer, void* pvMemory)
 }
 
 
+// UNDONE: Should be optimized like the hex version....might need this for load.
 static int  writeBinaryBufferToByteMemory(Buffer*  pBuffer, void* pvMemory, uint32_t writeByteCount);
 static int  writeBinaryBufferToHalfWordMemory(Buffer* pBuffer, void* pvMemory);
 static int readBytesFromBinaryBuffer(Buffer*  pBuffer, void* pvMemory, uint32_t writeByteCount);
@@ -1413,7 +1470,7 @@ static int writeBinaryBufferToWordMemory(Buffer* pBuffer, void* pvMemory)
 
 
 // *********************************************************************************************************************
-// Routines called by the MRI core to single stepping the CPU.
+// Routines called by the MRI core to single step the CPU.
 // These implementation just use the g_isSingleSteppingEnabled global to track the single stepping state desired by
 // the MRI core and the actual single stepping is enabled in mainDebuggerLoop() just before the CPU is taken out of
 // halt mode to resume code execution.
@@ -1590,7 +1647,7 @@ static uint32_t enableFPBBreakpoint(uint32_t breakpointAddress, bool is32BitInst
     }
 
     uint32_t comparatorValue = calculateFPBComparatorValue(breakpointAddress, is32BitInstruction);
-    if (!g_swd.writeTargetMemory(freeFPBBreakpointComparator, &comparatorValue, sizeof(comparatorValue), SWD::TRANSFER_32BIT))
+    if (!writeTargetMemory(freeFPBBreakpointComparator, &comparatorValue, sizeof(comparatorValue), SWD::TRANSFER_32BIT))
     {
         logErrorF("Failed to set breakpoint at address 0x%08lX.", breakpointAddress);
         return 0;
@@ -1608,7 +1665,7 @@ static uint32_t findFPBBreakpointComparator(uint32_t breakpointAddress, bool is3
     for (uint32_t i = 0 ; i < codeComparatorCount ; i++)
     {
         uint32_t currentComparatorValue = 0;
-        if (!g_swd.readTargetMemory(currentComparatorAddress, &currentComparatorValue, sizeof(currentComparatorValue), SWD::TRANSFER_32BIT))
+        if (!readTargetMemory(currentComparatorAddress, &currentComparatorValue, sizeof(currentComparatorValue), SWD::TRANSFER_32BIT))
         {
             logErrorF("Failed to read from FPB comparator at address 0x%08lX.", currentComparatorAddress);
             return 0;
@@ -1760,7 +1817,7 @@ static uint32_t findFreeFPBBreakpointComparator()
     for (uint32_t i = 0 ; i < codeComparatorCount ; i++)
     {
         uint32_t currentComparatorValue = 0;
-        if (!g_swd.readTargetMemory(currentComparatorAddress, &currentComparatorValue, sizeof(currentComparatorValue), SWD::TRANSFER_32BIT))
+        if (!readTargetMemory(currentComparatorAddress, &currentComparatorValue, sizeof(currentComparatorValue), SWD::TRANSFER_32BIT))
         {
             logErrorF("Failed to read from FPB comparator at address 0x%08lX.", currentComparatorAddress);
             return 0;
@@ -2033,7 +2090,7 @@ static bool doesDWTComparatorMatch(uint32_t comparatorAddress,
 static bool doesDWTComparatorFunctionMatch(uint32_t comparatorAddress, uint32_t function)
 {
     uint32_t functionValue = 0;
-    if (!g_swd.readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, function), &functionValue, sizeof(functionValue), SWD::TRANSFER_32BIT))
+    if (!readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, function), &functionValue, sizeof(functionValue), SWD::TRANSFER_32BIT))
     {
         logError("Failed to read DWT function register.");
         return false;
@@ -2072,7 +2129,7 @@ static uint32_t maskOffDWTFunctionBits(uint32_t functionValue)
 static bool doesDWTComparatorAddressMatch(uint32_t comparatorAddress, uint32_t address)
 {
     uint32_t compValue = 0;
-    if (!g_swd.readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, comp), &compValue, sizeof(compValue), SWD::TRANSFER_32BIT))
+    if (!readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, comp), &compValue, sizeof(compValue), SWD::TRANSFER_32BIT))
     {
         logError("Failed to read DWT comparator register.");
         return false;
@@ -2083,7 +2140,7 @@ static bool doesDWTComparatorAddressMatch(uint32_t comparatorAddress, uint32_t a
 static bool doesDWTComparatorMaskMatch(uint32_t comparatorAddress, uint32_t size)
 {
     uint32_t maskValue = 0;
-    if (!g_swd.readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, mask), &maskValue, sizeof(maskValue), SWD::TRANSFER_32BIT))
+    if (!readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, mask), &maskValue, sizeof(maskValue), SWD::TRANSFER_32BIT))
     {
         logError("Failed to read DWT mask register.");
         return false;
@@ -2128,7 +2185,7 @@ static bool isDWTComparatorFree(uint32_t comparatorAddress)
     const uint32_t DWT_COMP_FUNCTION_FUNCTION_DISABLED = 0x0;
 
     uint32_t functionValue = 0;
-    if (!g_swd.readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, function), &functionValue, sizeof(functionValue), SWD::TRANSFER_32BIT))
+    if (!readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, function), &functionValue, sizeof(functionValue), SWD::TRANSFER_32BIT))
     {
         logError("Failed to read DWT function register.");
         return false;
@@ -2146,12 +2203,12 @@ static bool attemptToSetDWTComparator(uint32_t comparatorAddress,
         logErrorF("Failed to set DWT mask register to a size of %lu bytes.", watchpointSize);
         return false;
     }
-    if (!g_swd.writeTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, comp), &watchpointAddress, sizeof(watchpointAddress), SWD::TRANSFER_32BIT))
+    if (!writeTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, comp), &watchpointAddress, sizeof(watchpointAddress), SWD::TRANSFER_32BIT))
     {
         logError("Failed to write DWT comparator register.");
         return false;
     }
-    if (!g_swd.writeTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, function), &watchpointType, sizeof(watchpointType), SWD::TRANSFER_32BIT))
+    if (!writeTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, function), &watchpointType, sizeof(watchpointType), SWD::TRANSFER_32BIT))
     {
         logError("Failed to write DWT function register.");
         return false;
@@ -2164,7 +2221,7 @@ static bool attemptToSetDWTComparatorMask(uint32_t comparatorAddress, uint32_t w
     uint32_t maskBitCount;
 
     maskBitCount = calculateLog2(watchpointSize);
-    if (!g_swd.writeTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, mask), &maskBitCount, sizeof(maskBitCount), SWD::TRANSFER_32BIT))
+    if (!writeTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, mask), &maskBitCount, sizeof(maskBitCount), SWD::TRANSFER_32BIT))
     {
         logError("Failed to write DWT mask register.");
         return false;
@@ -2172,7 +2229,7 @@ static bool attemptToSetDWTComparatorMask(uint32_t comparatorAddress, uint32_t w
 
     // Processor may limit number of bits to be masked off so check.
     uint32_t maskValue = 0;
-    if (!g_swd.readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, mask), &maskValue, sizeof(maskValue), SWD::TRANSFER_32BIT))
+    if (!readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, mask), &maskValue, sizeof(maskValue), SWD::TRANSFER_32BIT))
     {
         logError("Failed to read DWT mask register.");
         return false;
@@ -2220,7 +2277,7 @@ static const uint32_t IPSR_Mask = (1 << 6) - 1;
 uint8_t Platform_DetermineCauseOfException(void)
 {
     uint32_t DFSR_Value = 0;
-    if (!g_swd.readTargetMemory(DFSR_Address, &DFSR_Value, sizeof(DFSR_Value), SWD::TRANSFER_32BIT))
+    if (!readTargetMemory(DFSR_Address, &DFSR_Value, sizeof(DFSR_Value), SWD::TRANSFER_32BIT))
     {
         logError("Failed to read DFSR register.");
         // NOTE: Catch all signal will be SIGSTOP.
@@ -2499,7 +2556,7 @@ void Platform_ResetDevice(void)
     const uint32_t AIRCR_KEY_VALUE = 0x05FA << AIRCR_KEY_Shift;
     const uint32_t AIRCR_SYSRESETREQ_Bit = 1 << 2;
     uint32_t AIRCR_Value = 0;
-    if (!g_swd.readTargetMemory(AIRCR_Address, &AIRCR_Value, sizeof(AIRCR_Value), SWD::TRANSFER_32BIT))
+    if (!readTargetMemory(AIRCR_Address, &AIRCR_Value, sizeof(AIRCR_Value), SWD::TRANSFER_32BIT))
     {
         logError("Failed to read AIRCR register for device reset.");
     }
@@ -2508,7 +2565,7 @@ void Platform_ResetDevice(void)
     // Then set the SYSRESETREQ bit to request a device reset.
     AIRCR_Value = (AIRCR_Value & ~AIRCR_KEY_Mask) | AIRCR_KEY_VALUE | AIRCR_SYSRESETREQ_Bit;
 
-    if (!g_swd.writeTargetMemory(AIRCR_Address, &AIRCR_Value, sizeof(AIRCR_Value), SWD::TRANSFER_32BIT))
+    if (!writeTargetMemory(AIRCR_Address, &AIRCR_Value, sizeof(AIRCR_Value), SWD::TRANSFER_32BIT))
     {
         logError("Failed to write AIRCR register for device reset.");
     }
@@ -2537,10 +2594,23 @@ void Platform_SetSemihostCallReturnAndErrnoValues(int returnValue, int errNo)
 
 
 
+static uint32_t forceMriCoreToReturn(Buffer* pBuffer);
 uint32_t Platform_HandleGDBCommand(Buffer* pBuffer)
 {
+    if (!g_isSwdConnected)
+    {
+        return forceMriCoreToReturn(pBuffer);
+    }
+
     // UNDONE: Can remove this if we don't end up using it but I think we will for FLASH loading.
     return 0;
+}
+
+static uint32_t forceMriCoreToReturn(Buffer* pBuffer)
+{
+    logInfo("Forcing MRI core to exit due to unrecoverable read/write errors.");
+    PrepareStringResponse("E99");
+    return HANDLER_RETURN_RESUME_PROGRAM | HANDLER_RETURN_RETURN_IMMEDIATELY;
 }
 
 

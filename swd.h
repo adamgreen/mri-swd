@@ -260,12 +260,12 @@ class SWD
         enum TransferError
         {
             SWD_SUCCESS = 0,
-            SWD_PROTOCOL,
-            SWD_WAIT,
-            SWD_PARITY,
-            SWD_FAULT_WDATAERR,
-            SWD_FAULT_ERROR,
-            SWD_FAULT_OVERRUN
+            SWD_PROTOCOL = 1,
+            SWD_WAIT = 2,
+            SWD_PARITY = 3,
+            SWD_FAULT_WDATAERR = 4,
+            SWD_FAULT_ERROR = 5,
+            SWD_FAULT_OVERRUN = 6
         };
 
         // Fetch the cause of the last read or write call which has failed.

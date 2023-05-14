@@ -35,7 +35,11 @@ class CircularQueue
         CircularQueue()
         {
             assert ( (sizeof(m_queue) & (sizeof(m_queue)-1)) == 0 );
+            init();
+        }
 
+        void init()
+        {
             m_write = 0;
             m_read = 0;
             m_peek = 0;
