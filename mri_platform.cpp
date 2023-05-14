@@ -81,7 +81,9 @@ static PlatformTrapReason g_trapReason;
 static bool initSWD();
 static bool waitForSwdAttach(uint32_t delayBetweenAttempts_ms);
 static bool attemptSwdAttach();
+static void innerDebuggerLoop();
 static void requestCpuToHalt();
+static bool readDHCSRWithRetry(uint32_t* pValue, uint32_t timeout_ms);
 static bool readDHCSR(uint32_t* pValue);
 static bool writeDHCSR(uint32_t DHCSR_Value);
 static bool isDeviceResetting(uint32_t DHCSR_Value);
@@ -95,88 +97,61 @@ static bool writeCpuRegister(uint32_t registerIndex, uint32_t value);
 static void enableSingleSteppingIfNeeded();
 static void requestCpuToResume();
 
+static bool g_isSwdConnected = false;
+static bool g_isNetworkConnected = false;
 
 void mainDebuggerLoop()
 {
     // UNDONE: Need to handle clock rates other than 24MHz.
-    bool wasSwdInitSuccessful = initSWD();
-    if (!wasSwdInitSuccessful)
+    if (!g_swd.init(24000000, SWCLK_PIN, SWDIO_PIN))
     {
-        logError("Failed to initialize SWD connection to debuggee.");
-        __breakpoint();
-    }
-
-    bool wasSocketInitSuccessful = g_gdbSocket.init();
-    if (!wasSocketInitSuccessful)
-    {
-        logError("Failed to initialize GDB socket.");
-    }
-
-    // Initialize the MRI core.
-    __try
-    {
-        mriInit("");
-    }
-    __catch
-    {
-        logError("Failed to initialize the MRI core.");
+        logError("Failed to initialize the SWD port.");
         return;
     }
 
+    g_isSwdConnected = false;
+    g_isNetworkConnected = false;
     while (true)
     {
-        bool haveGdbStopRequest = !g_gdbSocket.m_tcpToMriQueue.isEmpty();
-        if (haveGdbStopRequest)
+        if (!g_isSwdConnected)
         {
-            logInfo("GDB has requested a CPU halt.");
-            g_wasStopFromGDB = true;
-            requestCpuToHalt();
-        }
-
-        // Read the Debug Halting Control and Status Register to query current state of CPU.
-        uint32_t DHCSR_Val = 0;
-        if (!readDHCSR(&DHCSR_Val))
-        {
-            continue;
-        }
-
-        if (isDeviceResetting(DHCSR_Val))
-        {
-            logInfo("Device RESET detected.");
-            g_isResetting = false;
-            continue;
-        }
-        // UNDONE: Should check the sleep, lockup, retire bits in the DHCSR as well.
-
-        if (!g_isResetting && hasCpuHalted(DHCSR_Val))
-        {
-            logInfo("CPU has halted.");
-            saveContext();
-            mriDebugException(&g_context);
-            if (g_isResetting)
+            g_isSwdConnected = initSWD();
+            if (!g_isSwdConnected)
             {
-                logInfo("GDB has requested device reset.");
-            }
-            else
-            {
-                restoreContext();
-                enableSingleSteppingIfNeeded();
-                requestCpuToResume();
-                logInfoF("CPU execution has been resumed. %s", g_isSingleSteppingEnabled ? "Single stepping enabled." : "");
+                logError("Failed to initialize SWD connection to debuggee.");
+                return;
             }
         }
+
+        if (!g_isNetworkConnected)
+        {
+            // UNDONE: Will probably need to connect to router here as well.
+            g_isNetworkConnected = g_gdbSocket.init();
+            if (!g_isNetworkConnected)
+            {
+                logError("Failed to initialize GDB socket.");
+                return;
+            }
+        }
+
+        // Initialize the MRI core.
+        __try
+        {
+            mriInit("");
+        }
+        __catch
+        {
+            logError("Failed to initialize the MRI core.");
+            return;
+        }
+
+        innerDebuggerLoop();
     }
 }
 
 static bool initSWD()
 {
     bool returnCode = false;
-
-    if (!g_swd.init(24000000, SWCLK_PIN, SWDIO_PIN))
-    {
-        logError("Failed to initialize the SWD port.");
-        return false;
-    }
 
     returnCode = attemptSwdAttach();
     if (!returnCode)
@@ -243,6 +218,55 @@ static bool attemptSwdAttach()
     return true;
 }
 
+static void innerDebuggerLoop()
+{
+    while (g_isSwdConnected && g_isNetworkConnected)
+    {
+        bool haveGdbStopRequest = !g_gdbSocket.m_tcpToMriQueue.isEmpty();
+        if (haveGdbStopRequest)
+        {
+            logInfo("GDB has requested a CPU halt.");
+            g_wasStopFromGDB = true;
+            requestCpuToHalt();
+        }
+
+        // Read the Debug Halting Control and Status Register to query current state of CPU.
+        uint32_t DHCSR_Val = 0;
+        if (!readDHCSRWithRetry(&DHCSR_Val, READ_DHCSR_TIMEOUT_MS))
+        {
+            logInfo("SWD target is no longer responding. Will attempt to reattach.");
+            g_isSwdConnected = false;
+            continue;
+        }
+
+        if (isDeviceResetting(DHCSR_Val))
+        {
+            logInfo("Device RESET detected.");
+            g_isResetting = false;
+            continue;
+        }
+        // UNDONE: Should check the sleep, lockup, retire bits in the DHCSR as well.
+
+        if (!g_isResetting && hasCpuHalted(DHCSR_Val))
+        {
+            logInfo("CPU has halted.");
+            saveContext();
+            mriDebugException(&g_context);
+            if (g_isResetting)
+            {
+                logInfo("GDB has requested device reset.");
+            }
+            else
+            {
+                restoreContext();
+                enableSingleSteppingIfNeeded();
+                requestCpuToResume();
+                logInfoF("CPU execution has been resumed. %s", g_isSingleSteppingEnabled ? "Single stepping enabled." : "");
+            }
+        }
+    }
+}
+
 static const uint32_t DHCSR_C_HALT_Bit = 1 << 1;
 
 static void requestCpuToHalt()
@@ -257,6 +281,26 @@ static void requestCpuToHalt()
     {
         logError("Failed to set C_HALT bit in DHCSR.");
     }
+}
+
+static bool readDHCSRWithRetry(uint32_t* pValue, uint32_t timeout_ms)
+{
+    bool returnVal = false;
+    absolute_time_t endTime = make_timeout_time_ms(timeout_ms);
+    g_swd.disableErrorLogging();
+    logErrorDisable();
+    do
+    {
+        if (readDHCSR(pValue))
+        {
+            returnVal = true;
+            break;
+        }
+    } while (absolute_time_diff_us(get_absolute_time(), endTime) > 0);
+    logErrorEnable();
+    g_swd.enableErrorLogging();
+
+    return returnVal;
 }
 
 static const uint32_t DHCSR_Address = 0xE000EDF0;
