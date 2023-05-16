@@ -27,14 +27,16 @@ class GDBSocket
         GDBSocket();
 
         bool init(uint16_t port = GDB_SOCKET_PORT_NUMBER);
+        void uninit();
+
         err_t send(const void* pBuffer, uint16_t bufferLength);
         uint32_t bytesInFlight() { return m_bytesInFlight; }
-        err_t close();
         err_t closeClient();
 
         CircularQueue<256> m_tcpToMriQueue;
 
     protected:
+        err_t closeServer();
         err_t onAccept(tcp_pcb* pClientPCB, err_t error);
         err_t onRecv(tcp_pcb* pPCB, pbuf* pBuf, err_t error);
         err_t onSent(struct tcp_pcb* pPCB, u16_t length);

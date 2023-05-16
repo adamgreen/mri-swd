@@ -28,9 +28,16 @@
 #define SWDIO_PIN 1
 
 
+// Timeout in milliseconds to use when attempting to connect to the WiFi router.
+#define WIFI_ROUTER_TIMEOUT_MS 30000
+
 // Amount of time in ms to delay between attempts to attach to a SWD target (ie. to recover from it not being powered
 // up).
 #define DELAY_BETWEEN_SWD_ATTACH_ATTEMPTS_MS 1000
+
+// When attempting to attach to the SWD target with the above delay between iterations, output will be logged to stdout
+// on this many iterations to let the user know that we are still trying to connect.
+#define LOG_EVERY_N_SWD_ATTACH_ATTEMPTS 60
 
 // Timeout in milliseconds to use when reading the DHCSR to obtain the halt and reset state.
 #define READ_DHCSR_TIMEOUT_MS 1000

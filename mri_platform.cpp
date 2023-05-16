@@ -17,6 +17,7 @@
 #include "logging.h"
 #include <string.h>
 #include <stdio.h>
+#include <pico/cyw43_arch.h>
 #include "gdb_socket.h"
 #include "swd.h"
 #include "mri_platform.h"
@@ -83,7 +84,10 @@ static PlatformTrapReason g_trapReason;
 static bool initSWD();
 static bool waitForSwdAttach(uint32_t delayBetweenAttempts_ms);
 static bool attemptSwdAttach();
+static bool initNetwork();
 static void innerDebuggerLoop();
+static bool isNetworkDown();
+static void triggerMriCoreToExit();
 static void requestCpuToHalt();
 static bool readDHCSRWithRetry(uint32_t* pValue, uint32_t timeout_ms);
 static bool readDHCSR(uint32_t* pValue);
@@ -131,11 +135,10 @@ void mainDebuggerLoop()
 
         if (!g_isNetworkConnected)
         {
-            // UNDONE: Will probably need to connect to router here as well.
-            g_isNetworkConnected = g_gdbSocket.init();
+            g_isNetworkConnected = initNetwork();
             if (!g_isNetworkConnected)
             {
-                logError("Failed to initialize GDB socket.");
+                logError("Failed to initialize network.");
                 return;
             }
         }
@@ -152,6 +155,12 @@ void mainDebuggerLoop()
         }
 
         innerDebuggerLoop();
+
+        if (!g_isNetworkConnected)
+        {
+            g_gdbSocket.uninit();
+            cyw43_arch_deinit();
+        }
     }
 }
 
@@ -170,14 +179,16 @@ static bool initSWD()
 
 static bool waitForSwdAttach(uint32_t delayBetweenAttempts_ms)
 {
-    logInfo("Waiting for SWD target to be attached and powered up.");
-
     logErrorDisable();
     bool targetFound;
+    uint32_t iteration = 0;
     do
     {
         sleep_ms(delayBetweenAttempts_ms);
-        putchar('.'); fflush(stdout);
+        if (iteration++ % LOG_EVERY_N_SWD_ATTACH_ATTEMPTS == 0)
+        {
+            logInfo("Waiting for SWD target to be attached and powered up...");
+        }
         targetFound = attemptSwdAttach();
     } while (!targetFound);
     putchar('\n');
@@ -220,7 +231,34 @@ static bool attemptSwdAttach()
         logError("Failed to initialize target's debug components.");
         return false;
     }
-    logInfo("Initialization complete!");
+    logInfo("SWD initialization complete!");
+    return true;
+}
+
+static bool initNetwork()
+{
+    logInfo("Initializing network...");
+    if (cyw43_arch_init())
+    {
+        logError("Wi-Fi chip failed to initialize.");
+        return false;
+    }
+    cyw43_arch_enable_sta_mode();
+
+    int connectionResult;
+    do
+    {
+        logInfo("Attempting to connect to Wi-Fi router...");
+        connectionResult = cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASSWORD, CYW43_AUTH_WPA2_AES_PSK, WIFI_ROUTER_TIMEOUT_MS);
+    } while (connectionResult != 0);
+    logInfo("Connected to Wi-Fi router.");
+
+    if (!g_gdbSocket.init())
+    {
+        logError("Failed to initialize GDB socket.");
+        return false;
+    }
+
     return true;
 }
 
@@ -228,6 +266,13 @@ static void innerDebuggerLoop()
 {
     while (g_isSwdConnected && g_isNetworkConnected)
     {
+        // Check the WiFi link to see if it has gone down.
+        if (isNetworkDown())
+        {
+            continue;
+        }
+
+        // Check to see if GDB has sent a command via TCP/IP.
         bool haveGdbStopRequest = !g_gdbSocket.m_tcpToMriQueue.isEmpty();
         if (haveGdbStopRequest)
         {
@@ -275,6 +320,35 @@ static void innerDebuggerLoop()
             }
         }
     }
+}
+
+static bool isNetworkDown()
+{
+    if (!g_isNetworkConnected)
+    {
+        return true;
+    }
+
+    if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) != CYW43_LINK_UP)
+    {
+        logError("WiFi link is no longer up.");
+        g_isNetworkConnected = false;
+        triggerMriCoreToExit();
+        return true;
+    }
+    return false;
+}
+
+static void triggerMriCoreToExit()
+{
+    if (!g_isInDebugger)
+    {
+        return;
+    }
+
+    const uint8_t emptyPacket[] = "+$#00";
+    g_gdbSocket.m_tcpToMriQueue.init();
+    g_gdbSocket.m_tcpToMriQueue.write(emptyPacket, sizeof(emptyPacket)-1);
 }
 
 static const uint32_t DHCSR_C_HALT_Bit = 1 << 1;
@@ -342,16 +416,9 @@ static uint32_t readTargetMemory(uint32_t address, void* pvBuffer, uint32_t buff
 
 static void handleUnrecoverableSwdError()
 {
-    if (!g_isInDebugger)
-    {
-        return;
-    }
-
     logErrorF("Encountered unrecoverable read/write error %d.", g_swd.getLastReadWriteError());
-    const uint8_t emptyPacket[] = "+$#00";
-    g_gdbSocket.m_tcpToMriQueue.init();
-    g_gdbSocket.m_tcpToMriQueue.write(emptyPacket, sizeof(emptyPacket)-1);
     g_isSwdConnected = false;
+    triggerMriCoreToExit();
 }
 
 static bool writeDHCSR(uint32_t DHCSR_Value)
@@ -582,6 +649,10 @@ static void waitToReceiveData(void);
 
 uint32_t Platform_CommHasReceiveData(void)
 {
+    if (isNetworkDown())
+    {
+        // Nothing to do here. It will have queued up empty packet for MRI to process though.
+    }
     return !g_gdbSocket.m_tcpToMriQueue.isEmpty();
 }
 
@@ -2597,18 +2668,17 @@ void Platform_SetSemihostCallReturnAndErrnoValues(int returnValue, int errNo)
 static uint32_t forceMriCoreToReturn(Buffer* pBuffer);
 uint32_t Platform_HandleGDBCommand(Buffer* pBuffer)
 {
-    if (!g_isSwdConnected)
+    if (!g_isSwdConnected || !g_isNetworkConnected)
     {
         return forceMriCoreToReturn(pBuffer);
     }
 
-    // UNDONE: Can remove this if we don't end up using it but I think we will for FLASH loading.
     return 0;
 }
 
 static uint32_t forceMriCoreToReturn(Buffer* pBuffer)
 {
-    logInfo("Forcing MRI core to exit due to unrecoverable read/write errors.");
+    logInfo("Forcing MRI core to exit due to network or SWD error.");
     PrepareStringResponse("E99");
     return HANDLER_RETURN_RESUME_PROGRAM | HANDLER_RETURN_RETURN_IMMEDIATELY;
 }

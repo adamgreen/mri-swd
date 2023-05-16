@@ -30,8 +30,10 @@ GDBSocket::GDBSocket()
 
 bool GDBSocket::init(uint16_t port)
 {
-    logInfoF("Starting server at %s on port %u", ip4addr_ntoa(netif_ip4_addr(netif_list)), port);
+    assert ( !m_pListenPCB && !m_pClientPCB );
+    m_bytesInFlight = 0;
 
+    logInfoF("Starting server at %s on port %u", ip4addr_ntoa(netif_ip4_addr(netif_list)), port);
     tcp_pcb *pcb = tcp_new_ip_type(IPADDR_TYPE_ANY);
     if (!pcb)
     {
@@ -63,6 +65,13 @@ bool GDBSocket::init(uint16_t port)
     return true;
 }
 
+void GDBSocket::uninit()
+{
+    logInfoF("Shutting down server at %s", ip4addr_ntoa(netif_ip4_addr(netif_list)));
+    closeClient();
+    closeServer();
+}
+
 err_t GDBSocket::onAccept(tcp_pcb* pClientPCB, err_t error)
 {
     if (error != ERR_OK || pClientPCB == NULL)
@@ -84,33 +93,38 @@ err_t GDBSocket::onAccept(tcp_pcb* pClientPCB, err_t error)
 err_t GDBSocket::closeClient()
 {
     err_t error = ERR_OK;
-    if (m_pClientPCB != NULL)
+    if (m_pClientPCB)
     {
         tcp_arg(m_pClientPCB, NULL);
-        tcp_poll(m_pClientPCB, NULL, 0);
         tcp_sent(m_pClientPCB, NULL);
         tcp_recv(m_pClientPCB, NULL);
         tcp_err(m_pClientPCB, NULL);
         error = tcp_close(m_pClientPCB);
         if (error != ERR_OK)
         {
-            logError("Failed to call tcp_close(m_pClientPCB)");
+            logError("Failed to call tcp_close(m_pClientPCB). Aborting.");
             tcp_abort(m_pClientPCB);
             error = ERR_ABRT;
         }
         m_pClientPCB = NULL;
     }
-
     return error;
 }
 
-err_t GDBSocket::close()
+err_t GDBSocket::closeServer()
 {
-    err_t error = closeClient();
-    if (m_pListenPCB != NULL)
+    err_t error = ERR_OK;
+    if (m_pListenPCB)
     {
         tcp_arg(m_pListenPCB, NULL);
-        tcp_close(m_pListenPCB);
+        tcp_accept(m_pListenPCB, NULL);
+        error = tcp_close(m_pListenPCB);
+        if (error != ERR_OK)
+        {
+            logError("Failed to call tcp_close(m_pListenPCB). Aborting.");
+            tcp_abort(m_pListenPCB);
+            error = ERR_ABRT;
+        }
         m_pListenPCB = NULL;
     }
     return error;
@@ -162,7 +176,7 @@ err_t GDBSocket::send(const void* pBuffer, uint16_t bufferLength)
     bool isPacketData = bufferLength >= minPacketLength;
 
     logDebugF("Writing %d bytes to client", bufferLength);
-    while (bufferLength > 0)
+    while (m_pClientPCB && bufferLength > 0)
     {
         cyw43_arch_lwip_begin();
             err_t error = ERR_OK;
@@ -199,6 +213,10 @@ err_t GDBSocket::send(const void* pBuffer, uint16_t bufferLength)
             logErrorF("Failed call to tcp_write(m_pClientPCB, 0x%08lX, %u, TCP_WRITE_FLAG_COPY) with error %d", pBuffer, bufferLength, error);
             return error;
         }
+    }
+    if (!m_pClientPCB)
+    {
+        logErrorF("Socket has been closed so %d bytes have been discarded.", bufferLength);
     }
 
     return ERR_OK;
