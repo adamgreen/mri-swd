@@ -31,7 +31,7 @@ int main()
     // UNDONE: Giving time for serial terminal to reconnect.
     sleep_ms(2000);
 
-    logInfo("[mri-swd] Monitor for Remote Inspection - SWD Edition (" MRI_SWD_VERSION_STRING ")");
+    logInfo("|mri-swd| Monitor for Remote Inspection - SWD Edition (" MRI_SWD_VERSION_STRING ")");
     logInfo(MRI_SWD_BRANCH);
     logInfo("");
 

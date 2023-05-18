@@ -306,7 +306,6 @@ static void innerDebuggerLoop()
 
         if (!g_isResetting && g_gdbSocket.isGdbConnected() && hasCpuHalted)
         {
-            logInfo("CPU has halted.");
             hasCpuHalted = false;
             saveContext();
             mriDebugException(&g_context);
@@ -945,9 +944,30 @@ static void writeFPControlRegister(uint32_t FP_CTRL_Value)
 
 static void enableHaltingDebug()
 {
-    /*  Enable halt mode debug.  Set to 1 to enable halt mode debugging. */
+    // Read out the current DHCSR register value, just to see if the target is already halted.
+    // The values of the current DHCSR_C_* bits will be overwritten with just what is needed to enable SWD debugging
+    // and maintain the target's current halted state.
+    uint32_t DHCSR_Val = 0;
+    if (!readDHCSR(&DHCSR_Val))
+    {
+        logError("Failed to read DHCSR.");
+    }
+    if (isCpuHalted(DHCSR_Val))
+    {
+        // If the CPU is currently halted then we don't want to set DHCSR with DHCSR_C_HALT_Bit cleared as that will
+        // start the target running again.
+        logInfo("CPU was already halted at debugger init.");
+        DHCSR_Val = DHCSR_C_HALT_Bit;
+    }
+    else
+    {
+        DHCSR_Val = 0;
+    }
+
+    //  Enable halt mode debug.  Set to 1 to enable halt mode debugging.
     const uint32_t DHCSR_C_DEBUGEN_Bit = 1 << 0;
-    if (!writeDHCSR(DHCSR_C_DEBUGEN_Bit))
+    DHCSR_Val |= DHCSR_C_DEBUGEN_Bit;
+    if (!writeDHCSR(DHCSR_Val))
     {
         logError("Failed to set C_DEBUGEN bit in DHCSR.");
     }
