@@ -20,12 +20,12 @@
 
 
 // GDB socket port number.
-#define GDB_SOCKET_PORT_NUMBER 4242
+#define GDB_SOCKET_PORT_NUMBER 2331
 
 
 // SWD pin connections.
-#define SWCLK_PIN 0
-#define SWDIO_PIN 1
+#define SWCLK_PIN 2
+#define SWDIO_PIN 3
 
 
 // Timeout in milliseconds to use when attempting to connect to the WiFi router.
