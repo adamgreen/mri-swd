@@ -142,7 +142,7 @@ debug: swd.cpp:660 checkAP() - CPUID=0x410CC601
 The third line up from the bottom shows the `10.0.0.12` IP address assigned to the `mri-swd` device on this particular network. Take note of this IP address so that it can be used later when attaching GDB.
 
 ### GDB Connection
-The following is an example shell session where GDB is launched and told to connect and start debugging a RP2040 microcontroller via the WiFi IP address that was noted in the previous section (`10.0.0.12`). Port 2331 is the default TCP/IP port number used by `mri-swd` but it can be changed in the [config.h](config.h) file discussed further down in this documentation.
+The following is an example shell session where GDB is launched and told to connect and start debugging a RP2040 microcontroller via the WiFi IP address that was noted in the previous section (`10.0.0.12`). Port `2331` is the default TCP/IP port number used by `mri-swd` but it can be changed in the [config.h](config.h) file discussed further down in this documentation.
 
 ```console
 $ arm-none-eabi-gdb -ex "set target-charset ASCII" -ex "set print pretty on" -ex "set remotelogfile mri.log" -ex "target remote 10.0.0.12:2331" -ex "set mem inaccessible-by-default off" test.elf

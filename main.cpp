@@ -21,6 +21,7 @@
 #include <pico/rand.h>
 #include <pico/stdlib.h>
 #include "mri_platform.h"
+#include "version.h"
 
 
 int main()
@@ -30,7 +31,9 @@ int main()
     // UNDONE: Giving time for serial terminal to reconnect.
     sleep_ms(2000);
 
-    logInfo("Starting up...");
+    logInfo("[mri-swd] Monitor for Remote Inspection - SWD Edition (" MRI_SWD_VERSION_STRING ")");
+    logInfo(MRI_SWD_BRANCH);
+    logInfo("");
 
     mainDebuggerLoop();
 
