@@ -1,6 +1,4 @@
-# Very Much a Work In Progress!
-# Not Yet Suitable for Use by Others!
-## MRI-SWD
+# MRI-SWD - A Work In Progress!
 ## Monitor for Remote Inspection - SWD Edition
 `mri-swd` is a [Pico W](https://www.adafruit.com/product/5526) based debug probe for debugging Cortex-M based microcontrollers with the [GNU debugger (GDB)](https://www.sourceware.org/gdb/). GDB can connect to the `mri-swd` debug probe over WiFi and the debug probe then connects to the debug target using SWD.
 
@@ -20,7 +18,7 @@
 ## Important Notes
 ![Dogfood Setup](dogfood.jpg)
 
-* __[5/9/2023]:__ The code found within this repository is now at the point where I can start using it to debug the `mri-swd` firmware itself instead of the Segger J-Link that I have been using up until now. This testing will help me to find bugs, missing features, and rough edges to correct over the upcoming weeks, getting it ready for others to use.
+* __[5/17/2023]:__ The code found within this repository is now at the point where I can start using it to flash and debug the `mri-swd` firmware itself instead of the Segger J-Link that I had been using previously. This testing will help me to find bugs, missing features, and rough edges to correct over the upcoming weeks, getting it ready for others to use.
 * The initial goal is to just be able to debug and program the dual core [RP2040 microcontroller](https://www.raspberrypi.com/products/rp2040/). Support for other microcontrollers will be added in the future.
 * The `mri-swd` firmware is initially being developed to run on the low cost [Pico W](https://www.adafruit.com/product/5526). It will use the Pico W's WiFi capabilities to wirelessly communicate with GDB. No intermediate program like OpenOCD will be required since the [mri remote debug stub](https://github.com/adamgreen/mri) functionality will be running on the Pico W itself.
 
@@ -30,6 +28,7 @@
 * RAM/FLASH/ROM Read
 * RAM Write
 * CPU Register Read/Write
+* `load` (**FLASH Programming** of RP2040)
 * `step` and `next` (Single Stepping)
 * `break` (Hardware Breakpoints)
 * `watch`, `awatch`, `rwatch` (Hardware Watchpoints)
@@ -38,11 +37,11 @@
 
 ## Unsupported Features
 * Debugging of **Core 1 on the RP2040**
-* **FLASH Programming** of any microcontrollers
 * Debugging of microcontrollers other than the RP2040 for various reasons, including:
     * No **FPU** support
     * `mri-swd` returns fixed memory layout (suitable for the RP2040) to GDB
     * SWD clock is fixed at 24MHz
+* FLASH programming of microcontrollers other than the RP2040.
 * Semihosting
 * RTOS Thread Support
 * Connecting GDB over USB. Only WiFi for now.
@@ -182,10 +181,10 @@ In the root folder can be found  a [config.h](config.h) which can be used to cus
 
 
 ## Next Steps
+* ~~RP2040 FLASH Programming~~
+* ~~Improve Robustness~~
 * Improve Performance
-* Improve Robustness
 * Improve Usability
-* RP2040 FLASH Programming
 * Addition of a small OLED Display
   * Report IP address
   * Report WiFi connections
