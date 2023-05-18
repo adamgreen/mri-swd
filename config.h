@@ -43,7 +43,7 @@
 #define READ_DHCSR_TIMEOUT_MS 1000
 
 // Timeout in milliseconds to use when executing RP2040 Boot ROM routines.
-#define EXEC_RP2040_BOOT_ROM_FUNC_TIMEOUT_MS 1000
+#define EXEC_RP2040_BOOT_ROM_FUNC_TIMEOUT_MS 30000
 
 
 // Set each of these to 1 or 0 to enable or disable error/debug logging for each of the modules.
