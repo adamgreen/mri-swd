@@ -96,7 +96,7 @@ static void handleUnrecoverableSwdError();
 static bool writeDHCSR(uint32_t DHCSR_Value);
 static uint32_t writeTargetMemory(uint32_t address, const void* pvBuffer, uint32_t bufferSize, SWD::TransferSize writeSize);
 static bool isDeviceResetting(uint32_t DHCSR_Value);
-static bool hasCpuHalted(uint32_t DHCSR_Val);
+static bool isCpuHalted(uint32_t DHCSR_Val);
 static void saveContext();
 static bool readCpuRegister(uint32_t registerIndex, uint32_t* pValue);
 static void waitForRegisterTransferToComplete();
@@ -264,6 +264,7 @@ static bool initNetwork()
 
 static void innerDebuggerLoop()
 {
+    bool hasCpuHalted = false;
     while (g_isSwdConnected && g_isNetworkConnected)
     {
         // Check the WiFi link to see if it has gone down.
@@ -296,11 +297,17 @@ static void innerDebuggerLoop()
             g_isResetting = false;
             continue;
         }
-        // UNDONE: Should check the sleep, lockup, retire bits in the DHCSR as well.
-
-        if (!g_isResetting && hasCpuHalted(DHCSR_Val))
+        if (!hasCpuHalted && isCpuHalted(DHCSR_Val))
         {
             logInfo("CPU has halted.");
+            hasCpuHalted = true;
+        }
+        // UNDONE: Should check the sleep, lockup, retire bits in the DHCSR as well.
+
+        if (!g_isResetting && g_gdbSocket.isGdbConnected() && hasCpuHalted)
+        {
+            logInfo("CPU has halted.");
+            hasCpuHalted = false;
             saveContext();
             mriDebugException(&g_context);
             if (!g_isSwdConnected)
@@ -454,7 +461,7 @@ static bool isDeviceResetting(uint32_t DHCSR_Value)
     return !!(DHCSR_Value & S_RESET_ST_Bit);
 }
 
-static bool hasCpuHalted(uint32_t DHCSR_Val)
+static bool isCpuHalted(uint32_t DHCSR_Val)
 {
     const uint32_t DHCSR_S_HALT_Bit = 1 << 17;
     return (DHCSR_Val & DHCSR_S_HALT_Bit) == DHCSR_S_HALT_Bit;
@@ -765,12 +772,10 @@ static void enableDWTandVectorCatches()
     const uint32_t DEMCR_VC_NOCPERR_Bit = 1 << 5;
     // Enable Halting debug trap on a MemManage exception.
     const uint32_t DEMCR_VC_MMERR_Bit = 1 << 4;
-    // Enable Reset Vector Catch. This causes a Local reset to halt a running system.
-    const uint32_t DEMCR_VC_CORERESET_Bit = 1 << 0;
     // Catch all of the vectors.
     const uint32_t allVectorCatchBits = DEMCR_VC_HARDERR_Bit | DEMCR_VC_INTERR_Bit | DEMCR_VC_BUSERR_Bit |
                                         DEMCR_VC_STATERR_Bit | DEMCR_VC_CHKERR_Bit | DEMCR_VC_NOCPERR_Bit |
-                                        DEMCR_VC_MMERR_Bit | DEMCR_VC_CORERESET_Bit;
+                                        DEMCR_VC_MMERR_Bit;
 
     uint32_t DEMCR_Value = 0;
 
@@ -3024,8 +3029,8 @@ static bool callBootRomRoutine(uint32_t functionOffset, uint32_t param1, uint32_
         {
             return false;
         }
-    } while (!hasCpuHalted(DHCSR_Val) && absolute_time_diff_us(get_absolute_time(), endTime) > 0);
-    if (!hasCpuHalted(DHCSR_Val))
+    } while (!isCpuHalted(DHCSR_Val) && absolute_time_diff_us(get_absolute_time(), endTime) > 0);
+    if (!isCpuHalted(DHCSR_Val))
     {
         logError("Timeout out waiting for RP2040 Boot ROM routine to complete.");
         return false;

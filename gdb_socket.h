@@ -32,6 +32,10 @@ class GDBSocket
         err_t send(const void* pBuffer, uint16_t bufferLength);
         uint32_t bytesInFlight() { return m_bytesInFlight; }
         err_t closeClient();
+        bool isGdbConnected()
+        {
+            return m_pClientPCB != NULL;
+        }
 
         CircularQueue<16*1024> m_tcpToMriQueue;
 
