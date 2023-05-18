@@ -33,7 +33,7 @@
 * `break` (Hardware Breakpoints)
 * `watch`, `awatch`, `rwatch` (Hardware Watchpoints)
 * `monitor reset` (Reboot the microcontroller)
-* GDB connection over WiFi on port 4242
+* GDB connection over WiFi on port 2331
 
 ## Unsupported Features
 * Debugging of **Core 1 on the RP2040**
@@ -101,49 +101,51 @@ This build will encounter an error when building some of the pico-sdk sources. T
 Currently only 2 signal wires (and ground) need to be connected between the target RP2040 device and the Pico W based debugger device:
 | Pico W Debugger | Pico Target |
 |-----------------|-------------|
-| GPIO 0          | SWCLK       |
-| GPIO 1          | SWDIO       |
+| GPIO 2          | SWCLK       |
+| GPIO 3          | SWDIO       |
 | Gnd             | Gnd         |
 
 Both devices, target and debugger, need power. It is common to power each of the devices via their individual USB connectors.
-
-**Note:** _In the future I will probably switch to pins other than GPIO 0 and GPIO 1 on the Debugger side as those are the default UART pins but for now I am just using the first 2 pins that were available._
 
 
 ## Connecting GDB
 ### IP Address
 A terminal program must be connected to the USB based serial connection made available from the Pico W running the `mri-swd` firmware. When `mri-swd` is starting up output like the following will be seen in this terminal session:
 ```
- info: main.cpp:38 main() - Starting up...
- info: main.cpp:41 main() - Connecting to Wi-Fi router...
- info: main.cpp:49 main() - Connected.
-error: mri_platform.cpp:189 initSWD() - Found target=0x01002927 with DPIDR=0x0BC12477
- info: mri_platform.cpp:198 initSWD() - Initializing target's debug components...
-debug: swd.cpp:583 checkAP() - peripheralComponentIDs[]=
-debug: swd.cpp:584 checkAP() - {
-debug: swd.cpp:587 checkAP() -     0x00000004
-debug: swd.cpp:587 checkAP() -     0x00000000
-debug: swd.cpp:587 checkAP() -     0x00000000
-debug: swd.cpp:587 checkAP() -     0x00000000
-debug: swd.cpp:587 checkAP() -     0x000000C0
-debug: swd.cpp:587 checkAP() -     0x000000B4
-debug: swd.cpp:587 checkAP() -     0x0000000B
-debug: swd.cpp:587 checkAP() -     0x00000000
-debug: swd.cpp:587 checkAP() -     0x0000000D
-debug: swd.cpp:587 checkAP() -     0x00000010
-debug: swd.cpp:587 checkAP() -     0x00000005
-debug: swd.cpp:587 checkAP() -     0x000000B1
-debug: swd.cpp:589 checkAP() - }
-debug: swd.cpp:598 checkAP() - CPUID=0x410CC601
- info: mri_platform.cpp:205 initSWD() - Initialization complete!
- info: gdb_socket.cpp:33 init() - Starting server at 10.0.0.24 on port 4242
+  info: main.cpp:33 main() - Starting up...
+ info: mri_platform.cpp:214 attemptSwdAttach() - Found DPv2 SWD Target=0x01002927 with DPIDR=0x0BC12477
+ info: mri_platform.cpp:227 attemptSwdAttach() - Initializing target's debug components...
+debug: swd.cpp:645 checkAP() - peripheralComponentIDs[]=
+debug: swd.cpp:646 checkAP() - {
+debug: swd.cpp:649 checkAP() -     0x00000004
+debug: swd.cpp:649 checkAP() -     0x00000000
+debug: swd.cpp:649 checkAP() -     0x00000000
+debug: swd.cpp:649 checkAP() -     0x00000000
+debug: swd.cpp:649 checkAP() -     0x000000C0
+debug: swd.cpp:649 checkAP() -     0x000000B4
+debug: swd.cpp:649 checkAP() -     0x0000000B
+debug: swd.cpp:649 checkAP() -     0x00000000
+debug: swd.cpp:649 checkAP() -     0x0000000D
+debug: swd.cpp:649 checkAP() -     0x00000010
+debug: swd.cpp:649 checkAP() -     0x00000005
+debug: swd.cpp:649 checkAP() -     0x000000B1
+debug: swd.cpp:651 checkAP() - }
+debug: swd.cpp:660 checkAP() - CPUID=0x410CC601
+ info: mri_platform.cpp:234 attemptSwdAttach() - SWD initialization complete!
+ info: mri_platform.cpp:240 initNetwork() - Initializing network...
+ info: mri_platform.cpp:251 initNetwork() - Attempting to connect to Wi-Fi router...
+ info: mri_platform.cpp:254 initNetwork() - Connected to Wi-Fi router.
+ info: gdb_socket.cpp:36 init() - Starting server at 10.0.0.12 on port 2331
+ info: mri_platform.cpp:795 initDWT() - CPU supports 2 hardware watchpoints.
+ info: mri_platform.cpp:857 initFPB() - CPU supports 4 hardware breakpoints.
 ```
-The last line shows the `10.0.0.24` IP address assigned to the `mri-swd` device on this particular network. Take note of this IP address so that it can be used later when attaching GDB.
+The third line up from the bottom shows the `10.0.0.12` IP address assigned to the `mri-swd` device on this particular network. Take note of this IP address so that it can be used later when attaching GDB.
 
 ### GDB Connection
-The following is an example shell session where GDB is launched and told to connect and start debugging a RP2040 microcontroller via the WiFi IP address that was noted in the previous section (`10.0.0.24`):
-```
-$ arm-none-eabi-gdb -ex "set target-charset ASCII" -ex "set print pretty on" -ex "set remotelogfile mri.log" -ex "target remote 10.0.024:4242" -ex "set mem inaccessible-by-default off" test.elf
+The following is an example shell session where GDB is launched and told to connect and start debugging a RP2040 microcontroller via the WiFi IP address that was noted in the previous section (`10.0.0.12`). Port 2331 is the default TCP/IP port number used by `mri-swd` but it can be changed in the [config.h](config.h) file discussed further down in this documentation.
+
+```console
+$ arm-none-eabi-gdb -ex "set target-charset ASCII" -ex "set print pretty on" -ex "set remotelogfile mri.log" -ex "target remote 10.0.0.12:2331" -ex "set mem inaccessible-by-default off" test.elf
 
 GNU gdb (Arm GNU Toolchain 12.2 (Build arm-12-mpacbti.34)) 13.1.90.20230307-git
 Copyright (C) 2023 Free Software Foundation, Inc.
@@ -161,10 +163,17 @@ Find the GDB manual and other documentation resources online at:
 For help, type "help".
 Type "apropos word" to search for commands related to "word"...
 Reading symbols from build/QuadratureDecoder.elf...
-Remote debugging using 10.0.0.24:4242
-time_us_64 () at /Users/foobar/QuadratureDecoder/pico-sdk/src/rp2_common/hardware_timer/timer.c:44
-44	        lo = timer_hw->timerawl;
-(gdb)
+Remote debugging using 10.0.0.12:2331
+get_absolute_time () at /depots/QuadratureDecoder/pico-sdk/src/common/pico_time/include/pico/time.h:63
+63	    update_us_since_boot(&t, time_us_64());
+(gdb) load
+Loading section .boot2, size 0x100 lma 0x10000000
+Loading section .text, size 0x7130 lma 0x10000100
+Loading section .rodata, size 0x17c8 lma 0x10007230
+Loading section .binary_info, size 0x1c lma 0x100089f8
+Loading section .data, size 0x2dc lma 0x10008a14
+Start address 0x100001e8, load size 36080
+Transfer rate: 47 KB/sec, 5154 bytes/write.
 ```
 
 
