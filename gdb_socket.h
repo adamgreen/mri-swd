@@ -33,7 +33,7 @@ class GDBSocket
         uint32_t bytesInFlight() { return m_bytesInFlight; }
         err_t closeClient();
 
-        CircularQueue<256> m_tcpToMriQueue;
+        CircularQueue<16*1024> m_tcpToMriQueue;
 
     protected:
         err_t closeServer();

@@ -104,7 +104,7 @@ static bool hasRegisterTransferCompleted(uint32_t DHCSR_Value);
 static void restoreContext();
 static bool writeCpuRegister(uint32_t registerIndex, uint32_t value);
 static void enableSingleSteppingIfNeeded();
-static void requestCpuToResume();
+static bool requestCpuToResume();
 
 static bool g_isSwdConnected = false;
 static bool g_isNetworkConnected = false;
@@ -619,7 +619,7 @@ static void enableSingleSteppingIfNeeded()
     }
 }
 
-static void requestCpuToResume()
+static bool requestCpuToResume()
 {
     uint32_t DHCSR_Val = 0;
 
@@ -628,7 +628,9 @@ static void requestCpuToResume()
     if (!writeDHCSR(DHCSR_Val))
     {
         logError("Failed to clear C_HALT bit in DHCSR.");
+        return false;
     }
+    return true;
 }
 
 
@@ -2665,15 +2667,75 @@ void Platform_SetSemihostCallReturnAndErrnoValues(int returnValue, int errNo)
 
 
 
+// *********************************************************************************************************************
+// Platform_HandleGDBCommand() is called by the MRI core to give platforms a chance to override and handle any command
+// sent from GDB. The mri-swd platform implements vFlash* support to enable programming of targets. It also implements
+// code which can force the MRI core to return to the main debugger loop when TCP/IP or SWD issues are encountered that
+// require waiting for the target or the WiFi router to reappear.
+// *********************************************************************************************************************
+struct BootRomFunctionTable
+{
+    uint32_t _connect_internal_flash;
+    uint32_t _flash_exit_xip;
+    uint32_t _flash_range_erase;
+    uint32_t _flash_range_program;
+    uint32_t _flash_flush_cache;
+    uint32_t _flash_enter_cmd_xip;
+    uint32_t _debug_trampoline;
+    uint32_t _debug_trampoline_end;
+};
+
+// UNDONE: Could cache these and mark as dirty if the SWD connection is remade,
+static BootRomFunctionTable g_bootRomFunctionTable;
+
 static uint32_t forceMriCoreToReturn(Buffer* pBuffer);
+static uint32_t handleFlashEraseCommand(Buffer* pBuffer);
+static __throws void throwIfAddressAndLengthNot4kAligned(AddressLength* pAddressLength);
+static bool is4kAligned(uint32_t value);
+static __throws void throwIfAttemptingToFlashInvalidAddress(AddressLength* pAddressLength);
+static __throws void findRequiredBootRomRoutines();
+static bool checkRP2040BootRomMagicValue();
+static bool eraseFlash(uint32_t address, uint32_t length);
+static bool disableFlashXIP();
+static bool reenableFlashXIP();
+static bool callBootRomRoutine(uint32_t functionOffset, uint32_t param1, uint32_t param2, uint32_t param3, uint32_t param4);
+static bool disableSingleStepAndMaskInterrupts();
+static uint32_t handleFlashWriteCommand(Buffer* pBuffer);
+static bool writeToFlash(Buffer* pBuffer, AddressLength* pAddressLength);
+static int32_t alignStartOfWriteByCopyingExistingFlashData(uint8_t* pDest, uint32_t alignedStart, uint32_t unalignedStart);
+static uint32_t copyBytes(uint8_t* pDest, size_t destSize, Buffer* pBuffer);
+static uint32_t handleFlashDoneCommand(Buffer* pBuffer);
 uint32_t Platform_HandleGDBCommand(Buffer* pBuffer)
 {
     if (!g_isSwdConnected || !g_isNetworkConnected)
     {
+        // Something has happened to the target device or the WiFi router connection.
+        // Force the MRI core to return and let the main loop attempt to reconnect.
         return forceMriCoreToReturn(pBuffer);
     }
 
-    return 0;
+    const char   vFlashEraseCommand[] = "vFlashErase";
+    const char   vFlashWriteCommand[] = "vFlashWrite";
+    const char   vFlashDoneCommand[] = "vFlashDone";
+
+    Buffer_Reset(pBuffer);
+    if (Buffer_MatchesString(pBuffer, vFlashEraseCommand, sizeof(vFlashEraseCommand)-1))
+    {
+        return handleFlashEraseCommand(pBuffer);
+    }
+    else if (Buffer_MatchesString(pBuffer, vFlashWriteCommand, sizeof(vFlashWriteCommand)-1))
+    {
+        return handleFlashWriteCommand(pBuffer);
+    }
+    else if (Buffer_MatchesString(pBuffer, vFlashDoneCommand, sizeof(vFlashDoneCommand)-1))
+    {
+        return handleFlashDoneCommand(pBuffer);
+    }
+    else
+    {
+        // Returning 0 means that MRI should handle this command instead.
+        return 0;
+    }
 }
 
 static uint32_t forceMriCoreToReturn(Buffer* pBuffer)
@@ -2682,6 +2744,488 @@ static uint32_t forceMriCoreToReturn(Buffer* pBuffer)
     PrepareStringResponse("E99");
     return HANDLER_RETURN_RESUME_PROGRAM | HANDLER_RETURN_RETURN_IMMEDIATELY;
 }
+
+static const uint32_t FLASH_START_ADDRESS = 0x10000000;
+static const uint32_t FLASH_MAX_SIZE = 16 * 1024 * 1024;
+static const uint32_t FLASH_END_ADDRESS = FLASH_START_ADDRESS + FLASH_MAX_SIZE;
+
+/* Handle the 'vFlashErase' command which erases the specified pages in FLASH.
+
+    Command Format:     vFlashErase:AAAAAAAA,LLLLLLLL
+    Response Format:    OK
+
+    Where AAAAAAAA is the hexadecimal representation of the address where the erase is to start.
+          LLLLLLLL is the hexadecimal representation of the length (in bytes) of the erase to be conducted.
+*/
+static uint32_t  handleFlashEraseCommand(Buffer* pBuffer)
+{
+    AddressLength        addressLength;
+
+    __try
+    {
+        __throwing_func( ThrowIfNextCharIsNotEqualTo(pBuffer, ':') );
+        __throwing_func( ReadAddressAndLengthArguments(pBuffer, &addressLength) );
+        __throwing_func( throwIfAddressAndLengthNot4kAligned(&addressLength) );
+        __throwing_func( throwIfAttemptingToFlashInvalidAddress(&addressLength) );
+        __throwing_func( findRequiredBootRomRoutines() );
+    }
+    __catch
+    {
+        logError("Failed parsing vFlashErase command.");
+        PrepareStringResponse(MRI_ERROR_INVALID_ARGUMENT);
+        return HANDLER_RETURN_HANDLED;
+    }
+
+    if (!eraseFlash(addressLength.address - FLASH_START_ADDRESS, addressLength.length))
+    {
+        PrepareStringResponse(MRI_ERROR_MEMORY_ACCESS_FAILURE);
+        return HANDLER_RETURN_HANDLED;
+    }
+    logInfoF("Erased %lu bytes of FLASH at 0x%08lX.", addressLength.length, addressLength.address);
+
+    PrepareStringResponse("OK");
+    return HANDLER_RETURN_HANDLED;
+}
+
+static __throws void throwIfAddressAndLengthNot4kAligned(AddressLength* pAddressLength)
+{
+    if (!is4kAligned(pAddressLength->address) || !is4kAligned(pAddressLength->length))
+    {
+        __throw(invalidArgumentException);
+    }
+}
+
+static bool is4kAligned(uint32_t value)
+{
+    return (value & (4096-1)) == 0;
+}
+
+static __throws void throwIfAttemptingToFlashInvalidAddress(AddressLength* pAddressLength)
+{
+    uint32_t endAddress = pAddressLength->address + pAddressLength->length;
+    if (pAddressLength->address < FLASH_START_ADDRESS || endAddress > FLASH_END_ADDRESS)
+    {
+        __throw(invalidArgumentException);
+    }
+}
+
+static __throws void findRequiredBootRomRoutines()
+{
+    if (!checkRP2040BootRomMagicValue())
+    {
+        logError("Failed verification of the RP2040 Boot ROM magic value.");
+        __throw(invalidValueException);
+    }
+
+    // Read the 16-bit Boot ROM function table pointer from address 0x14.
+    const uint32_t romFuctionTableAddress = 0x14;
+    uint16_t address = 0;
+    uint32_t bytesRead = g_swd.readTargetMemory(romFuctionTableAddress, &address, sizeof(address), SWD::TRANSFER_16BIT);
+    if (bytesRead != sizeof(address) || address == 0)
+    {
+        logError("Failed to read RP2040 Boot ROM function table pointer.");
+        __throw(invalidValueException);
+    }
+
+    // The codes in the RP2040 Boot ROM function table entries are 16-bit values formed from 2 characters.
+    #define ROM_CODE(X, Y) ((X) | (Y<<8))
+
+    // Each function table entry is composed of a 16-bit ROM_CODE and a 16-bit pointer offset into the 64k Boot ROM.
+    struct FunctionTableEntry
+    {
+        uint16_t code;
+        uint16_t offset;
+    };
+    FunctionTableEntry entries[32];
+
+    // Search the function table for the routines we need to program the FLASH.
+    uint32_t entriesLeftToFind = sizeof(g_bootRomFunctionTable) / (2*sizeof(uint16_t));
+    while (entriesLeftToFind > 0)
+    {
+        bytesRead = g_swd.readTargetMemory(address, entries, sizeof(entries), SWD::TRANSFER_16BIT);
+        if (bytesRead != sizeof(entries))
+        {
+            logErrorF("Failed to read RP2040 Boot ROM function table at 0x08X. Bytes read: %lu.", address, bytesRead);
+            __throw(invalidValueException);
+        }
+
+        for (size_t i = 0 ; i < count_of(entries) && entriesLeftToFind > 0 ; i++)
+        {
+            uint32_t offset = entries[i].offset;
+            uint32_t code = entries[i].code;
+            switch (code)
+            {
+                case 0x0000:
+                    // Have encountered the end of the function table.
+                    if (entriesLeftToFind > 0)
+                    {
+                        logErrorF("Failed to find all of the required functions in the RP2040 Boot ROM. "
+                                  "Still required %lu functions.", entriesLeftToFind);
+                        __throw(invalidValueException);
+                    }
+                    return;
+                case ROM_CODE('I', 'F'):
+                    g_bootRomFunctionTable._connect_internal_flash = offset;
+                    entriesLeftToFind--;
+                    break;
+                case ROM_CODE('E', 'X'):
+                    g_bootRomFunctionTable._flash_exit_xip = offset;
+                    entriesLeftToFind--;
+                    break;
+                case ROM_CODE('R', 'E'):
+                    g_bootRomFunctionTable._flash_range_erase = offset;
+                    entriesLeftToFind--;
+                    break;
+                case ROM_CODE('R', 'P'):
+                    g_bootRomFunctionTable._flash_range_program = offset;
+                    entriesLeftToFind--;
+                    break;
+                case ROM_CODE('F', 'C'):
+                    g_bootRomFunctionTable._flash_flush_cache = offset;
+                    entriesLeftToFind--;
+                    break;
+                case ROM_CODE('C', 'X'):
+                    g_bootRomFunctionTable._flash_enter_cmd_xip = offset;
+                    entriesLeftToFind--;
+                    break;
+                case ROM_CODE('D', 'T'):
+                    g_bootRomFunctionTable._debug_trampoline = offset;
+                    entriesLeftToFind--;
+                    break;
+                case ROM_CODE('D', 'E'):
+                    g_bootRomFunctionTable._debug_trampoline_end = offset;
+                    entriesLeftToFind--;
+                    break;
+                default:
+                    break;
+            }
+        }
+        address += bytesRead;
+    }
+}
+
+static bool checkRP2040BootRomMagicValue()
+{
+    // The RP2040 should contain this magic value at address 0x10.
+    const uint32_t bootRomMagicAddress = 0x10;
+    const uint8_t  bootRomMagicValue[] = { 'M', 'u', 0x01 };
+
+    uint8_t  value[3] = { 0, 0, 0 };
+    uint32_t bytesRead = g_swd.readTargetMemory(bootRomMagicAddress, &value, sizeof(value), SWD::TRANSFER_8BIT);
+    if (bytesRead != sizeof(value))
+    {
+        logError("Failed to read RP2040 Boot ROM magic value.");
+        return false;
+    }
+    if (memcmp(&value, bootRomMagicValue, sizeof(bootRomMagicValue)) != 0)
+    {
+        logErrorF("RP2040 ROM magic value is invalid (0x%02X 0x%02X 0x%02X).", value[0], value[1], value[2]);
+        return false;
+    }
+
+    return true;
+}
+
+static bool eraseFlash(uint32_t address, uint32_t length)
+{
+    if (!disableFlashXIP())
+    {
+        logError("Failed to disable FLASH XIP.");
+        return false;
+    }
+
+    // UNDONE: These are probably specific to the FLASH used on the Pico and compatible devices.
+    const uint32_t FLASH_BLOCK_SIZE = 1u << 16;
+    const uint32_t FLASH_BLOCK_ERASE_CMD = 0xd8;
+    if (!callBootRomRoutine(g_bootRomFunctionTable._flash_range_erase, address, length, FLASH_BLOCK_SIZE, FLASH_BLOCK_ERASE_CMD))
+    {
+        logErrorF("Failed calling _flash_range_erase(0x%08lX, %lu, %lu, 0x%02X) in RP2040 Boot ROM.",
+                   address, length, FLASH_BLOCK_SIZE, FLASH_BLOCK_ERASE_CMD);
+        reenableFlashXIP();
+        return false;
+    }
+
+    if (!reenableFlashXIP())
+    {
+        logError("Failed to reenable FLASH XIP.");
+        return false;
+    }
+
+    return true;
+}
+
+static bool disableFlashXIP()
+{
+    if (!callBootRomRoutine(g_bootRomFunctionTable._connect_internal_flash, 0, 0, 0, 0))
+    {
+        logError("Failed calling _connect_internal_flash() in RP2040 Boot ROM.");
+        return false;
+    }
+    if (!callBootRomRoutine(g_bootRomFunctionTable._flash_exit_xip, 0, 0, 0, 0))
+    {
+        logError("Failed calling _flash_exit_xip() in RP2040 Boot ROM.");
+        return false;
+    }
+
+    return true;
+}
+
+static bool reenableFlashXIP()
+{
+    if (!callBootRomRoutine(g_bootRomFunctionTable._flash_flush_cache, 0, 0, 0, 0))
+    {
+        logError("Failed calling _flash_flush_cache() in RP2040 Boot ROM.");
+        return false;
+    }
+    if (!callBootRomRoutine(g_bootRomFunctionTable._flash_enter_cmd_xip, 0, 0, 0, 0))
+    {
+        logError("Failed calling _flash_enter_cmd_xip() in RP2040 Boot ROM.");
+        return false;
+    }
+
+    return true;
+}
+
+static bool callBootRomRoutine(uint32_t functionOffset, uint32_t param1, uint32_t param2, uint32_t param3, uint32_t param4)
+{
+    // Set the CPU registers required for calling the Boot ROM function.
+    bool result = true;
+    result &= writeCpuRegister(R0, param1);
+    result &= writeCpuRegister(R1, param2);
+    result &= writeCpuRegister(R2, param3);
+    result &= writeCpuRegister(R3, param4);
+    result &= writeCpuRegister(R7, functionOffset);
+    result &= writeCpuRegister(LR, g_bootRomFunctionTable._debug_trampoline_end);
+    result &= writeCpuRegister(PC, g_bootRomFunctionTable._debug_trampoline);
+    if (!result)
+    {
+        logError("Failed to set registers for executing RP2040 Boot ROM routine.");
+        return result;
+    }
+
+    if (!disableSingleStepAndMaskInterrupts())
+    {
+        logError("Failed to setup for executing RP2040 Boot ROM routine.");
+        return false;
+    }
+
+    if (!requestCpuToResume())
+    {
+        logError("Failed to start executing RP2040 Boot ROM routine.");
+        return false;
+    }
+
+    // Wait for Boot ROM routine to complete.
+    absolute_time_t endTime = make_timeout_time_ms(EXEC_RP2040_BOOT_ROM_FUNC_TIMEOUT_MS);
+    uint32_t DHCSR_Val = 0;
+    do
+    {
+        if (!readDHCSR(&DHCSR_Val))
+        {
+            return false;
+        }
+    } while (!hasCpuHalted(DHCSR_Val) && absolute_time_diff_us(get_absolute_time(), endTime) > 0);
+    if (!hasCpuHalted(DHCSR_Val))
+    {
+        logError("Timeout out waiting for RP2040 Boot ROM routine to complete.");
+        return false;
+    }
+
+    // Should be stopped at the _debug_trampoline_end symbol.
+    uint32_t pc = 0;
+    if (!readCpuRegister(PC, &pc))
+    {
+        logError("Failed to read PC after executing RP2040 Boot ROM routine.");
+        return false;
+    }
+    // Set thumb bit in PC to match function pointer address.
+    pc |= 1;
+    if (pc != g_bootRomFunctionTable._debug_trampoline_end)
+    {
+        logErrorF("RP2040 Boot ROM routine didn't stop as expected. Expected: 0x%08lX Actual: 0x%08lX.",
+                  g_bootRomFunctionTable._debug_trampoline_end, pc);
+        return false;
+    }
+
+    return true;
+}
+
+static bool disableSingleStepAndMaskInterrupts()
+{
+    const uint32_t singleStepAndMaskInterrupts_Mask = DHCSR_C_STEP_Bit | DHCSR_C_MASKINTS_Bit;
+
+    uint32_t DHCSR_Val = 0;
+    if (!readDHCSR(&DHCSR_Val))
+    {
+        return false;
+    }
+
+    DHCSR_Val = (DHCSR_Val & ~singleStepAndMaskInterrupts_Mask) | DHCSR_C_MASKINTS_Bit;
+    if (!writeDHCSR(DHCSR_Val))
+    {
+        return false;
+    }
+    return true;
+}
+
+/* Handle the 'vFlashWrite' command which writes to the specified location in FLASH.
+
+    Command Format:     vFlashWrite:AAAAAAAA:XX...
+    Response Format:    OK
+
+    Where AAAAAAAA is the hexadecimal representation of the address where the write is to start.
+          xx is the byte in escaped binary format of the first byte to be written to the specified location.
+          ... continue returning the rest of the bytes in escaped binary format.
+*/
+static uint32_t  handleFlashWriteCommand(Buffer* pBuffer)
+{
+    AddressLength  addressLength = {0, 0};
+
+    __try
+    {
+        __throwing_func( ThrowIfNextCharIsNotEqualTo(pBuffer, ':') );
+        __throwing_func( addressLength.address = ReadUIntegerArgument(pBuffer) );
+        __throwing_func( ThrowIfNextCharIsNotEqualTo(pBuffer, ':') );
+        __throwing_func( throwIfAttemptingToFlashInvalidAddress(&addressLength) );
+    }
+    __catch
+    {
+        logError("Failed parsing vFlashWrite command.");
+        PrepareStringResponse(MRI_ERROR_INVALID_ARGUMENT);
+        return HANDLER_RETURN_HANDLED;
+    }
+
+    if (!writeToFlash(pBuffer, &addressLength))
+    {
+        PrepareStringResponse(MRI_ERROR_MEMORY_ACCESS_FAILURE);
+        return HANDLER_RETURN_HANDLED;
+    }
+    logInfoF("Wrote %lu bytes to FLASH at 0x%08lX.", addressLength.length, addressLength.address);
+
+    PrepareStringResponse("OK");
+    return HANDLER_RETURN_HANDLED;
+}
+
+static const uint32_t RAM_START_ADDRESS = 0x20000000;
+
+static bool writeToFlash(Buffer* pBuffer, AddressLength* pAddressLength)
+{
+    // Need to align both the address and length to 256-bytes.
+    const uint32_t alignment = 256;
+    uint32_t startAddress = pAddressLength->address;
+    uint32_t alignedStartAddress = startAddress & ~(alignment-1);
+
+    // Copy bytes into 256-byte aligned buffer on the stack.
+    const uint32_t maxPacketBytes = PACKET_SIZE-4;
+    uint8_t buffer[maxPacketBytes + 2*alignment];
+
+    // Align start of FLASH write to word boundary by padding with existing bytes from beginning of first word in FLASH.
+    uint32_t bytesLeft = sizeof(buffer);
+    uint8_t* pDest = buffer;
+    int32_t size = alignStartOfWriteByCopyingExistingFlashData(pDest, alignedStartAddress, startAddress);
+    if (size < 0)
+    {
+        return false;
+    }
+    bytesLeft -= size;
+    pDest += size;
+
+    // Copy the bytes provided by GDB into aligned buffer.
+    size = copyBytes(pDest, bytesLeft, pBuffer);
+    bytesLeft -= size;
+    pDest += size;
+    pAddressLength->length = size;
+
+    // Pad last few bytes with 0xFF to make the length of the write aligned as well.
+    uint32_t endAddress = startAddress + size;
+    uint32_t alignedEndAddress = (endAddress+alignment-1) & ~(alignment-1);
+    memset(pDest, 0xFF, alignedEndAddress-endAddress);
+    uint32_t byteCount = alignedEndAddress-alignedStartAddress;
+
+    // Copy buffer from debugger to beginning of target RAM.
+    uint32_t bytesCopied = g_swd.writeTargetMemory(RAM_START_ADDRESS, buffer, byteCount, SWD::TRANSFER_32BIT);
+    if (bytesCopied != byteCount)
+    {
+        logErrorF("Failed to copy %lu bytes to target RAM.", byteCount);
+        return false;
+    }
+
+    // Disable FLASH XIP before writing to it.
+    if (!disableFlashXIP())
+    {
+        logError("Failed to disable FLASH XIP.");
+        return false;
+    }
+
+    if (!callBootRomRoutine(g_bootRomFunctionTable._flash_range_program,
+                            alignedStartAddress-FLASH_START_ADDRESS, RAM_START_ADDRESS, byteCount, 0))
+    {
+        logError("Failed calling _flash_range_program() in RP2040 Boot ROM.");
+        reenableFlashXIP();
+        return false;
+    }
+
+    // Need to re-enable for future alignment padding reads.
+    if (!reenableFlashXIP())
+    {
+        logError("Failed to re-enable FLASH XIP.");
+        return false;
+    }
+
+    return true;
+}
+
+static int32_t alignStartOfWriteByCopyingExistingFlashData(uint8_t* pDest, uint32_t alignedStart, uint32_t unalignedStart)
+{
+    uint32_t bytesToCopy = unalignedStart - alignedStart;
+    uint32_t bytesRead = g_swd.readTargetMemory(alignedStart, pDest, bytesToCopy, SWD::TRANSFER_8BIT);
+    if (bytesRead != bytesToCopy)
+    {
+        logErrorF("Failed to read unaligned %lu bytes at 0x%08lX.", bytesToCopy, alignedStart);
+        return -1;
+    }
+
+    return bytesToCopy;
+}
+
+static uint32_t copyBytes(uint8_t* pDest, size_t destSize, Buffer* pBuffer)
+{
+    uint8_t* pStart = pDest;
+    while (destSize-- > 0)
+    {
+        char currChar;
+
+        // Keep reading bytes until we reach the end of the source buffer.
+        __try
+        {
+            __throwing_func( currChar = Buffer_ReadChar(pBuffer) );
+        }
+        __catch
+        {
+            break;
+        }
+
+        *pDest++ = currChar;
+    }
+    return pDest - pStart;
+}
+
+/* Handle the 'vFlashDone' command which lets us know that the FLASH update is now complete.
+
+    Command Format:     vFlashDone
+    Response Format:    OK
+*/
+static uint32_t handleFlashDoneCommand(Buffer* pBuffer)
+{
+    logInfo("Completed FLASH update.");
+
+    // Want to reset on next continue to place microcontroller in clean state for running new code now in FLASH.
+    RequestResetOnNextContinue();
+    PrepareStringResponse("OK");
+    return HANDLER_RETURN_HANDLED;
+}
+
+
 
 
 uint32_t Platform_RtosGetHaltedThreadId(void)
