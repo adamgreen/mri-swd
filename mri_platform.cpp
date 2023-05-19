@@ -77,6 +77,7 @@ static bool      g_wasMemoryExceptionEncountered = false;
 static bool      g_isSingleSteppingEnabled = false;
 static bool      g_isResetting = false;
 static bool      g_isInDebugger = false;
+static bool      g_doesHaltDebuggingNeedToBeEnabled = false;
 static PlatformTrapReason g_trapReason;
 
 
@@ -95,6 +96,7 @@ static uint32_t readTargetMemory(uint32_t address, void* pvBuffer, uint32_t buff
 static void handleUnrecoverableSwdError();
 static bool writeDHCSR(uint32_t DHCSR_Value);
 static uint32_t writeTargetMemory(uint32_t address, const void* pvBuffer, uint32_t bufferSize, SWD::TransferSize writeSize);
+static void enableHaltDebugging(uint32_t DHCSR_Val);
 static bool isDeviceResetting(uint32_t DHCSR_Value);
 static bool isCpuHalted(uint32_t DHCSR_Val);
 static void saveContext();
@@ -290,11 +292,30 @@ static void innerDebuggerLoop()
             g_isSwdConnected = false;
             continue;
         }
-
+        if (g_doesHaltDebuggingNeedToBeEnabled)
+        {
+            g_doesHaltDebuggingNeedToBeEnabled = false;
+            enableHaltDebugging(DHCSR_Val);
+        }
         if (isDeviceResetting(DHCSR_Val))
         {
-            logInfo("Device RESET detected.");
-            g_isResetting = false;
+            if (g_isResetting)
+            {
+                g_isResetting = false;
+                logInfo("Device RESET request completed.");
+            }
+            else
+            {
+                if (g_gdbSocket.isGdbConnected())
+                {
+                    logInfo("Forcing GDB to disconnect due to unexpected device RESET.");
+                    g_gdbSocket.closeClient();
+                }
+                else
+                {
+                    logInfo("External device RESET detected.");
+                }
+            }
             continue;
         }
         if (!hasCpuHalted && isCpuHalted(DHCSR_Val))
@@ -309,13 +330,13 @@ static void innerDebuggerLoop()
             hasCpuHalted = false;
             saveContext();
             mriDebugException(&g_context);
-            if (!g_isSwdConnected)
+            if (!g_isSwdConnected || !g_isNetworkConnected)
             {
                 continue;
             }
             else if (g_isResetting)
             {
-                logInfo("GDB has requested device reset.");
+                logInfo("GDB has requested device RESET.");
             }
             else
             {
@@ -451,6 +472,31 @@ static uint32_t writeTargetMemory(uint32_t address, const void* pvBuffer, uint32
         handleUnrecoverableSwdError();
     }
     return bytesWritten;
+}
+
+static void enableHaltDebugging(uint32_t DHCSR_Val)
+{
+    // The values of the current DHCSR_C_* bits will be overwritten with just what is needed to enable SWD debugging
+    // and maintain the target's current halted state.
+    if (isCpuHalted(DHCSR_Val))
+    {
+        // If the CPU is currently halted then we don't want to set DHCSR with DHCSR_C_HALT_Bit cleared as that will
+        // start the target running again.
+        logInfo("CPU was already halted at debugger init.");
+        DHCSR_Val = DHCSR_C_HALT_Bit;
+    }
+    else
+    {
+        DHCSR_Val = 0;
+    }
+
+    //  Enable halt mode debug.  Set to 1 to enable halt mode debugging.
+    const uint32_t DHCSR_C_DEBUGEN_Bit = 1 << 0;
+    DHCSR_Val |= DHCSR_C_DEBUGEN_Bit;
+    if (!writeDHCSR(DHCSR_Val))
+    {
+        logError("Failed to set C_DEBUGEN bit in DHCSR.");
+    }
 }
 
 static bool isDeviceResetting(uint32_t DHCSR_Value)
@@ -652,16 +698,46 @@ static bool requestCpuToResume()
 // Routines used by the MRI core to communicate with GDB. The implementations below use TCP/IP sockets to communicate
 // with GDB wirelessly.
 // *********************************************************************************************************************
-static void waitToReceiveData(void);
+static void checkForNetworkDown();
+static void checkForDeviceReset();
+static void waitToReceiveData();
 
 
 uint32_t Platform_CommHasReceiveData(void)
 {
-    if (isNetworkDown())
-    {
-        // Nothing to do here. It will have queued up empty packet for MRI to process though.
-    }
+    checkForNetworkDown();
+    checkForDeviceReset();
     return !g_gdbSocket.m_tcpToMriQueue.isEmpty();
+}
+
+static void checkForNetworkDown()
+{
+    isNetworkDown();
+}
+
+static void checkForDeviceReset()
+{
+    if (!g_isSwdConnected)
+    {
+        return;
+    }
+
+    // See if the Debug Halting Control and Status Register indicates that the CPU has been reset.
+    uint32_t DHCSR_Val = 0;
+    g_swd.disableErrorLogging();
+    bool result = readDHCSR(&DHCSR_Val);
+    g_swd.enableErrorLogging();
+    if (!result)
+    {
+        return;
+    }
+    if (isDeviceResetting(DHCSR_Val))
+    {
+        logInfo("Device RESET detected while halted in GDB.");
+        g_isResetting = false;
+        g_isSwdConnected = false;
+        triggerMriCoreToExit();
+    }
 }
 
 uint32_t  Platform_CommHasTransmitCompleted(void)
@@ -732,14 +808,13 @@ static uint32_t getFPBLiteralComparatorCount();
 static void clearFPBComparator(uint32_t comparatorAddress);
 static void enableFPB();
 static void writeFPControlRegister(uint32_t FP_CTRL_Value);
-static void enableHaltingDebug();
 
 
 void Platform_Init(Token* pParameterTokens)
 {
     // UNDONE: I probably need to perform this for each core in a dual core system.
     enableWatchpointBreakpointAndVectorCatchSupport();
-    enableHaltingDebug();
+    g_doesHaltDebuggingNeedToBeEnabled = true;
 }
 
 static void enableWatchpointBreakpointAndVectorCatchSupport()
@@ -939,37 +1014,6 @@ static void writeFPControlRegister(uint32_t FP_CTRL_Value)
     if (!writeTargetMemory(FP_CTRL_Address, &FP_CTRL_Value, sizeof(FP_CTRL_Value), SWD::TRANSFER_32BIT))
     {
         logError("Failed to write FP_CTRL register.");
-    }
-}
-
-static void enableHaltingDebug()
-{
-    // Read out the current DHCSR register value, just to see if the target is already halted.
-    // The values of the current DHCSR_C_* bits will be overwritten with just what is needed to enable SWD debugging
-    // and maintain the target's current halted state.
-    uint32_t DHCSR_Val = 0;
-    if (!readDHCSR(&DHCSR_Val))
-    {
-        logError("Failed to read DHCSR.");
-    }
-    if (isCpuHalted(DHCSR_Val))
-    {
-        // If the CPU is currently halted then we don't want to set DHCSR with DHCSR_C_HALT_Bit cleared as that will
-        // start the target running again.
-        logInfo("CPU was already halted at debugger init.");
-        DHCSR_Val = DHCSR_C_HALT_Bit;
-    }
-    else
-    {
-        DHCSR_Val = 0;
-    }
-
-    //  Enable halt mode debug.  Set to 1 to enable halt mode debugging.
-    const uint32_t DHCSR_C_DEBUGEN_Bit = 1 << 0;
-    DHCSR_Val |= DHCSR_C_DEBUGEN_Bit;
-    if (!writeDHCSR(DHCSR_Val))
-    {
-        logError("Failed to set C_DEBUGEN bit in DHCSR.");
     }
 }
 
@@ -2721,10 +2765,11 @@ static __throws void throwIfAttemptingToFlashInvalidAddress(AddressLength* pAddr
 static __throws void findRequiredBootRomRoutines();
 static bool checkRP2040BootRomMagicValue();
 static bool eraseFlash(uint32_t address, uint32_t length);
+static bool disableSingleStepAndInterrupts();
 static bool disableFlashXIP();
 static bool reenableFlashXIP();
 static bool callBootRomRoutine(uint32_t functionOffset, uint32_t param1, uint32_t param2, uint32_t param3, uint32_t param4);
-static bool disableSingleStepAndMaskInterrupts();
+static bool enableInterrupts();
 static uint32_t handleFlashWriteCommand(Buffer* pBuffer);
 static bool writeToFlash(Buffer* pBuffer, AddressLength* pAddressLength);
 static int32_t alignStartOfWriteByCopyingExistingFlashData(uint8_t* pDest, uint32_t alignedStart, uint32_t unalignedStart);
@@ -2953,29 +2998,65 @@ static bool checkRP2040BootRomMagicValue()
 
 static bool eraseFlash(uint32_t address, uint32_t length)
 {
-    if (!disableFlashXIP())
+    bool result = false;
+    if (!disableSingleStepAndInterrupts())
     {
-        logError("Failed to disable FLASH XIP.");
+        logError("Failed to disable single step and interrupts.");
         return false;
     }
 
-    // UNDONE: These are probably specific to the FLASH used on the Pico and compatible devices.
-    const uint32_t FLASH_BLOCK_SIZE = 1u << 16;
-    const uint32_t FLASH_BLOCK_ERASE_CMD = 0xd8;
-    if (!callBootRomRoutine(g_bootRomFunctionTable._flash_range_erase, address, length, FLASH_BLOCK_SIZE, FLASH_BLOCK_ERASE_CMD))
+    do
     {
-        logErrorF("Failed calling _flash_range_erase(0x%08lX, %lu, %lu, 0x%02X) in RP2040 Boot ROM.",
-                   address, length, FLASH_BLOCK_SIZE, FLASH_BLOCK_ERASE_CMD);
-        reenableFlashXIP();
+        if (!disableFlashXIP())
+        {
+            logError("Failed to disable FLASH XIP.");
+            break;
+        }
+
+        // UNDONE: These are probably specific to the FLASH used on the Pico and compatible devices.
+        const uint32_t FLASH_BLOCK_SIZE = 1u << 16;
+        const uint32_t FLASH_BLOCK_ERASE_CMD = 0xd8;
+        if (!callBootRomRoutine(g_bootRomFunctionTable._flash_range_erase, address, length, FLASH_BLOCK_SIZE, FLASH_BLOCK_ERASE_CMD))
+        {
+            logErrorF("Failed calling _flash_range_erase(0x%08lX, %lu, %lu, 0x%02X) in RP2040 Boot ROM.",
+                    address, length, FLASH_BLOCK_SIZE, FLASH_BLOCK_ERASE_CMD);
+            reenableFlashXIP();
+            break;
+        }
+
+        if (!reenableFlashXIP())
+        {
+            logError("Failed to reenable FLASH XIP.");
+            break;
+        }
+
+        result = true;
+    } while (false);
+
+    if (!enableInterrupts())
+    {
+        logError("Failed to enable interrupts.");
         return false;
     }
 
-    if (!reenableFlashXIP())
+    return result;
+}
+
+static bool disableSingleStepAndInterrupts()
+{
+    const uint32_t singleStepAndMaskInterrupts_Mask = DHCSR_C_STEP_Bit | DHCSR_C_MASKINTS_Bit;
+
+    uint32_t DHCSR_Val = 0;
+    if (!readDHCSR(&DHCSR_Val))
     {
-        logError("Failed to reenable FLASH XIP.");
         return false;
     }
 
+    DHCSR_Val = (DHCSR_Val & ~singleStepAndMaskInterrupts_Mask) | DHCSR_C_MASKINTS_Bit;
+    if (!writeDHCSR(DHCSR_Val))
+    {
+        return false;
+    }
     return true;
 }
 
@@ -3028,12 +3109,6 @@ static bool callBootRomRoutine(uint32_t functionOffset, uint32_t param1, uint32_
         return result;
     }
 
-    if (!disableSingleStepAndMaskInterrupts())
-    {
-        logError("Failed to setup for executing RP2040 Boot ROM routine.");
-        return false;
-    }
-
     if (!requestCpuToResume())
     {
         logError("Failed to start executing RP2040 Boot ROM routine.");
@@ -3075,17 +3150,15 @@ static bool callBootRomRoutine(uint32_t functionOffset, uint32_t param1, uint32_
     return true;
 }
 
-static bool disableSingleStepAndMaskInterrupts()
+static bool enableInterrupts()
 {
-    const uint32_t singleStepAndMaskInterrupts_Mask = DHCSR_C_STEP_Bit | DHCSR_C_MASKINTS_Bit;
-
     uint32_t DHCSR_Val = 0;
     if (!readDHCSR(&DHCSR_Val))
     {
         return false;
     }
 
-    DHCSR_Val = (DHCSR_Val & ~singleStepAndMaskInterrupts_Mask) | DHCSR_C_MASKINTS_Bit;
+    DHCSR_Val = DHCSR_Val & ~DHCSR_C_MASKINTS_Bit;
     if (!writeDHCSR(DHCSR_Val))
     {
         return false;
@@ -3175,29 +3248,47 @@ static bool writeToFlash(Buffer* pBuffer, AddressLength* pAddressLength)
         return false;
     }
 
-    // Disable FLASH XIP before writing to it.
-    if (!disableFlashXIP())
+    bool result = false;
+    if (!disableSingleStepAndInterrupts())
     {
-        logError("Failed to disable FLASH XIP.");
+        logError("Failed to disable single step and interrupts.");
         return false;
     }
 
-    if (!callBootRomRoutine(g_bootRomFunctionTable._flash_range_program,
-                            alignedStartAddress-FLASH_START_ADDRESS, RAM_START_ADDRESS, byteCount, 0))
+    do
     {
-        logError("Failed calling _flash_range_program() in RP2040 Boot ROM.");
-        reenableFlashXIP();
+        // Disable FLASH XIP before writing to it.
+        if (!disableFlashXIP())
+        {
+            logError("Failed to disable FLASH XIP.");
+            break;
+        }
+
+        if (!callBootRomRoutine(g_bootRomFunctionTable._flash_range_program,
+                                alignedStartAddress-FLASH_START_ADDRESS, RAM_START_ADDRESS, byteCount, 0))
+        {
+            logError("Failed calling _flash_range_program() in RP2040 Boot ROM.");
+            reenableFlashXIP();
+            break;
+        }
+
+        // Need to re-enable for future alignment padding reads.
+        if (!reenableFlashXIP())
+        {
+            logError("Failed to re-enable FLASH XIP.");
+            break;
+        }
+
+        result = true;
+    } while (false);
+
+    if (!enableInterrupts())
+    {
+        logError("Failed to enable interrupts.");
         return false;
     }
 
-    // Need to re-enable for future alignment padding reads.
-    if (!reenableFlashXIP())
-    {
-        logError("Failed to re-enable FLASH XIP.");
-        return false;
-    }
-
-    return true;
+    return result;
 }
 
 static int32_t alignStartOfWriteByCopyingExistingFlashData(uint8_t* pDest, uint32_t alignedStart, uint32_t unalignedStart)
