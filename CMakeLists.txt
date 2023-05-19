@@ -41,8 +41,8 @@ string(REPLACE "-O2" "-O3" CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITH
 
 add_executable(mri-swd)
 
-# Include wifi_config.cmake if it exists. If it exists, it will have the user's WIFI credentials.
-include(wifi_config.cmake OPTIONAL)
+# Include wifi_config.cmake which should contain the user's WIFI credentials.
+include(wifi_config.cmake)
 
 target_compile_definitions(mri-swd PRIVATE
     WIFI_SSID=\"${WIFI_SSID}\"
