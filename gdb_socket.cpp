@@ -19,10 +19,6 @@
 #include "gdb_socket.h"
 
 
-// UNDONE: Get rid of this later.
-#define BUF_SIZE 2048
-
-
 GDBSocket::GDBSocket()
 {
     m_bytesInFlight = 0;
@@ -154,14 +150,11 @@ err_t GDBSocket::onRecv(tcp_pcb* pPCB, pbuf* pBuf, err_t error)
     {
         logDebugF("Received %d bytes w/ error %d", pBuf->tot_len, error);
 
-        // Receive the buffer
-        // UNDONE: Find a better way to do this.
-        uint8_t buffer[BUF_SIZE];
-        uint16_t length = pbuf_copy_partial(pBuf, buffer, pBuf->tot_len > sizeof(buffer) ? sizeof(buffer) : pBuf->tot_len, 0);
-        if (length > 0)
+        // Place the received packet data into the circular queue.
+        uint32_t bytesWritten = m_tcpToMriQueue.write(pBuf);
+        if (bytesWritten != pBuf->tot_len)
         {
-            // UNDONE: What should I do if this fails to queue up all of the data?
-            m_tcpToMriQueue.write(buffer, length);
+            logErrorF("Truncated TCP/IP received packet by %lu bytes.", pBuf->tot_len - bytesWritten);
         }
         tcp_recved(pPCB, pBuf->tot_len);
     }

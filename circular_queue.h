@@ -17,6 +17,7 @@
 #define CICRCULAR_QUEUE_H_
 
 #include <stdint.h>
+#include <lwip/pbuf.h>
 #include "atomic.h"
 
 
@@ -60,6 +61,16 @@ class CircularQueue
             }
             atomic_u32_add(&m_count, bytesToWrite);
             return bytesToWrite;
+        }
+
+        uint32_t write(const struct pbuf *pbuf)
+        {
+            uint32_t bytesWritten = 0;
+            for ( ; pbuf != NULL ; pbuf = pbuf->next )
+            {
+                bytesWritten += write((uint8_t*)pbuf->payload, pbuf->len);
+            }
+            return bytesWritten;
         }
 
         uint32_t bytesToRead()
