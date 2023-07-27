@@ -16,8 +16,6 @@
 #ifndef CONFIG_H_
 #define CONFIG_H_
 
-// UNDONE: Move other configurations parameters such as GDB packet size, etc.
-
 
 // GDB socket port number.
 #define GDB_SOCKET_PORT_NUMBER 2331
@@ -30,6 +28,10 @@
 
 // Timeout in milliseconds to use when attempting to connect to the WiFi router.
 #define WIFI_ROUTER_TIMEOUT_MS 30000
+
+// Default SWD clock rate used when initially probing the device. It will be increased later for known devices that
+// support higher clock rates.
+#define DEFAULT_SWD_CLOCK_RATE 8000000
 
 // Amount of time in ms to delay between attempts to attach to a SWD target (ie. to recover from it not being powered
 // up).
@@ -62,6 +64,10 @@
 // gdb_socket.cpp logging
 #define LOGGING_GDB_SOCKET_ERROR_ENABLED 1
 #define LOGGING_GDB_SOCKET_DEBUG_ENABLED 0
+
+// Modules under the devices/ directory
+#define LOGGING_DEVICE_ERROR_ENABLED 1
+#define LOGGING_DEVICE_DEBUG_ENABLED 1
 
 
 // Size of the packet buffer to use for communicating with GDB.

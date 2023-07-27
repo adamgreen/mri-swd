@@ -22,6 +22,7 @@
 #include "swd.h"
 #include "mri_platform.h"
 #include "config.h"
+#include "devices/devices.h"
 
 // MRI C headers
 extern "C"
@@ -33,6 +34,7 @@ extern "C"
     #include <core/signal.h>
     #include <core/memory.h>
     #include <core/cmd_common.h>
+    #include <core/gdb_console.h>
 }
 
 
@@ -62,6 +64,21 @@ const uint32_t PRIMASK = 19;
 const uint32_t BASEPRI = 20;
 const uint32_t FAULTMASK = 21;
 const uint32_t CONTROL = 22;
+const uint32_t S0 = 23;
+const uint32_t FPSCR = S0 + 32;
+
+// Does the device have a FPU?
+enum FpuDiscoveryStates
+{
+    // We know for sure that the device doesn't have a FPU.
+    FPU_NONE = 0,
+    // Cortex-M4 or higher MIGHT have a FPU. Will need to query CPACR on first halt to know for sure.
+    FPU_MAYBE,
+    // We now know for sure that the device has a FPU.
+    // We later determined the device doesn't have a FPU but target XML indicates that it does.
+    FPU_AVAILABLE,
+    FPU_NOT_AVAILABLE
+};
 
 // CPU register context information is stored here.
 static uint32_t       g_contextRegisters[registerCountFPU];
@@ -79,12 +96,29 @@ static bool      g_isResetting = false;
 static bool      g_isInDebugger = false;
 static bool      g_doesHaltDebuggingNeedToBeEnabled = false;
 static PlatformTrapReason g_trapReason;
+static FpuDiscoveryStates g_fpu = FPU_NONE;
+
+// When mri-swd has support (including FLASH programming) for the attached device, then these globals will store
+// pointers to its function table and object data.
+static DeviceFunctionTable* g_pDevice = NULL;
+static DeviceObject*        g_pDeviceObject = NULL;
+
+// Used as storage for the device memory layout XML.
+static char*   g_pMemoryLayoutXML = NULL;
+static int32_t g_memoryLayoutAllocSize = 0;
+static int32_t g_memoryLayoutSize = 0;
 
 
 // Forward Function Declarations.
+static void cleanupDeviceObject();
 static bool initSWD();
 static bool waitForSwdAttach(uint32_t delayBetweenAttempts_ms);
 static bool attemptSwdAttach();
+static void determineCpuProperties();
+static void searchSupportedDevices();
+static FpuDiscoveryStates determineFpuAvailability();
+static void updateSwdFrequencyForDevice();
+static void setMemoryLayoutXML();
 static bool initNetwork();
 static void innerDebuggerLoop();
 static bool isNetworkDown();
@@ -99,6 +133,7 @@ static uint32_t writeTargetMemory(uint32_t address, const void* pvBuffer, uint32
 static void enableHaltDebugging(uint32_t DHCSR_Val);
 static bool isDeviceResetting(uint32_t DHCSR_Value);
 static bool isCpuHalted(uint32_t DHCSR_Val);
+static void checkForFpu();
 static void saveContext();
 static bool readCpuRegister(uint32_t registerIndex, uint32_t* pValue);
 static void waitForRegisterTransferToComplete();
@@ -113,8 +148,7 @@ static bool g_isNetworkConnected = false;
 
 void mainDebuggerLoop()
 {
-    // UNDONE: Need to handle clock rates other than 24MHz.
-    if (!g_swd.init(24000000, SWCLK_PIN, SWDIO_PIN))
+    if (!g_swd.init(DEFAULT_SWD_CLOCK_RATE, SWCLK_PIN, SWDIO_PIN))
     {
         logError("Failed to initialize the SWD port.");
         return;
@@ -127,12 +161,18 @@ void mainDebuggerLoop()
     {
         if (!g_isSwdConnected)
         {
+            cleanupDeviceObject();
+
             g_isSwdConnected = initSWD();
             if (!g_isSwdConnected)
             {
                 logError("Failed to initialize SWD connection to debuggee.");
                 return;
             }
+
+            determineCpuProperties();
+            updateSwdFrequencyForDevice();
+            setMemoryLayoutXML();
         }
 
         if (!g_isNetworkConnected)
@@ -164,6 +204,18 @@ void mainDebuggerLoop()
             cyw43_arch_deinit();
         }
     }
+}
+
+static void cleanupDeviceObject()
+{
+    if (!g_pDevice)
+    {
+        return;
+    }
+
+    g_pDevice->free(g_pDeviceObject, &g_swd);
+    g_pDeviceObject = NULL;
+    g_pDevice = NULL;
 }
 
 static bool initSWD()
@@ -201,12 +253,6 @@ static bool waitForSwdAttach(uint32_t delayBetweenAttempts_ms)
 
 static bool attemptSwdAttach()
 {
-    // Put any DPv2 targets into dormant mode. Go through this step so that we don't mistakenly activate power on
-    // something like the RP2040 Rescue DP if it managed to get itself selected during a previous debug attempt.
-    // Should be ignored by older SWD target DPs.
-    g_swd.switchJtagIntoDormantMode();
-    g_swd.switchSwdIntoDormantMode();
-
     // Search through all known SWD DPv2 targets to see if any are found.
     // If that fails, try detecting SWD targets which don't go dormant, after making to switch SWJ-DP targets into SWD
     // mode.
@@ -235,6 +281,161 @@ static bool attemptSwdAttach()
     }
     logInfo("SWD initialization complete!");
     return true;
+}
+
+static void determineCpuProperties()
+{
+    searchSupportedDevices();
+    g_fpu = determineFpuAvailability();
+}
+
+static void searchSupportedDevices()
+{
+    assert ( g_pDevice == NULL && g_pDeviceObject == NULL );
+    for (size_t i = 0; i < g_supportedDevicesLength ; i++)
+    {
+        DeviceFunctionTable* pDevice = g_supportedDevices[i];
+        DeviceObject* pObject = pDevice->detect(&g_swd);
+        if (pObject)
+        {
+            g_pDevice = pDevice;
+            g_pDeviceObject = pObject;
+            logInfoF("Found device of type %s.", pDevice->getName(g_pDeviceObject, &g_swd));
+
+            break;
+        }
+    }
+    if (!g_pDevice)
+    {
+        logInfo("Unrecognized device type. FLASH programming not supported!");
+    }
+}
+
+static FpuDiscoveryStates determineFpuAvailability()
+{
+    if (g_pDevice)
+    {
+        if (g_pDevice->hasFpu(g_pDeviceObject, &g_swd))
+        {
+            logInfo("Device has FPU.");
+            return FPU_AVAILABLE;
+        }
+        else
+        {
+            return FPU_NONE;
+        }
+    }
+    else
+    {
+        if (g_swd.getCpuType() >= SWD::CPU_CORTEX_M4)
+        {
+            return FPU_MAYBE;
+        }
+        else
+        {
+            return FPU_NONE;
+        }
+    }
+}
+
+static void updateSwdFrequencyForDevice()
+{
+    if (!g_pDevice)
+    {
+        return;
+    }
+
+    uint32_t swdFrequency = g_pDevice->getMaximumSWDClockFrequency(g_pDeviceObject, &g_swd);
+    if (!g_swd.setFrequency(swdFrequency))
+    {
+        logErrorF("Failed to re-initialize the SWD port to a frequency of %lu.", swdFrequency);
+        return;
+    }
+    logInfoF("Configured SWD frequency to %lu.", swdFrequency);
+}
+
+
+static void setMemoryLayoutXML()
+{
+    const DeviceMemoryLayout* pLayout;
+    if (g_pDevice)
+    {
+        pLayout = g_pDevice->getMemoryLayout(g_pDeviceObject, &g_swd);
+    }
+    else
+    {
+        pLayout = deviceDefaultMemoryLayout(NULL, &g_swd);
+    }
+    assert ( pLayout );
+
+    const char xmlHeader[] = "<?xml version=\"1.0\"?>"
+                             "<!DOCTYPE memory-map PUBLIC \"+//IDN gnu.org//DTD GDB Memory Map V1.0//EN\" \"http://sourceware.org/gdb/gdb-memory-map.dtd\">"
+                             "<memory-map>";
+    const char xmlFooter[] = "</memory-map>";
+    const char xmlLongestRegion[] = "<memory type=\"flash\" start=\"0x12345678\" length=\"0x12345678\"> <property name=\"blocksize\">0x12345678</property></memory>";
+
+    // Calculate the maximum number of bytes needed for the full memory layout XML string and make sure that
+    // g_pMemoryLayoutXML is at least this large.
+    int32_t bytesRequired = sizeof(xmlHeader) + pLayout->regionCount * sizeof(xmlLongestRegion) + sizeof(xmlFooter);
+    if (bytesRequired > g_memoryLayoutAllocSize)
+    {
+        char* pAlloc = (char*)realloc(g_pMemoryLayoutXML, bytesRequired);
+        if (!pAlloc)
+        {
+            logErrorF("Failed to allocate %d bytes for memory layout XML.", bytesRequired);
+            return;
+        }
+        g_pMemoryLayoutXML = pAlloc;
+        g_memoryLayoutAllocSize = bytesRequired;
+    }
+
+    // Add the XML header.
+    int32_t bytesLeft = g_memoryLayoutAllocSize;
+    char* pDest = g_pMemoryLayoutXML;
+    memcpy(pDest, xmlHeader, sizeof(xmlHeader)-1);
+    bytesLeft -= sizeof(xmlHeader) - 1;
+    pDest += sizeof(xmlHeader) - 1;
+
+    // Add a line for each region in the device's memory layout.
+    for (size_t i = 0 ; i < pLayout->regionCount ; i++)
+    {
+        int bytesUsed = 0;
+        const DeviceMemoryRegion* pRegion = &pLayout->pRegions[i];
+
+        switch (pRegion->type)
+        {
+            case DEVICE_MEMORY_ROM:
+                bytesUsed = snprintf(pDest, bytesLeft,
+                                     "<memory type=\"rom\" start=\"0x%lX\" length=\"0x%lX\"></memory>",
+                                     pRegion->address, pRegion->length);
+                break;
+            case DEVICE_MEMORY_FLASH:
+                bytesUsed = snprintf(pDest, bytesLeft,
+                                     "<memory type=\"flash\" start=\"0x%lX\" length=\"0x%lX\"><property name=\"blocksize\">0x%lX</property></memory>",
+                                     pRegion->address, pRegion->length, pRegion->blockSize);
+                break;
+            case DEVICE_MEMORY_RAM:
+                bytesUsed = snprintf(pDest, bytesLeft,
+                                     "<memory type=\"ram\" start=\"0x%lX\" length=\"0x%lX\"></memory>",
+                                     pRegion->address, pRegion->length);
+                break;
+            default:
+                assert ( false );
+                break;
+        }
+
+        assert ( bytesUsed > 0 && bytesUsed < bytesLeft );
+        bytesLeft -= bytesUsed;
+        pDest += bytesUsed;
+    }
+
+    // Add the XML footer, including the NULL terminator.
+    assert ( bytesLeft >= (int32_t)sizeof(xmlFooter) );
+    memcpy(pDest, xmlFooter, sizeof(xmlFooter));
+    bytesLeft -= sizeof(xmlFooter);
+
+    // Record the final size of the XML string, including the NULL terminator.
+    g_memoryLayoutSize = g_memoryLayoutAllocSize - bytesLeft;
 }
 
 static bool initNetwork()
@@ -328,6 +529,7 @@ static void innerDebuggerLoop()
         if (!g_isResetting && g_gdbSocket.isGdbConnected() && hasCpuHalted)
         {
             hasCpuHalted = false;
+            checkForFpu();
             saveContext();
             mriDebugException(&g_context);
             if (!g_isSwdConnected || !g_isNetworkConnected)
@@ -509,19 +711,89 @@ static bool isDeviceResetting(uint32_t DHCSR_Value)
 static bool isCpuHalted(uint32_t DHCSR_Val)
 {
     const uint32_t DHCSR_S_HALT_Bit = 1 << 17;
-    return (DHCSR_Val & DHCSR_S_HALT_Bit) == DHCSR_S_HALT_Bit;
+    return !!(DHCSR_Val & DHCSR_S_HALT_Bit);
+}
+
+static void checkForFpu()
+{
+    if (g_fpu != FPU_MAYBE)
+    {
+        // We already know for sure whether there is a FPU on this device or not so just return.
+        return;
+    }
+
+    const uint32_t CPACR_Address = 0xE000ED88;
+    const uint32_t CPACR_CP10_Shift = 20;
+    const uint32_t CPACR_CP10_Mask = 0xF << CPACR_CP10_Shift;
+    const uint32_t CPACR_CP11_Shift = 22;
+    const uint32_t CPACR_CP11_Mask = 0xF << CPACR_CP11_Shift;
+
+    uint32_t CPACR_OrigValue = 0;
+    if (!readTargetMemory(CPACR_Address, &CPACR_OrigValue, sizeof(CPACR_OrigValue), SWD::TRANSFER_32BIT))
+    {
+        logError("Failed to read CPACR register.");
+        // On error, assume that FPU doesn't exist.
+        g_fpu = FPU_NOT_AVAILABLE;
+        return;
+    }
+    if ((CPACR_OrigValue & CPACR_CP10_Mask) && (CPACR_OrigValue & CPACR_CP11_Mask))
+    {
+        // FPU exists and is enabled.
+        logInfo("Device has FPU.");
+        g_fpu = FPU_AVAILABLE;
+        return;
+    }
+
+    // Try enabling the FPU.
+    uint32_t CPACR_TestValue = CPACR_CP10_Mask | CPACR_CP11_Mask | CPACR_OrigValue;
+    if (!writeTargetMemory(CPACR_Address, &CPACR_TestValue, sizeof(CPACR_TestValue), SWD::TRANSFER_32BIT))
+    {
+        logError("Failed to test CPACR register.");
+        // On error, assume that FPU doesn't exist.
+        g_fpu = FPU_NOT_AVAILABLE;
+        return;
+    }
+
+    // See if the FPU enable took. If so then the FPU exists.
+    uint32_t CPACR_UpdatedValue = ~CPACR_TestValue;
+    if (!readTargetMemory(CPACR_Address, &CPACR_UpdatedValue, sizeof(CPACR_UpdatedValue), SWD::TRANSFER_32BIT))
+    {
+        logError("Failed to verify CPACR register.");
+        // On error, assume that FPU doesn't exist.
+        g_fpu = FPU_NOT_AVAILABLE;
+    }
+    if (CPACR_UpdatedValue == CPACR_TestValue)
+    {
+        logInfo("Device has FPU.");
+        g_fpu = FPU_AVAILABLE;
+    }
+
+    // Restore CPACR Value.
+    if (!writeTargetMemory(CPACR_Address, &CPACR_OrigValue, sizeof(CPACR_OrigValue), SWD::TRANSFER_32BIT))
+    {
+        logError("Failed to restore CPACR register.");
+    }
 }
 
 // The special registers: CONTROL, FAULTMASK, BASEPRI, and PRIMASK are accessed at this single DCRSR index.
 const uint32_t specialRegisterIndex = 0x14;
+// The floating point registers are found at this index in the DCRSR.
+const uint32_t fpscrIndex = 0x21;
+const uint32_t s0Index = 0x40;
 
 static void saveContext()
 {
     bool encounteredError = false;
 
-    // UNDONE: Support chips with FPU as well.
-    (void)g_contextEntriesFPU;
-    Context_Init(&g_context, &g_contextEntriesNoFPU, 1);
+    bool contextHasFpu = g_fpu >= FPU_MAYBE;
+    if (contextHasFpu)
+    {
+        Context_Init(&g_context, &g_contextEntriesFPU, 1);
+    }
+    else
+    {
+        Context_Init(&g_context, &g_contextEntriesNoFPU, 1);
+    }
 
     // Transfer R0 - PSP first.
     for (uint32_t i = R0 ; i <= PSP ; i++)
@@ -545,7 +817,37 @@ static void saveContext()
         Context_Set(&g_context, PRIMASK+i, (specialRegs >> (8 * i)) & 0xFF);
     }
 
-    // UNDONE: Should transfer FPU registers.
+    // Transfer FPU registers if we returned target XML that indicates they might/do exist.
+    if (contextHasFpu)
+    {
+        // Transfer S0-S31 floating point registers.
+        for (uint32_t i = 0 ; i < 32 ; i++)
+        {
+            uint32_t regValue = 0xBAADFEED;
+            if (g_fpu == FPU_AVAILABLE)
+            {
+                if (!readCpuRegister(s0Index+i, &regValue))
+                {
+                    encounteredError = true;
+                }
+            }
+            Context_Set(&g_context, S0+i, regValue);
+        }
+
+        // Transfer FPSCR register.
+        if (g_fpu == FPU_AVAILABLE)
+        {
+            uint32_t regValue = 0xBAADFEED;
+            if (g_fpu == FPU_AVAILABLE)
+            {
+                if (!readCpuRegister(fpscrIndex, &regValue))
+                {
+                    encounteredError = true;
+                }
+            }
+            Context_Set(&g_context, FPSCR, regValue);
+        }
+    }
 
     if (encounteredError)
     {
@@ -598,8 +900,6 @@ static void restoreContext()
 {
     bool encounteredError = false;
 
-    // UNDONE: Support chips with FPU as well.
-
     // Transfer R0 - PSP first.
     for (uint32_t i = R0 ; i <= PSP ; i++)
     {
@@ -620,7 +920,24 @@ static void restoreContext()
         encounteredError = true;
     }
 
-    // UNDONE: Should transfer FPU registers.
+    // Transfer FPU registers back to CPU if we have detected that the FPU exists for sure.
+    if (g_fpu == FPU_AVAILABLE)
+    {
+        // Transfer S0-S31 floating point registers.
+        for (uint32_t i = 0 ; i < 32 ; i++)
+        {
+            if (!writeCpuRegister(s0Index+i, Context_Get(&g_context, S0+i)))
+            {
+                encounteredError = true;
+            }
+        }
+
+        // Transfer FPSCR register.
+        if (!writeCpuRegister(fpscrIndex, Context_Get(&g_context, FPSCR)))
+        {
+            encounteredError = true;
+        }
+    }
 
     if (encounteredError)
     {
@@ -1200,7 +1517,6 @@ static bool writeDFSR(uint32_t dfsr)
 //      4 (bytes for packet overhead of '$', '#', and 2 hex digit checksum)
 //      = 1 + 2 * 4 * 56 + 4 = 453
 // *********************************************************************************************************************
-// UNDONE: Should I make this larger to maybe improve FLASHing performance?
 static char g_packetBuffer[PACKET_SIZE];
 
 char* Platform_GetPacketBuffer(void)
@@ -1256,9 +1572,6 @@ static void writeBytesToBufferAsHex(Buffer* pBuffer, void* pBytes, size_t byteCo
 // *********************************************************************************************************************
 // Routines called by the MRI core to read and write memory on the target device.
 // *********************************************************************************************************************
-// UNDONE: Need a standard way to read and write multiple words at once.
-//         Can probably move core/memory.c into here and re-implement to be more efficient.
-//         Be aware that the TAR read in calculateTransferCount() might return 0 once it goes past the end of valid memory.
 uint32_t Platform_MemRead32(const void* pv)
 {
     g_wasMemoryExceptionEncountered = false;
@@ -2414,8 +2727,12 @@ static uint32_t disableDWTWatchpoint(uint32_t watchpointAddress,
 // *********************************************************************************************************************
 // Looks like this could be 9 bits on ARMv7-M or 6 bits on ARMv6-M. User the smaller count here.
 static const uint32_t IPSR_Mask = (1 << 6) - 1;
+static const uint32_t CFSR_Address = 0xE000ED28;
 
-
+static void displayHardFaultCauseToGdbConsole(void);
+static void displayMemFaultCauseToGdbConsole(void);
+static void displayBusFaultCauseToGdbConsole(void);
+static void displayUsageFaultCauseToGdbConsole(void);
 uint8_t Platform_DetermineCauseOfException(void)
 {
     uint32_t DFSR_Value = 0;
@@ -2500,8 +2817,12 @@ PlatformTrapReason Platform_GetTrapReason(void)
 
 void Platform_DisplayFaultCauseToGdbConsole(void)
 {
-    // UNDONE: Nothing to do on ARMv6-M since these registers belong to ARMv7-M.
-#ifdef UNDONE
+    // Nothing to do on ARMv6-M devices since they don't have fault status registers.
+    if (g_swd.getCpuType() < SWD::CPU_CORTEX_M3)
+    {
+        return;
+    }
+
     uint32_t exceptionNumber = Context_Get(&g_context, CPSR) & IPSR_Mask;
     switch (exceptionNumber)
     {
@@ -2525,7 +2846,236 @@ void Platform_DisplayFaultCauseToGdbConsole(void)
         return;
     }
     WriteStringToGdbConsole("\n");
-#endif // UNDONE
+}
+
+static void displayHardFaultCauseToGdbConsole(void)
+{
+    const uint32_t HFSR_Address = 0xE000ED2C;
+    const uint32_t debugEventBit = 1 << 31;
+    const uint32_t forcedBit = 1 << 30;
+    const uint32_t vectorTableReadBit = 1 << 1;
+    uint32_t       hardFaultStatusRegister = 0xBAADFEED;
+
+    if (!g_swd.readTargetMemory(HFSR_Address, &hardFaultStatusRegister, sizeof(hardFaultStatusRegister), SWD::TRANSFER_32BIT))
+    {
+        logError("Failed to read the HFSR register.");
+        return;
+    }
+
+    WriteStringToGdbConsole("\n**Hard Fault**");
+    WriteStringToGdbConsole("\n  Status Register: ");
+    WriteHexValueToGdbConsole(hardFaultStatusRegister);
+
+    if (hardFaultStatusRegister & debugEventBit)
+    {
+        WriteStringToGdbConsole("\n    Debug Event");
+    }
+
+    if (hardFaultStatusRegister & vectorTableReadBit)
+    {
+        WriteStringToGdbConsole("\n    Vector Table Read");
+    }
+
+    if (hardFaultStatusRegister & forcedBit)
+    {
+        WriteStringToGdbConsole("\n    Forced");
+        displayMemFaultCauseToGdbConsole();
+        displayBusFaultCauseToGdbConsole();
+        displayUsageFaultCauseToGdbConsole();
+    }
+}
+
+static void displayMemFaultCauseToGdbConsole(void)
+{
+    const uint32_t MMARValidBit = 1 << 7;
+    const uint32_t FPLazyStatePreservationBit = 1 << 5;
+    const uint32_t stackingErrorBit = 1 << 4;
+    const uint32_t unstackingErrorBit = 1 << 3;
+    const uint32_t dataAccess = 1 << 1;
+    const uint32_t instructionFetch = 1;
+    uint32_t       CFSR_Value = 0xBAADFEED;
+
+    if (!g_swd.readTargetMemory(CFSR_Address, &CFSR_Value, sizeof(CFSR_Value), SWD::TRANSFER_32BIT))
+    {
+        logError("Failed to read the CFSR register.");
+        return;
+    }
+    uint8_t memManageFaultStatusRegister = CFSR_Value;
+
+    /* Check to make sure that there is a memory fault to display. */
+    if (memManageFaultStatusRegister == 0)
+    {
+        return;
+    }
+
+    WriteStringToGdbConsole("\n**MPU Fault**");
+    WriteStringToGdbConsole("\n  Status Register: ");
+    WriteHexValueToGdbConsole(memManageFaultStatusRegister);
+
+    if (memManageFaultStatusRegister & MMARValidBit)
+    {
+        const uint32_t MMFAR_Address = 0xE000ED34;
+        uint32_t       MMFAR_Value;
+        if (!g_swd.readTargetMemory(MMFAR_Address, &MMFAR_Value, sizeof(MMFAR_Value), SWD::TRANSFER_32BIT))
+        {
+            logError("Failed to read the MMFAR register.");
+            return;
+        }
+
+        WriteStringToGdbConsole("\n    Fault Address: ");
+        WriteHexValueToGdbConsole(MMFAR_Value);
+    }
+    if (memManageFaultStatusRegister & FPLazyStatePreservationBit)
+        WriteStringToGdbConsole("\n    FP Lazy Preservation");
+
+    if (memManageFaultStatusRegister & stackingErrorBit)
+    {
+        WriteStringToGdbConsole("\n    Stacking Error w/ SP = ");
+        WriteHexValueToGdbConsole(Context_Get(&g_context, SP));
+    }
+    if (memManageFaultStatusRegister & unstackingErrorBit)
+    {
+        WriteStringToGdbConsole("\n    Unstacking Error w/ SP = ");
+        WriteHexValueToGdbConsole(Context_Get(&g_context, SP));
+    }
+    if (memManageFaultStatusRegister & dataAccess)
+    {
+        WriteStringToGdbConsole("\n    Data Access");
+    }
+
+    if (memManageFaultStatusRegister & instructionFetch)
+    {
+        WriteStringToGdbConsole("\n    Instruction Fetch");
+    }
+}
+
+static void displayBusFaultCauseToGdbConsole(void)
+{
+    static const uint32_t BFARValidBit = 1 << 7;
+    static const uint32_t FPLazyStatePreservationBit = 1 << 5;
+    static const uint32_t stackingErrorBit = 1 << 4;
+    static const uint32_t unstackingErrorBit = 1 << 3;
+    static const uint32_t impreciseDataAccessBit = 1 << 2;
+    static const uint32_t preciseDataAccessBit = 1 << 1;
+    static const uint32_t instructionPrefetch = 1;
+    uint32_t              CFSR_Value = 0xBAADFEED;
+
+    if (!g_swd.readTargetMemory(CFSR_Address, &CFSR_Value, sizeof(CFSR_Value), SWD::TRANSFER_32BIT))
+    {
+        logError("Failed to read the CFSR register.");
+        return;
+    }
+    uint8_t busFaultStatusRegister = CFSR_Value >> 8;
+
+    /* Check to make sure that there is a bus fault to display. */
+    if (busFaultStatusRegister == 0)
+    {
+        return;
+    }
+
+    WriteStringToGdbConsole("\n**Bus Fault**");
+    WriteStringToGdbConsole("\n  Status Register: ");
+    WriteHexValueToGdbConsole(busFaultStatusRegister);
+
+    if (busFaultStatusRegister & BFARValidBit)
+    {
+        const uint32_t BFAR_Address = 0xE000ED38;
+        uint32_t       BFAR_Value;
+        if (!g_swd.readTargetMemory(BFAR_Address, &BFAR_Value, sizeof(BFAR_Value), SWD::TRANSFER_32BIT))
+        {
+            logError("Failed to read the BFAR register.");
+            return;
+        }
+        WriteStringToGdbConsole("\n    Fault Address: ");
+        WriteHexValueToGdbConsole(BFAR_Value);
+    }
+    if (busFaultStatusRegister & FPLazyStatePreservationBit)
+    {
+        WriteStringToGdbConsole("\n    FP Lazy Preservation");
+    }
+
+    if (busFaultStatusRegister & stackingErrorBit)
+    {
+        WriteStringToGdbConsole("\n    Stacking Error w/ SP = ");
+        WriteHexValueToGdbConsole(Context_Get(&g_context, SP));
+    }
+    if (busFaultStatusRegister & unstackingErrorBit)
+    {
+        WriteStringToGdbConsole("\n    Unstacking Error w/ SP = ");
+        WriteHexValueToGdbConsole(Context_Get(&g_context, SP));
+    }
+    if (busFaultStatusRegister & impreciseDataAccessBit)
+    {
+        WriteStringToGdbConsole("\n    Imprecise Data Access");
+    }
+
+    if (busFaultStatusRegister & preciseDataAccessBit)
+    {
+        WriteStringToGdbConsole("\n    Precise Data Access");
+    }
+
+    if (busFaultStatusRegister & instructionPrefetch)
+    {
+        WriteStringToGdbConsole("\n    Instruction Prefetch");
+    }
+}
+
+static void displayUsageFaultCauseToGdbConsole(void)
+{
+    static const uint32_t divideByZeroBit = 1 << 9;
+    static const uint32_t unalignedBit = 1 << 8;
+    static const uint32_t coProcessorAccessBit = 1 << 3;
+    static const uint32_t invalidPCBit = 1 << 2;
+    static const uint32_t invalidStateBit = 1 << 1;
+    static const uint32_t undefinedInstructionBit = 1;
+    uint32_t              CFSR_Value = 0xBAADFEED;
+
+    if (!g_swd.readTargetMemory(CFSR_Address, &CFSR_Value, sizeof(CFSR_Value), SWD::TRANSFER_32BIT))
+    {
+        logError("Failed to read the CFSR register.");
+        return;
+    }
+    uint8_t usageFaultStatusRegister = CFSR_Value >> 16;
+
+    /* Make sure that there is a usage fault to display. */
+    if (usageFaultStatusRegister == 0)
+    {
+        return;
+    }
+
+    WriteStringToGdbConsole("\n**Usage Fault**");
+    WriteStringToGdbConsole("\n  Status Register: ");
+    WriteHexValueToGdbConsole(usageFaultStatusRegister);
+
+    if (usageFaultStatusRegister & divideByZeroBit)
+    {
+        WriteStringToGdbConsole("\n    Divide by Zero");
+    }
+
+    if (usageFaultStatusRegister & unalignedBit)
+    {
+        WriteStringToGdbConsole("\n    Unaligned Access");
+    }
+
+    if (usageFaultStatusRegister & coProcessorAccessBit)
+    {
+        WriteStringToGdbConsole("\n    Coprocessor Access");
+    }
+
+    if (usageFaultStatusRegister & invalidPCBit)
+    {
+        WriteStringToGdbConsole("\n    Invalid Exception Return State");
+    }
+
+    if (usageFaultStatusRegister & invalidStateBit)
+    {
+        WriteStringToGdbConsole("\n    Invalid State");
+    }
+
+    if (usageFaultStatusRegister & undefinedInstructionBit)
+    {
+        WriteStringToGdbConsole("\n    Undefined Instruction");
+    }
 }
 
 
@@ -2650,13 +3200,26 @@ static const char g_targetFpuXML[] =
 
 uint32_t Platform_GetTargetXmlSize(void)
 {
-    // UNDONE: Need to figure out if the chip has a FPU or not.
-    return sizeof(g_targetXML);
+    if (g_fpu >= FPU_MAYBE)
+    {
+        return sizeof(g_targetFpuXML);
+    }
+    else
+    {
+        return sizeof(g_targetXML);
+    }
 }
 
-const char* mriPlatform_GetTargetXml(void)
+const char* Platform_GetTargetXml(void)
 {
-    return g_targetXML;
+    if (g_fpu >= FPU_MAYBE)
+    {
+        return g_targetFpuXML;
+    }
+    else
+    {
+        return g_targetXML;
+    }
 }
 
 
@@ -2664,24 +3227,14 @@ const char* mriPlatform_GetTargetXml(void)
 // *********************************************************************************************************************
 // Routines called by the MRI core to retrieve the XML describing the CPU's memory layout.
 // *********************************************************************************************************************
-// UNDONE: This is the RP2040 memory layout.
-static const char g_memoryMapXml[] = "<?xml version=\"1.0\"?>"
-                                     "<!DOCTYPE memory-map PUBLIC \"+//IDN gnu.org//DTD GDB Memory Map V1.0//EN\" \"http://sourceware.org/gdb/gdb-memory-map.dtd\">"
-                                     "<memory-map>"
-                                     "<memory type=\"rom\" start=\"0x00000000\" length=\"0x4000\"> </memory>"
-                                     "<memory type=\"flash\" start=\"0x10000000\" length=\"0x1000000\"> <property name=\"blocksize\">0x1000</property></memory>"
-                                     "<memory type=\"ram\" start=\"0x20000000\" length=\"0x42000\"> </memory>"
-                                     "</memory-map>";
-
 uint32_t Platform_GetDeviceMemoryMapXmlSize(void)
 {
-    // UNDONE: How to handle this in general for SWD debugger.
-    return sizeof(g_memoryMapXml);
+    return g_memoryLayoutSize;
 }
 
 const char* Platform_GetDeviceMemoryMapXml(void)
 {
-    return g_memoryMapXml;
+    return g_pMemoryLayoutXML;
 }
 
 
@@ -2742,38 +3295,9 @@ void Platform_SetSemihostCallReturnAndErrnoValues(int returnValue, int errNo)
 // code which can force the MRI core to return to the main debugger loop when TCP/IP or SWD issues are encountered that
 // require waiting for the target or the WiFi router to reappear.
 // *********************************************************************************************************************
-struct BootRomFunctionTable
-{
-    uint32_t _connect_internal_flash;
-    uint32_t _flash_exit_xip;
-    uint32_t _flash_range_erase;
-    uint32_t _flash_range_program;
-    uint32_t _flash_flush_cache;
-    uint32_t _flash_enter_cmd_xip;
-    uint32_t _debug_trampoline;
-    uint32_t _debug_trampoline_end;
-};
-
-// UNDONE: Could cache these and mark as dirty if the SWD connection is remade,
-static BootRomFunctionTable g_bootRomFunctionTable;
-
 static uint32_t forceMriCoreToReturn(Buffer* pBuffer);
 static uint32_t handleFlashEraseCommand(Buffer* pBuffer);
-static __throws void throwIfAddressAndLengthNot4kAligned(AddressLength* pAddressLength);
-static bool is4kAligned(uint32_t value);
-static __throws void throwIfAttemptingToFlashInvalidAddress(AddressLength* pAddressLength);
-static __throws void findRequiredBootRomRoutines();
-static bool checkRP2040BootRomMagicValue();
-static bool eraseFlash(uint32_t address, uint32_t length);
-static bool disableSingleStepAndInterrupts();
-static bool disableFlashXIP();
-static bool reenableFlashXIP();
-static bool callBootRomRoutine(uint32_t functionOffset, uint32_t param1, uint32_t param2, uint32_t param3, uint32_t param4);
-static bool enableInterrupts();
 static uint32_t handleFlashWriteCommand(Buffer* pBuffer);
-static bool writeToFlash(Buffer* pBuffer, AddressLength* pAddressLength);
-static int32_t alignStartOfWriteByCopyingExistingFlashData(uint8_t* pDest, uint32_t alignedStart, uint32_t unalignedStart);
-static uint32_t copyBytes(uint8_t* pDest, size_t destSize, Buffer* pBuffer);
 static uint32_t handleFlashDoneCommand(Buffer* pBuffer);
 uint32_t Platform_HandleGDBCommand(Buffer* pBuffer)
 {
@@ -2815,9 +3339,6 @@ static uint32_t forceMriCoreToReturn(Buffer* pBuffer)
     return HANDLER_RETURN_RESUME_PROGRAM | HANDLER_RETURN_RETURN_IMMEDIATELY;
 }
 
-static const uint32_t FLASH_START_ADDRESS = 0x10000000;
-static const uint32_t FLASH_MAX_SIZE = 16 * 1024 * 1024;
-static const uint32_t FLASH_END_ADDRESS = FLASH_START_ADDRESS + FLASH_MAX_SIZE;
 
 /* Handle the 'vFlashErase' command which erases the specified pages in FLASH.
 
@@ -2835,9 +3356,6 @@ static uint32_t  handleFlashEraseCommand(Buffer* pBuffer)
     {
         __throwing_func( ThrowIfNextCharIsNotEqualTo(pBuffer, ':') );
         __throwing_func( ReadAddressAndLengthArguments(pBuffer, &addressLength) );
-        __throwing_func( throwIfAddressAndLengthNot4kAligned(&addressLength) );
-        __throwing_func( throwIfAttemptingToFlashInvalidAddress(&addressLength) );
-        __throwing_func( findRequiredBootRomRoutines() );
     }
     __catch
     {
@@ -2846,324 +3364,26 @@ static uint32_t  handleFlashEraseCommand(Buffer* pBuffer)
         return HANDLER_RETURN_HANDLED;
     }
 
-    if (!eraseFlash(addressLength.address - FLASH_START_ADDRESS, addressLength.length))
+    if (!g_pDevice)
+    {
+        logError("mri-swd doesn't know how to FLASH program this device type.");
+        PrepareStringResponse(MRI_ERROR_INVALID_ARGUMENT);
+        return HANDLER_RETURN_HANDLED;
+    }
+    logInfoF("Erasing %lu bytes of FLASH at 0x%08lX.", addressLength.length, addressLength.address);
+    if (!g_pDevice->flashBegin(g_pDeviceObject, &g_swd))
+    {
+        PrepareStringResponse(MRI_ERROR_INVALID_ARGUMENT);
+        return HANDLER_RETURN_HANDLED;
+    }
+    if (!g_pDevice->flashErase(g_pDeviceObject, &g_swd, addressLength.address, addressLength.length))
     {
         PrepareStringResponse(MRI_ERROR_MEMORY_ACCESS_FAILURE);
         return HANDLER_RETURN_HANDLED;
     }
-    logInfoF("Erased %lu bytes of FLASH at 0x%08lX.", addressLength.length, addressLength.address);
 
     PrepareStringResponse("OK");
     return HANDLER_RETURN_HANDLED;
-}
-
-static __throws void throwIfAddressAndLengthNot4kAligned(AddressLength* pAddressLength)
-{
-    if (!is4kAligned(pAddressLength->address) || !is4kAligned(pAddressLength->length))
-    {
-        __throw(invalidArgumentException);
-    }
-}
-
-static bool is4kAligned(uint32_t value)
-{
-    return (value & (4096-1)) == 0;
-}
-
-static __throws void throwIfAttemptingToFlashInvalidAddress(AddressLength* pAddressLength)
-{
-    uint32_t endAddress = pAddressLength->address + pAddressLength->length;
-    if (pAddressLength->address < FLASH_START_ADDRESS || endAddress > FLASH_END_ADDRESS)
-    {
-        __throw(invalidArgumentException);
-    }
-}
-
-static __throws void findRequiredBootRomRoutines()
-{
-    if (!checkRP2040BootRomMagicValue())
-    {
-        logError("Failed verification of the RP2040 Boot ROM magic value.");
-        __throw(invalidValueException);
-    }
-
-    // Read the 16-bit Boot ROM function table pointer from address 0x14.
-    const uint32_t romFuctionTableAddress = 0x14;
-    uint16_t address = 0;
-    uint32_t bytesRead = g_swd.readTargetMemory(romFuctionTableAddress, &address, sizeof(address), SWD::TRANSFER_16BIT);
-    if (bytesRead != sizeof(address) || address == 0)
-    {
-        logError("Failed to read RP2040 Boot ROM function table pointer.");
-        __throw(invalidValueException);
-    }
-
-    // The codes in the RP2040 Boot ROM function table entries are 16-bit values formed from 2 characters.
-    #define ROM_CODE(X, Y) ((X) | (Y<<8))
-
-    // Each function table entry is composed of a 16-bit ROM_CODE and a 16-bit pointer offset into the 64k Boot ROM.
-    struct FunctionTableEntry
-    {
-        uint16_t code;
-        uint16_t offset;
-    };
-    FunctionTableEntry entries[32];
-
-    // Search the function table for the routines we need to program the FLASH.
-    uint32_t entriesLeftToFind = sizeof(g_bootRomFunctionTable) / (2*sizeof(uint16_t));
-    while (entriesLeftToFind > 0)
-    {
-        bytesRead = g_swd.readTargetMemory(address, entries, sizeof(entries), SWD::TRANSFER_16BIT);
-        if (bytesRead != sizeof(entries))
-        {
-            logErrorF("Failed to read RP2040 Boot ROM function table at 0x08X. Bytes read: %lu.", address, bytesRead);
-            __throw(invalidValueException);
-        }
-
-        for (size_t i = 0 ; i < count_of(entries) && entriesLeftToFind > 0 ; i++)
-        {
-            uint32_t offset = entries[i].offset;
-            uint32_t code = entries[i].code;
-            switch (code)
-            {
-                case 0x0000:
-                    // Have encountered the end of the function table.
-                    if (entriesLeftToFind > 0)
-                    {
-                        logErrorF("Failed to find all of the required functions in the RP2040 Boot ROM. "
-                                  "Still required %lu functions.", entriesLeftToFind);
-                        __throw(invalidValueException);
-                    }
-                    return;
-                case ROM_CODE('I', 'F'):
-                    g_bootRomFunctionTable._connect_internal_flash = offset;
-                    entriesLeftToFind--;
-                    break;
-                case ROM_CODE('E', 'X'):
-                    g_bootRomFunctionTable._flash_exit_xip = offset;
-                    entriesLeftToFind--;
-                    break;
-                case ROM_CODE('R', 'E'):
-                    g_bootRomFunctionTable._flash_range_erase = offset;
-                    entriesLeftToFind--;
-                    break;
-                case ROM_CODE('R', 'P'):
-                    g_bootRomFunctionTable._flash_range_program = offset;
-                    entriesLeftToFind--;
-                    break;
-                case ROM_CODE('F', 'C'):
-                    g_bootRomFunctionTable._flash_flush_cache = offset;
-                    entriesLeftToFind--;
-                    break;
-                case ROM_CODE('C', 'X'):
-                    g_bootRomFunctionTable._flash_enter_cmd_xip = offset;
-                    entriesLeftToFind--;
-                    break;
-                case ROM_CODE('D', 'T'):
-                    g_bootRomFunctionTable._debug_trampoline = offset;
-                    entriesLeftToFind--;
-                    break;
-                case ROM_CODE('D', 'E'):
-                    g_bootRomFunctionTable._debug_trampoline_end = offset;
-                    entriesLeftToFind--;
-                    break;
-                default:
-                    break;
-            }
-        }
-        address += bytesRead;
-    }
-}
-
-static bool checkRP2040BootRomMagicValue()
-{
-    // The RP2040 should contain this magic value at address 0x10.
-    const uint32_t bootRomMagicAddress = 0x10;
-    const uint8_t  bootRomMagicValue[] = { 'M', 'u', 0x01 };
-
-    uint8_t  value[3] = { 0, 0, 0 };
-    uint32_t bytesRead = g_swd.readTargetMemory(bootRomMagicAddress, &value, sizeof(value), SWD::TRANSFER_8BIT);
-    if (bytesRead != sizeof(value))
-    {
-        logError("Failed to read RP2040 Boot ROM magic value.");
-        return false;
-    }
-    if (memcmp(&value, bootRomMagicValue, sizeof(bootRomMagicValue)) != 0)
-    {
-        logErrorF("RP2040 ROM magic value is invalid (0x%02X 0x%02X 0x%02X).", value[0], value[1], value[2]);
-        return false;
-    }
-
-    return true;
-}
-
-static bool eraseFlash(uint32_t address, uint32_t length)
-{
-    bool result = false;
-    if (!disableSingleStepAndInterrupts())
-    {
-        logError("Failed to disable single step and interrupts.");
-        return false;
-    }
-
-    do
-    {
-        if (!disableFlashXIP())
-        {
-            logError("Failed to disable FLASH XIP.");
-            break;
-        }
-
-        // UNDONE: These are probably specific to the FLASH used on the Pico and compatible devices.
-        const uint32_t FLASH_BLOCK_SIZE = 1u << 16;
-        const uint32_t FLASH_BLOCK_ERASE_CMD = 0xd8;
-        if (!callBootRomRoutine(g_bootRomFunctionTable._flash_range_erase, address, length, FLASH_BLOCK_SIZE, FLASH_BLOCK_ERASE_CMD))
-        {
-            logErrorF("Failed calling _flash_range_erase(0x%08lX, %lu, %lu, 0x%02X) in RP2040 Boot ROM.",
-                    address, length, FLASH_BLOCK_SIZE, FLASH_BLOCK_ERASE_CMD);
-            reenableFlashXIP();
-            break;
-        }
-
-        if (!reenableFlashXIP())
-        {
-            logError("Failed to reenable FLASH XIP.");
-            break;
-        }
-
-        result = true;
-    } while (false);
-
-    if (!enableInterrupts())
-    {
-        logError("Failed to enable interrupts.");
-        return false;
-    }
-
-    return result;
-}
-
-static bool disableSingleStepAndInterrupts()
-{
-    const uint32_t singleStepAndMaskInterrupts_Mask = DHCSR_C_STEP_Bit | DHCSR_C_MASKINTS_Bit;
-
-    uint32_t DHCSR_Val = 0;
-    if (!readDHCSR(&DHCSR_Val))
-    {
-        return false;
-    }
-
-    DHCSR_Val = (DHCSR_Val & ~singleStepAndMaskInterrupts_Mask) | DHCSR_C_MASKINTS_Bit;
-    if (!writeDHCSR(DHCSR_Val))
-    {
-        return false;
-    }
-    return true;
-}
-
-static bool disableFlashXIP()
-{
-    if (!callBootRomRoutine(g_bootRomFunctionTable._connect_internal_flash, 0, 0, 0, 0))
-    {
-        logError("Failed calling _connect_internal_flash() in RP2040 Boot ROM.");
-        return false;
-    }
-    if (!callBootRomRoutine(g_bootRomFunctionTable._flash_exit_xip, 0, 0, 0, 0))
-    {
-        logError("Failed calling _flash_exit_xip() in RP2040 Boot ROM.");
-        return false;
-    }
-
-    return true;
-}
-
-static bool reenableFlashXIP()
-{
-    if (!callBootRomRoutine(g_bootRomFunctionTable._flash_flush_cache, 0, 0, 0, 0))
-    {
-        logError("Failed calling _flash_flush_cache() in RP2040 Boot ROM.");
-        return false;
-    }
-    if (!callBootRomRoutine(g_bootRomFunctionTable._flash_enter_cmd_xip, 0, 0, 0, 0))
-    {
-        logError("Failed calling _flash_enter_cmd_xip() in RP2040 Boot ROM.");
-        return false;
-    }
-
-    return true;
-}
-
-static bool callBootRomRoutine(uint32_t functionOffset, uint32_t param1, uint32_t param2, uint32_t param3, uint32_t param4)
-{
-    // Set the CPU registers required for calling the Boot ROM function.
-    bool result = true;
-    result &= writeCpuRegister(R0, param1);
-    result &= writeCpuRegister(R1, param2);
-    result &= writeCpuRegister(R2, param3);
-    result &= writeCpuRegister(R3, param4);
-    result &= writeCpuRegister(R7, functionOffset);
-    result &= writeCpuRegister(LR, g_bootRomFunctionTable._debug_trampoline_end);
-    result &= writeCpuRegister(PC, g_bootRomFunctionTable._debug_trampoline);
-    if (!result)
-    {
-        logError("Failed to set registers for executing RP2040 Boot ROM routine.");
-        return result;
-    }
-
-    if (!requestCpuToResume())
-    {
-        logError("Failed to start executing RP2040 Boot ROM routine.");
-        return false;
-    }
-
-    // Wait for Boot ROM routine to complete.
-    absolute_time_t endTime = make_timeout_time_ms(EXEC_RP2040_BOOT_ROM_FUNC_TIMEOUT_MS);
-    uint32_t DHCSR_Val = 0;
-    do
-    {
-        if (!readDHCSR(&DHCSR_Val))
-        {
-            return false;
-        }
-    } while (!isCpuHalted(DHCSR_Val) && absolute_time_diff_us(get_absolute_time(), endTime) > 0);
-    if (!isCpuHalted(DHCSR_Val))
-    {
-        logError("Timeout out waiting for RP2040 Boot ROM routine to complete.");
-        return false;
-    }
-
-    // Should be stopped at the _debug_trampoline_end symbol.
-    uint32_t pc = 0;
-    if (!readCpuRegister(PC, &pc))
-    {
-        logError("Failed to read PC after executing RP2040 Boot ROM routine.");
-        return false;
-    }
-    // Set thumb bit in PC to match function pointer address.
-    pc |= 1;
-    if (pc != g_bootRomFunctionTable._debug_trampoline_end)
-    {
-        logErrorF("RP2040 Boot ROM routine didn't stop as expected. Expected: 0x%08lX Actual: 0x%08lX.",
-                  g_bootRomFunctionTable._debug_trampoline_end, pc);
-        return false;
-    }
-
-    return true;
-}
-
-static bool enableInterrupts()
-{
-    uint32_t DHCSR_Val = 0;
-    if (!readDHCSR(&DHCSR_Val))
-    {
-        return false;
-    }
-
-    DHCSR_Val = DHCSR_Val & ~DHCSR_C_MASKINTS_Bit;
-    if (!writeDHCSR(DHCSR_Val))
-    {
-        return false;
-    }
-    return true;
 }
 
 /* Handle the 'vFlashWrite' command which writes to the specified location in FLASH.
@@ -3177,14 +3397,13 @@ static bool enableInterrupts()
 */
 static uint32_t  handleFlashWriteCommand(Buffer* pBuffer)
 {
-    AddressLength  addressLength = {0, 0};
+    uint32_t  address = 0;
 
     __try
     {
         __throwing_func( ThrowIfNextCharIsNotEqualTo(pBuffer, ':') );
-        __throwing_func( addressLength.address = ReadUIntegerArgument(pBuffer) );
+        __throwing_func( address = ReadUIntegerArgument(pBuffer) );
         __throwing_func( ThrowIfNextCharIsNotEqualTo(pBuffer, ':') );
-        __throwing_func( throwIfAttemptingToFlashInvalidAddress(&addressLength) );
     }
     __catch
     {
@@ -3192,139 +3411,20 @@ static uint32_t  handleFlashWriteCommand(Buffer* pBuffer)
         PrepareStringResponse(MRI_ERROR_INVALID_ARGUMENT);
         return HANDLER_RETURN_HANDLED;
     }
+    assert ( g_pDevice );
 
-    if (!writeToFlash(pBuffer, &addressLength))
+    uint32_t length = Buffer_BytesLeft(pBuffer);
+    logInfoF("Writing %lu bytes to FLASH at 0x%08lX.", length, address);
+    if (!g_pDevice->flashProgram(g_pDeviceObject, &g_swd, address, pBuffer->pCurrent, length))
     {
         PrepareStringResponse(MRI_ERROR_MEMORY_ACCESS_FAILURE);
         return HANDLER_RETURN_HANDLED;
     }
-    logInfoF("Wrote %lu bytes to FLASH at 0x%08lX.", addressLength.length, addressLength.address);
 
     PrepareStringResponse("OK");
     return HANDLER_RETURN_HANDLED;
 }
 
-static const uint32_t RAM_START_ADDRESS = 0x20000000;
-
-static bool writeToFlash(Buffer* pBuffer, AddressLength* pAddressLength)
-{
-    // Need to align both the address and length to 256-bytes.
-    const uint32_t alignment = 256;
-    uint32_t startAddress = pAddressLength->address;
-    uint32_t alignedStartAddress = startAddress & ~(alignment-1);
-
-    // Copy bytes into 256-byte aligned buffer on the stack.
-    const uint32_t maxPacketBytes = PACKET_SIZE-4;
-    uint8_t buffer[maxPacketBytes + 2*alignment];
-
-    // Align start of FLASH write to word boundary by padding with existing bytes from beginning of first word in FLASH.
-    uint32_t bytesLeft = sizeof(buffer);
-    uint8_t* pDest = buffer;
-    int32_t size = alignStartOfWriteByCopyingExistingFlashData(pDest, alignedStartAddress, startAddress);
-    if (size < 0)
-    {
-        return false;
-    }
-    bytesLeft -= size;
-    pDest += size;
-
-    // Copy the bytes provided by GDB into aligned buffer.
-    size = copyBytes(pDest, bytesLeft, pBuffer);
-    bytesLeft -= size;
-    pDest += size;
-    pAddressLength->length = size;
-
-    // Pad last few bytes with 0xFF to make the length of the write aligned as well.
-    uint32_t endAddress = startAddress + size;
-    uint32_t alignedEndAddress = (endAddress+alignment-1) & ~(alignment-1);
-    memset(pDest, 0xFF, alignedEndAddress-endAddress);
-    uint32_t byteCount = alignedEndAddress-alignedStartAddress;
-
-    // Copy buffer from debugger to beginning of target RAM.
-    uint32_t bytesCopied = g_swd.writeTargetMemory(RAM_START_ADDRESS, buffer, byteCount, SWD::TRANSFER_32BIT);
-    if (bytesCopied != byteCount)
-    {
-        logErrorF("Failed to copy %lu bytes to target RAM.", byteCount);
-        return false;
-    }
-
-    bool result = false;
-    if (!disableSingleStepAndInterrupts())
-    {
-        logError("Failed to disable single step and interrupts.");
-        return false;
-    }
-
-    do
-    {
-        // Disable FLASH XIP before writing to it.
-        if (!disableFlashXIP())
-        {
-            logError("Failed to disable FLASH XIP.");
-            break;
-        }
-
-        if (!callBootRomRoutine(g_bootRomFunctionTable._flash_range_program,
-                                alignedStartAddress-FLASH_START_ADDRESS, RAM_START_ADDRESS, byteCount, 0))
-        {
-            logError("Failed calling _flash_range_program() in RP2040 Boot ROM.");
-            reenableFlashXIP();
-            break;
-        }
-
-        // Need to re-enable for future alignment padding reads.
-        if (!reenableFlashXIP())
-        {
-            logError("Failed to re-enable FLASH XIP.");
-            break;
-        }
-
-        result = true;
-    } while (false);
-
-    if (!enableInterrupts())
-    {
-        logError("Failed to enable interrupts.");
-        return false;
-    }
-
-    return result;
-}
-
-static int32_t alignStartOfWriteByCopyingExistingFlashData(uint8_t* pDest, uint32_t alignedStart, uint32_t unalignedStart)
-{
-    uint32_t bytesToCopy = unalignedStart - alignedStart;
-    uint32_t bytesRead = g_swd.readTargetMemory(alignedStart, pDest, bytesToCopy, SWD::TRANSFER_8BIT);
-    if (bytesRead != bytesToCopy)
-    {
-        logErrorF("Failed to read unaligned %lu bytes at 0x%08lX.", bytesToCopy, alignedStart);
-        return -1;
-    }
-
-    return bytesToCopy;
-}
-
-static uint32_t copyBytes(uint8_t* pDest, size_t destSize, Buffer* pBuffer)
-{
-    uint8_t* pStart = pDest;
-    while (destSize-- > 0)
-    {
-        char currChar;
-
-        // Keep reading bytes until we reach the end of the source buffer.
-        __try
-        {
-            __throwing_func( currChar = Buffer_ReadChar(pBuffer) );
-        }
-        __catch
-        {
-            break;
-        }
-
-        *pDest++ = currChar;
-    }
-    return pDest - pStart;
-}
 
 /* Handle the 'vFlashDone' command which lets us know that the FLASH update is now complete.
 
@@ -3333,12 +3433,119 @@ static uint32_t copyBytes(uint8_t* pDest, size_t destSize, Buffer* pBuffer)
 */
 static uint32_t handleFlashDoneCommand(Buffer* pBuffer)
 {
+    assert ( g_pDevice );
+
     logInfo("Completed FLASH update.");
+
+    if (!g_pDevice->flashEnd(g_pDeviceObject, &g_swd))
+    {
+        logError("Failed to end FLASHing operation.");
+    }
 
     // Want to reset on next continue to place microcontroller in clean state for running new code now in FLASH.
     RequestResetOnNextContinue();
     PrepareStringResponse("OK");
     return HANDLER_RETURN_HANDLED;
+}
+
+
+
+
+// *********************************************************************************************************************
+// Device specific code can call runCodeOnDevice() to have desired code executed on the target device.
+// *********************************************************************************************************************
+static bool disableSingleStepAndInterrupts();
+static bool reenableInterrupts();
+bool runCodeOnDevice(CortexM_Registers* pRegistersInOut, uint32_t timeout_ms)
+{
+    // UNDONE: Should take a bitmask of which register to write and read as it does all 16 now and this takes time.
+    // Set the CPU registers required for executing code on device.
+    bool result = true;
+    for (uint32_t i = 0 ; i < count_of(pRegistersInOut->registers) ; i++)
+    {
+        result &= writeCpuRegister(i, pRegistersInOut->registers[i]);
+    }
+    if (!result)
+    {
+        logError("Failed to set registers for executing code on device.");
+        return false;
+    }
+
+    // Want to keep interrupts masked while running this code and make sure that single stepping is disabled.
+    if (!disableSingleStepAndInterrupts())
+    {
+        logError("Failed to disable single step and interrupts.");
+        return false;
+    }
+
+    // Start the target CPU executing.
+    if (!requestCpuToResume())
+    {
+        logError("Failed to start executing debugger code on target device.");
+        return false;
+    }
+
+    // Wait for executing code to complete.
+    absolute_time_t endTime = make_timeout_time_ms(timeout_ms);
+    uint32_t DHCSR_Val = 0;
+    do
+    {
+        if (!readDHCSR(&DHCSR_Val))
+        {
+            break;
+        }
+    } while (!isCpuHalted(DHCSR_Val) && absolute_time_diff_us(get_absolute_time(), endTime) > 0);
+    reenableInterrupts();
+    if (!isCpuHalted(DHCSR_Val))
+    {
+        logError("Timeout out waiting for code execution on device to complete.");
+        return false;
+    }
+
+    // Retrieve the register contents after the code has completed execution so that the caller can see their contents.
+    for (uint32_t i = 0 ; i < count_of(pRegistersInOut->registers) ; i++)
+    {
+        result &= readCpuRegister(i, &pRegistersInOut->registers[i]);
+    }
+    if (!result)
+    {
+        logError("Failed to fetch registers after executing code on device.");
+        return false;
+    }
+
+    return true;
+}
+
+static bool disableSingleStepAndInterrupts()
+{
+    uint32_t DHCSR_Val = 0;
+    if (!readDHCSR(&DHCSR_Val))
+    {
+        return false;
+    }
+
+    DHCSR_Val = (DHCSR_Val & ~DHCSR_C_STEP_Bit) | DHCSR_C_MASKINTS_Bit;
+    if (!writeDHCSR(DHCSR_Val))
+    {
+        return false;
+    }
+    return true;
+}
+
+static bool reenableInterrupts()
+{
+    uint32_t DHCSR_Val = 0;
+    if (!readDHCSR(&DHCSR_Val))
+    {
+        return false;
+    }
+
+    DHCSR_Val &= ~DHCSR_C_MASKINTS_Bit;
+    if (!writeDHCSR(DHCSR_Val))
+    {
+        return false;
+    }
+    return true;
 }
 
 

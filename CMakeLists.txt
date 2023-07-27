@@ -32,7 +32,6 @@ add_compile_options(-Wall -Wextra -Werror
 string(REPLACE "-DNDEBUG" "" CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
 string(REPLACE "-DNDEBUG" "" CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO}")
 
-# UNDONE: Put all optimization flags back to -O3.
 # I prefer -g3 for better symbols and -O3 for better optimization.
 string(REPLACE "-g" "-g3" CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
 string(REPLACE "-g" "-g3" CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO}")
@@ -67,6 +66,13 @@ target_sources(mri-swd PRIVATE
 target_include_directories(mri-swd PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
         )
+
+# Sources for devices and device families supported by mri-swd.
+target_sources(mri-swd PRIVATE
+    devices/devices.cpp
+    devices/rp2040.cpp
+    devices/nrf52.cpp
+)
 
 # mri submodule files.
 target_sources(mri-swd PRIVATE
@@ -107,3 +113,9 @@ pico_add_extra_outputs(mri-swd)
 
 pico_enable_stdio_usb(mri-swd 1)
 pico_enable_stdio_uart(mri-swd 0)
+
+add_custom_target(size_elf ALL
+        COMMAND arm-none-eabi-size $<TARGET_FILE:${PROJECT_NAME}>
+        COMMENT "Sizing  ${PROJECT_NAME}"
+        VERBATIM
+)

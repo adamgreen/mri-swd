@@ -25,10 +25,11 @@
 
 ## Supported Features
 * Supports debugging of **Core 0 on the RP2040**
+* Supports debugging of nRF52 microcontrollers.
 * RAM/FLASH/ROM Read
 * RAM Write
 * CPU Register Read/Write
-* `load` (**FLASH Programming** of RP2040)
+* `load` (**FLASH Programming**)
 * `step` and `next` (Single Stepping)
 * `break` (Hardware Breakpoints)
 * `watch`, `awatch`, `rwatch` (Hardware Watchpoints)
@@ -37,11 +38,7 @@
 
 ## Unsupported Features
 * Debugging of **Core 1 on the RP2040**
-* Debugging of microcontrollers other than the RP2040 for various reasons, including:
-    * No **FPU** support
-    * `mri-swd` returns fixed memory layout (suitable for the RP2040) to GDB
-    * SWD clock is fixed at 24MHz
-* FLASH programming of microcontrollers other than the RP2040.
+* FLASH programming of microcontrollers other than the RP2040 or nRF52xxx.
 * Semihosting
 * RTOS Thread Support
 * Connecting GDB over USB. Only WiFi for now.
@@ -192,16 +189,16 @@ In the root folder can be found  a [config.h](config.h) which can be used to cus
 ## Next Steps
 * ~~RP2040 FLASH Programming~~
 * ~~Improve Robustness~~
-* Improve Performance
-* Improve Usability
+* ~~Basic nRF52 (Cortex-M4F) Debugging Support~~
 * Addition of a small OLED Display
   * Report IP address
   * Report WiFi connections
   * Report target detected
   * Report target Vcc voltage
   * etc
+* Improve Usability
+* Improve Performance
 * RP2040 Core 1 Support
 * Bridge microcontroller's UART on another WiFi TCP/IP port.
 * Custom PCB
-* Basic nRF52 (Cortex-M4F) Debugging Support
 * Semihosting Support

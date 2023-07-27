@@ -35,10 +35,24 @@ class SWD
             UNKNOWN = 0
         };
 
+        // Enumeration of Cortex-M CPU types supported by this debugger.
+        // The order of this enumeration matters:
+        // Values <= CPU_CORTEX_M0_PLUS are ARMv6M (except for CPU_UNKNOWN).
+        // Values > CPU_CORTEX_M0_PLUS are ARMv7M
+        enum CpuTypes
+        {
+            CPU_UNKNOWN = 0,
+            CPU_CORTEX_M0,
+            CPU_CORTEX_M0_PLUS,
+            CPU_CORTEX_M3,
+            CPU_CORTEX_M4,
+            CPU_CORTEX_M7
+        };
+
         // Constructor just sets up object. Need to call init() methods to actually initialize the PIO state machine.
         SWD();
 
-        // Call this init() method once to load the assembly language code into the caller specified PIO (pio0 or pio1).
+        // Call this init() method to load the assembly language code into the caller specified PIO (pio0 or pio1).
         //
         // pio - The PIO instance to be used, pio0 or pio1.
         // frequency - Frequency to run the SWCLK in Hz.
@@ -49,7 +63,7 @@ class SWD
         // Returns false if the assembly language code fails to load into the specified PIO instance.
         bool init(PIO pio, uint32_t frequency, uint32_t swclkPin, uint32_t swdioPin);
 
-        // Call this init() method once to load the assembly language code into the first available PIO instance
+        // Call this init() method to load the assembly language code into the first available PIO instance
         // available.
         //
         // frequency - Frequency to run the SWCLK in Hz.
@@ -59,6 +73,21 @@ class SWD
         // Returns true if everything was initialized successfully.
         // Returns false if the assembly language code fails to load into either PIO instance.
         bool init(uint32_t frequency, uint32_t swclkPin, uint32_t swdioPin);
+
+        // Call this uninit() method to shutdown the PIO state machine and free up the associated resources, including
+        // the program space.
+        void uninit();
+
+        // Call this method to just update the SWCLK frequency after calling init().
+        //
+        // frequency - Frequency to run the SWCLK in Hz.
+        //
+        // Returns true if everything was initialized successfully and false otherwise.
+        bool setFrequency(uint32_t frequency)
+        {
+            return init(m_pio, frequency, m_swclkPin, m_swdioPin);
+        }
+
 
         // Method which attempts switching a SWJ-DP from JTAG to SWD mode and reads DPIDR.
         //
@@ -115,6 +144,26 @@ class SWD
         DPv2Targets getTarget()
         {
             return m_target;
+        }
+
+        // Method which returns the Cortex-M CPU type of the currently connected device.
+        //
+        // Returns one of the CpuTypes elements or CpuTypes::CPU_UNKNOWN if type can't be determined.
+        CpuTypes getCpuType()
+        {
+            return m_cpu;
+        }
+
+        // Method which returns pointers to 12 element array containing device's component & peripheral ID words.
+        const uint32_t* getComponentPeripheralIDs()
+        {
+            return &m_peripheralComponentIDs[0];
+        }
+
+        // Method which returns the 32-bit value of the Cortex-M CPUID register.
+        uint32_t getCpuID()
+        {
+            return m_cpuID;
         }
 
         // Should byte, half-word, or word sized target accesses be used by read/writeTargetMemory()?
@@ -316,7 +365,7 @@ class SWD
             m_maxReadRetries = retries;
         }
 
-        // Maximum number of times to try writing from the same AP address before giving up.
+        // Maximum number of times to try writing to the same AP address before giving up.
         void setMaximumWriteRetries(uint32_t retries)
         {
             m_maxWriteRetries = retries;
@@ -410,9 +459,9 @@ class SWD
         void invalidateDpApState()
         {
             // Some of the remembered AP/DP state is no longer valid once a new target has been selected.
-            m_dpBank = 0xFFFFFFFF;
-            m_apBank = 0xFFFFFFFF;
-            m_ap = 0xFFFFFFFF;
+            m_dpBank = UNKNOWN_VAL;
+            m_apBank = UNKNOWN_VAL;
+            m_ap = UNKNOWN_VAL;
             m_cswValid = false;
         }
         void setBitPatternSignalMode();
@@ -425,6 +474,8 @@ class SWD
                                                                     uint32_t readLength) __attribute__ ((optimize(3)));
         bool readDPIDR();
         bool checkAP(uint32_t ap);
+        void determineCpuType();
+        const char* getCpuTypeString(CpuTypes cpu);
         uint32_t readTargetMemoryInternal(uint32_t address, uint8_t* pDest, uint32_t bufferSize, TransferSize readSize);
         uint32_t writeTargetMemoryInternal(uint32_t address, const uint8_t* pSrc, uint32_t bufferSize, TransferSize writeSize);
         bool updateCSW(CSW_AddrIncs addrInc, TransferSize transferSize);
@@ -443,11 +494,12 @@ class SWD
         bool findDebugMemAP();
         bool clearAbortErrorBits();
         bool handleTransferResponse(uint32_t ack, bool ignoreProtocolError, bool* pRetry);
+        void handleStickyErrors(uint32_t ack, bool* pRetry);
         void handleProtocolAndParityErrors();
 
         PIO             m_pio = NULL;
-        uint32_t        m_stateMachine = 0xFFFFFFFF;
-        uint32_t        m_programOffset = 0;
+        uint32_t        m_stateMachine = UNKNOWN_VAL;
+        uint32_t        m_programOffset = UNKNOWN_VAL;
         uint32_t        m_swclkPin = 0;
         uint32_t        m_swdioPin = 0;
         uint32_t        m_dpBank = UNKNOWN_VAL;
@@ -472,12 +524,14 @@ class SWD
         uint32_t        m_maxWriteRetries = 2;
         uint32_t        m_totalMemoryReadRetries = 0;
         uint32_t        m_totalMemoryWriteRetries = 0;
-        uint32_t        m_handlingError = 0;
+        uint32_t        m_clearingErrors = 0;
         TransferError   m_lastReadWriteError = SWD_SUCCESS;
         SignalMode      m_signalMode = BIT_PATTERN;
         DPv2Targets     m_target = UNKNOWN;
+        CpuTypes        m_cpu = CPU_UNKNOWN;
         EnumTargetState m_targetEnumState = PARTNO_DESIGNER;
         bool            m_cswValid = false;
+        bool            m_apWritePending = false;
 };
 
 #endif // SWD_H_

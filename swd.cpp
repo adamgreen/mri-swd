@@ -28,18 +28,6 @@ static SWD::DPv2Targets g_knownDPv2Targets[] =
 };
 
 
-#ifdef UNDONE
-// Macros used to enable/disable logging of SWD error conditions.
-#define logError(X) errorf("%s:%u %s failed calling " X "\n", __FILE__, __LINE__, __FUNCTION__)
-
-static int (*errorf)(const char* format, ...) = printf;
-
-static int dummyf(const char* format, ...)
-{
-    return 0;
-}
-#endif // UNDONE
-
 void SWD::disableErrorLogging()
 {
     logErrorDisable();
@@ -59,6 +47,10 @@ SWD::SWD()
 
 bool SWD::init(PIO pio, uint32_t frequency, uint32_t swclkPin, uint32_t swdioPin)
 {
+    // Cleanup the PIO if it was already initialized before continuing to initialize it again, with probably different
+    // parameters (ie. frequency).
+    uninit();
+
     if (!pio_can_add_program(pio, &swd_program))
     {
         return false;
@@ -186,6 +178,25 @@ bool SWD::init(uint32_t frequency, uint32_t swclkPin, uint32_t swdioPin)
         return true;
     }
     return false;
+}
+
+void SWD::uninit()
+{
+    if (m_stateMachine == UNKNOWN_VAL)
+    {
+        return;
+    }
+
+    // Stop the SWD state machine and free it up.
+    pio_sm_set_enabled(m_pio, m_stateMachine, false);
+    pio_sm_unclaim(m_pio, m_stateMachine);
+
+    // Free up the space in the PIO instance.
+    pio_remove_program(m_pio, &swd_program, m_programOffset);
+
+    m_stateMachine = UNKNOWN_VAL;
+    m_pio = NULL;
+    m_programOffset = UNKNOWN_VAL;
 }
 
 bool SWD::sendJtagToSwdSequence()
@@ -659,7 +670,128 @@ bool SWD::checkAP(uint32_t ap)
     }
     logDebugF("CPUID=0x%08lX", m_cpuID);
 
+    determineCpuType();
+    logDebugF("Detected CPU type = %s", getCpuTypeString(m_cpu));
+
     return true;
+}
+
+void SWD::determineCpuType()
+{
+    // Check component/peripheral ID for known Cortex-M CPUs.
+    const uint32_t armComponentID[4] = { 0x0000000D, 0x00000010, 0x00000005, 0x000000B1 };
+    struct
+    {
+        uint32_t peripheralID[8];
+        CpuTypes type;
+    } const knownPeripheralIDs[] =
+    {
+        {
+            {
+                0x00000004, 0x00000000, 0x00000000, 0x00000000,
+                0x00000071, 0x000000B4, 0x0000000B, 0x00000000
+            },
+            CPU_CORTEX_M0
+        },
+        {
+            {
+                0x00000004, 0x00000000, 0x00000000, 0x00000000,
+                0x000000C0, 0x000000B4, 0x0000000B, 0x00000000
+            },
+            CPU_CORTEX_M0_PLUS
+        },
+        {
+            {
+                0x00000004, 0x00000000, 0x00000000, 0x00000000,
+                0x0000000C, 0x000000B0, 0x0000000B, 0x00000000
+            },
+            CPU_CORTEX_M3
+        },
+        {
+            {
+                0x00000004, 0x00000000, 0x00000000, 0x00000000,
+                0x000000C4, 0x000000B4, 0x0000000B, 0x00000000
+            },
+            CPU_CORTEX_M4
+        },
+        {
+            {
+                0x00000004, 0x00000000, 0x00000000, 0x00000000,
+                0x000000C8, 0x000000B4, 0x0000000B, 0x00000000
+            },
+            CPU_CORTEX_M7
+        }
+    };
+    m_cpu = CPU_UNKNOWN;
+    if (0 == memcmp(&m_peripheralComponentIDs[8], &armComponentID[0], sizeof(armComponentID)))
+    {
+        for (size_t i = 0 ; i < count_of(knownPeripheralIDs) ; i++)
+        {
+            if (0 == memcmp(&m_peripheralComponentIDs[0], &knownPeripheralIDs[i].peripheralID[0], sizeof(knownPeripheralIDs[i].peripheralID)))
+            {
+                m_cpu = knownPeripheralIDs[i].type;
+                return;
+            }
+        }
+    }
+
+    // If peripheral ID isn't recognized then try using the CPU ID instead.
+    struct
+    {
+        uint32_t cpuID;
+        CpuTypes type;
+    } const knownCpuIds[] =
+    {
+        {
+            0x410CC200,
+            CPU_CORTEX_M0
+        },
+        {
+            0x410CC600,
+            CPU_CORTEX_M0_PLUS
+        },
+        {
+            0x412FC230,
+            CPU_CORTEX_M3
+        },
+        {
+            0x410FC240,
+            CPU_CORTEX_M4
+        },
+        {
+            0x410C270,
+            CPU_CORTEX_M7
+        }
+    };
+    const uint32_t CPUID_REVISION_MASK = 0xF;
+    uint32_t cpuID = m_cpuID & ~CPUID_REVISION_MASK;
+    for (size_t i = 0 ; i < count_of(knownCpuIds) ; i++)
+    {
+        if (knownCpuIds[i].cpuID == cpuID)
+        {
+            m_cpu = knownCpuIds[i].type;
+            return;
+        }
+    }
+}
+
+const char* SWD::getCpuTypeString(CpuTypes cpu)
+{
+    switch (cpu)
+    {
+        case CPU_CORTEX_M0:
+            return "Cortex-M0";
+        case CPU_CORTEX_M0_PLUS:
+            return "Cortex-M0+";
+        case CPU_CORTEX_M3:
+            return "Cortex-M3";
+        case CPU_CORTEX_M4:
+            return "Cortex-M4";
+        case CPU_CORTEX_M7:
+            return "Cortex-M7";
+        default:
+            return "Unknown";
+    }
 }
 
 uint32_t SWD::readTargetMemory(uint32_t address, void* pvBuffer, uint32_t bufferSize, TransferSize readSize)
@@ -996,7 +1128,7 @@ uint32_t SWD::calculateTransferCount(uint32_t startAddress, uint32_t expectedAdd
 // Error bits that can be set in CTRL/STAT register.
 static const uint32_t STAT_STICKY_OVERRUN_BIT = 1 << 1;
 static const uint32_t STAT_STICKY_COMPARE_BIT = 1 << 4;
-static const uint32_t STAT_STICK_ERROR_BIT = 1 << 5;
+static const uint32_t STAT_STICKY_ERROR_BIT = 1 << 5;
 static const uint32_t STAT_WRITE_DATA_ERROR_BIT = 1 << 7;
 
 // Error bits that can be cleared in the ABORT register.
@@ -1109,6 +1241,16 @@ bool SWD::read(SwdApOrDp APnDP, uint32_t address, uint32_t* pData)
     // Make sure that we are allowed to read from this register.
     assert ( address & AP_DP_RO );
 
+    if (APnDP == AP)
+    {
+        if (m_apWritePending)
+        {
+            // If last AP request was a write then delay for a bit before issuing the first read.
+            idleBus(8);
+        }
+        m_apWritePending = false;
+    }
+
     if (!selectBank(APnDP, address))
     {
         logErrorF("Failed to call selectBank(0x%lX, 0x%lX)", APnDP, address);
@@ -1168,6 +1310,12 @@ bool SWD::write(SwdApOrDp APnDP, uint32_t address, uint32_t data)
     // Make sure that we are allowed to write to this register.
     assert ( address & AP_DP_WO );
 
+    if (APnDP == AP)
+    {
+        // Remember that we just pending an AP write.
+        m_apWritePending = true;
+    }
+
     if (!selectBank(APnDP, address))
     {
         logErrorF("Failed to call selectBank(0x%lX, 0x%08lX)", APnDP, address);
@@ -1225,7 +1373,7 @@ bool SWD::handleTransferResponse(uint32_t ack, bool ignoreProtocolError, bool* p
         ack = ACK_PROT_ERROR;
     }
 
-    if (ack != ACK_OK && m_handlingError > 0)
+    if (ack != ACK_OK && m_clearingErrors > 0)
     {
         // Just return error code with no retries if already trying to handle errors.
         logErrorF("Ignoring failure 0x%lX while handling ACK_FAIL.", ack);
@@ -1233,11 +1381,9 @@ bool SWD::handleTransferResponse(uint32_t ack, bool ignoreProtocolError, bool* p
     }
     else if (ack == ACK_WAIT)
     {
-        // Retry on wait responses.
-        logError("Encountered ACK_WAIT.");
+        // Clear sticky overrun error and retry on wait responses.
+        handleStickyErrors(ack, pRetry);
         m_totalWaitRetries++;
-        *pRetry = true;
-        m_lastReadWriteError = SWD_WAIT;
         return false;
     }
     else if (ack == ACK_PROT_ERROR)
@@ -1255,46 +1401,8 @@ bool SWD::handleTransferResponse(uint32_t ack, bool ignoreProtocolError, bool* p
     }
     else if (ack == ACK_FAIL)
     {
-        // Flag that we are handling a FAIL so that we don't infinite loop trying to clear error bits.
-        m_handlingError++;
-            uint32_t stat = 0;
-            readDP(DP_CTRL_STAT, &stat);
-
-            // Clear the sticky errors via the ABORT register.
-            uint32_t abortBitsToClear = 0;
-            if (stat & STAT_STICKY_OVERRUN_BIT)
-            {
-                abortBitsToClear |= ABORT_OVERRUN_ERROR_CLEAR_BIT;
-                // Set this error code first since the other 2 have higher precedence and should overwrite this one.
-                m_lastReadWriteError = SWD_FAULT_OVERRUN;
-            }
-            if (stat & STAT_WRITE_DATA_ERROR_BIT)
-            {
-                // Treat the same as read parity errors.
-                handleProtocolAndParityErrors();
-                m_totalParityErrorRetries++;
-                *pRetry = true;
-                abortBitsToClear |= ABORT_WRITE_DATA_ERROR_CLEAR_BIT;
-                m_lastReadWriteError = SWD_FAULT_WDATAERR;
-            }
-            if (stat & STAT_STICK_ERROR_BIT)
-            {
-                abortBitsToClear |= ABORT_STICKY_ERROR_CLEAR_BIT;
-                // Set this error code last as it is the most important one for the caller to know about.
-                m_lastReadWriteError = SWD_FAULT_ERROR;
-            }
-            if (m_lastReadWriteError == SWD_FAULT_ERROR)
-            {
-                // Can silence these error messages by turning off debug level diagnostics in config.h
-                logDebugF("Encountered ACK_FAIL w/ DP_CTRL_STAT=0x%08lX.", stat);
-            }
-            else
-            {
-                logErrorF("Encountered ACK_FAIL w/ DP_CTRL_STAT=0x%08lX.", stat);
-            }
-            writeDP(DP_ABORT, abortBitsToClear);
-            m_totalFailErrors++;
-        m_handlingError--;
+        handleStickyErrors(ack, pRetry);
+        m_totalFailErrors++;
         return false;
     }
     else if (ack == ACK_PARITY)
@@ -1309,6 +1417,59 @@ bool SWD::handleTransferResponse(uint32_t ack, bool ignoreProtocolError, bool* p
     }
 
     return true;
+}
+
+void SWD::handleStickyErrors(uint32_t ack, bool* pRetry)
+{
+    // This bit will be cleared in DP_CTRL_STAT if something has caused the debug port to be powered down.
+    const uint32_t DP_CTRL_STAT_CDBGPWRUPACK_Bit = 1 << 29;
+
+    // Flag that we are handling FAIL/WAIT so that we don't infinite loop trying to clear error bits.
+    m_clearingErrors++;
+        uint32_t stat = 0;
+        readDP(DP_CTRL_STAT, &stat);
+
+        // Clear the sticky errors via the ABORT register.
+        uint32_t abortBitsToClear = 0;
+        if (stat & STAT_STICKY_OVERRUN_BIT)
+        {
+            abortBitsToClear |= ABORT_OVERRUN_ERROR_CLEAR_BIT;
+            // Set this error code first since the other 2 have higher precedence and should overwrite this one.
+            m_lastReadWriteError = SWD_FAULT_OVERRUN;
+            *pRetry = true;
+        }
+        if (stat & STAT_WRITE_DATA_ERROR_BIT)
+        {
+            // Treat the same as read parity errors.
+            handleProtocolAndParityErrors();
+            m_totalParityErrorRetries++;
+            *pRetry = true;
+            abortBitsToClear |= ABORT_WRITE_DATA_ERROR_CLEAR_BIT;
+            m_lastReadWriteError = SWD_FAULT_WDATAERR;
+        }
+        if (stat & STAT_STICKY_ERROR_BIT)
+        {
+            abortBitsToClear |= ABORT_STICKY_ERROR_CLEAR_BIT;
+            // Set this error code last as it is the most important one for the caller to know about.
+            m_lastReadWriteError = SWD_FAULT_ERROR;
+        }
+        if (!(stat & DP_CTRL_STAT_CDBGPWRUPACK_Bit))
+        {
+            // Debug port has powered down for some reason, probably external reset.
+            *pRetry = false;
+            m_lastReadWriteError = SWD_PROTOCOL;
+        }
+        if (m_lastReadWriteError == SWD_FAULT_ERROR)
+        {
+            // Can silence these error messages by turning off debug level diagnostics in config.h
+            logDebugF("Encountered %s w/ DP_CTRL_STAT=0x%08lX.", ack == ACK_FAIL ? "ACK_FAIL" : "ACK_WAIT", stat);
+        }
+        else
+        {
+            logErrorF("Encountered %s w/ DP_CTRL_STAT=0x%08lX.", ack == ACK_FAIL ? "ACK_FAIL" : "ACK_WAIT", stat);
+        }
+        writeDP(DP_ABORT, abortBitsToClear);
+    m_clearingErrors--;
 }
 
 bool SWD::selectBank(SwdApOrDp APnDP, uint32_t address)
@@ -1469,7 +1630,7 @@ uint32_t SWD::calculateParity(uint32_t bitsForParity)
 void SWD::handleProtocolAndParityErrors()
 {
     // UNDONE: Could drop the SWD clock rate here too.
-    m_handlingError++;
+    m_clearingErrors++;
         sendLineReset();
-    m_handlingError--;
+    m_clearingErrors--;
 }

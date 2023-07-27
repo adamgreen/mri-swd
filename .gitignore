@@ -8,3 +8,4 @@ perf/perf-pc/perf-pc
 obj/
 *.paint
 .DS_Store
+mri.log

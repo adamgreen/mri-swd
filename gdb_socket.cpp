@@ -103,7 +103,6 @@ err_t GDBSocket::closeClient()
             error = ERR_ABRT;
         }
         m_pClientPCB = NULL;
-        m_tcpToMriQueue.init();
     }
     return error;
 }
