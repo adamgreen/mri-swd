@@ -620,7 +620,7 @@ static const uint32_t DHCSR_Address = 0xE000EDF0;
 
 static bool readDHCSR(uint32_t* pValue)
 {
-    if (!readTargetMemory(DHCSR_Address, pValue, sizeof(*pValue), SWD::TRANSFER_32BIT))
+    if (readTargetMemory(DHCSR_Address, pValue, sizeof(*pValue), SWD::TRANSFER_32BIT) != sizeof(*pValue))
     {
         logError("Failed to read DHCSR register.");
         return false;
@@ -658,7 +658,7 @@ static bool writeDHCSR(uint32_t DHCSR_Value)
     const uint32_t DHCSR_DBGKEY = 0xA05F << DHCSR_DBGKEY_Shift;
     DHCSR_Value = (DHCSR_Value & ~DHCSR_DBGKEY_Mask) | DHCSR_DBGKEY;
 
-    return writeTargetMemory(DHCSR_Address, &DHCSR_Value, sizeof(DHCSR_Value), SWD::TRANSFER_32BIT);
+    return writeTargetMemory(DHCSR_Address, &DHCSR_Value, sizeof(DHCSR_Value), SWD::TRANSFER_32BIT) == sizeof(DHCSR_Value);
 }
 
 static uint32_t writeTargetMemory(uint32_t address, const void* pvBuffer, uint32_t bufferSize, SWD::TransferSize writeSize)
@@ -729,7 +729,7 @@ static void checkForFpu()
     const uint32_t CPACR_CP11_Mask = 0xF << CPACR_CP11_Shift;
 
     uint32_t CPACR_OrigValue = 0;
-    if (!readTargetMemory(CPACR_Address, &CPACR_OrigValue, sizeof(CPACR_OrigValue), SWD::TRANSFER_32BIT))
+    if (readTargetMemory(CPACR_Address, &CPACR_OrigValue, sizeof(CPACR_OrigValue), SWD::TRANSFER_32BIT) != sizeof(CPACR_OrigValue))
     {
         logError("Failed to read CPACR register.");
         // On error, assume that FPU doesn't exist.
@@ -746,7 +746,7 @@ static void checkForFpu()
 
     // Try enabling the FPU.
     uint32_t CPACR_TestValue = CPACR_CP10_Mask | CPACR_CP11_Mask | CPACR_OrigValue;
-    if (!writeTargetMemory(CPACR_Address, &CPACR_TestValue, sizeof(CPACR_TestValue), SWD::TRANSFER_32BIT))
+    if (writeTargetMemory(CPACR_Address, &CPACR_TestValue, sizeof(CPACR_TestValue), SWD::TRANSFER_32BIT) != sizeof(CPACR_TestValue))
     {
         logError("Failed to test CPACR register.");
         // On error, assume that FPU doesn't exist.
@@ -756,7 +756,7 @@ static void checkForFpu()
 
     // See if the FPU enable took. If so then the FPU exists.
     uint32_t CPACR_UpdatedValue = ~CPACR_TestValue;
-    if (!readTargetMemory(CPACR_Address, &CPACR_UpdatedValue, sizeof(CPACR_UpdatedValue), SWD::TRANSFER_32BIT))
+    if (readTargetMemory(CPACR_Address, &CPACR_UpdatedValue, sizeof(CPACR_UpdatedValue), SWD::TRANSFER_32BIT) != sizeof(CPACR_UpdatedValue))
     {
         logError("Failed to verify CPACR register.");
         // On error, assume that FPU doesn't exist.
@@ -769,7 +769,7 @@ static void checkForFpu()
     }
 
     // Restore CPACR Value.
-    if (!writeTargetMemory(CPACR_Address, &CPACR_OrigValue, sizeof(CPACR_OrigValue), SWD::TRANSFER_32BIT))
+    if (writeTargetMemory(CPACR_Address, &CPACR_OrigValue, sizeof(CPACR_OrigValue), SWD::TRANSFER_32BIT) != sizeof(CPACR_OrigValue))
     {
         logError("Failed to restore CPACR register.");
     }
@@ -868,14 +868,14 @@ static uint32_t DCRDR_Address = 0xE000EDF8;
 static bool readCpuRegister(uint32_t registerIndex, uint32_t* pValue)
 {
     uint32_t DCRSR_Value = registerIndex & DCRSR_REGSEL_Mask;
-    if (!writeTargetMemory(DCRSR_Address, &DCRSR_Value, sizeof(DCRSR_Value), SWD::TRANSFER_32BIT))
+    if (writeTargetMemory(DCRSR_Address, &DCRSR_Value, sizeof(DCRSR_Value), SWD::TRANSFER_32BIT) != sizeof(DCRSR_Value))
     {
         return false;
     }
 
     waitForRegisterTransferToComplete();
 
-    return readTargetMemory(DCRDR_Address, pValue, sizeof(*pValue), SWD::TRANSFER_32BIT);
+    return readTargetMemory(DCRDR_Address, pValue, sizeof(*pValue), SWD::TRANSFER_32BIT) == sizeof(*pValue);
 }
 
 static void waitForRegisterTransferToComplete()
@@ -947,13 +947,13 @@ static void restoreContext()
 
 static bool writeCpuRegister(uint32_t registerIndex, uint32_t value)
 {
-    if (!writeTargetMemory(DCRDR_Address, &value, sizeof(value), SWD::TRANSFER_32BIT))
+    if (writeTargetMemory(DCRDR_Address, &value, sizeof(value), SWD::TRANSFER_32BIT) != sizeof(value))
     {
         return false;
     }
 
     uint32_t DCRSR_Value = DCRSR_REGWnR_Bit | (registerIndex & DCRSR_REGSEL_Mask);
-    if (!writeTargetMemory(DCRSR_Address, &DCRSR_Value, sizeof(DCRSR_Value), SWD::TRANSFER_32BIT))
+    if (writeTargetMemory(DCRSR_Address, &DCRSR_Value, sizeof(DCRSR_Value), SWD::TRANSFER_32BIT) != sizeof(DCRSR_Value))
     {
         return false;
     }
@@ -1170,7 +1170,7 @@ static void enableDWTandVectorCatches()
 
     uint32_t DEMCR_Value = 0;
 
-    if (!readTargetMemory(DEMCR_Address, &DEMCR_Value, sizeof(DEMCR_Value), SWD::TRANSFER_32BIT))
+    if (readTargetMemory(DEMCR_Address, &DEMCR_Value, sizeof(DEMCR_Value), SWD::TRANSFER_32BIT) != sizeof(DEMCR_Value))
     {
         logError("Failed to read DEMCR register.");
         return;
@@ -1178,7 +1178,7 @@ static void enableDWTandVectorCatches()
 
     DEMCR_Value |= DEMCR_DWTENA_Bit | allVectorCatchBits;
 
-    if (!writeTargetMemory(DEMCR_Address, &DEMCR_Value, sizeof(DEMCR_Value), SWD::TRANSFER_32BIT))
+    if (writeTargetMemory(DEMCR_Address, &DEMCR_Value, sizeof(DEMCR_Value), SWD::TRANSFER_32BIT) != sizeof(DEMCR_Value))
     {
         logError("Failed to set DWTENA/TRCENA and vector catch bits in DEMCR register.");
         return;
@@ -1208,7 +1208,7 @@ static uint32_t getDWTComparatorCount()
     uint32_t DWT_CTRL_Address = 0xE0001000;
     uint32_t DWT_CTRL_Value = 0;
 
-    if (!readTargetMemory(DWT_CTRL_Address, &DWT_CTRL_Value, sizeof(DWT_CTRL_Value), SWD::TRANSFER_32BIT))
+    if (readTargetMemory(DWT_CTRL_Address, &DWT_CTRL_Value, sizeof(DWT_CTRL_Value), SWD::TRANSFER_32BIT) != sizeof(DWT_CTRL_Value))
     {
         logError("Failed to read DWT_CTRL register.");
         return 0;
@@ -1229,7 +1229,7 @@ static void clearDWTComparator(uint32_t comparatorAddress)
     const uint32_t DWT_COMP_FUNCTION_EMITRANGE_Bit = 1 << 5;
     DWT_COMP_Type dwtComp;
 
-    if (!readTargetMemory(comparatorAddress, &dwtComp, 3*sizeof(uint32_t), SWD::TRANSFER_32BIT))
+    if (readTargetMemory(comparatorAddress, &dwtComp, 3*sizeof(uint32_t), SWD::TRANSFER_32BIT) != 3*sizeof(uint32_t))
     {
         logError("Failed to read DWT_COMP/DWT_MASK/DWT_FUNCTION registers for clearing.");
     }
@@ -1241,7 +1241,7 @@ static void clearDWTComparator(uint32_t comparatorAddress)
                                      DWT_COMP_FUNCTION_EMITRANGE_Bit |
                                      DWT_COMP_FUNCTION_FUNCTION_Mask);
 
-    if (!writeTargetMemory(comparatorAddress, &dwtComp, 3*sizeof(uint32_t), SWD::TRANSFER_32BIT))
+    if (writeTargetMemory(comparatorAddress, &dwtComp, 3*sizeof(uint32_t), SWD::TRANSFER_32BIT) != 3*sizeof(uint32_t))
     {
         logError("Failed to write DWT_COMP/DWT_MASK/DWT_FUNCTION registers for clearing.");
     }
@@ -1287,7 +1287,7 @@ static const uint32_t FP_CTRL_Address = 0xE0002000;
 static uint32_t readFPControlRegister()
 {
     uint32_t FP_CTRL_Value = 0;
-    if (!readTargetMemory(FP_CTRL_Address, &FP_CTRL_Value, sizeof(FP_CTRL_Value), SWD::TRANSFER_32BIT))
+    if (readTargetMemory(FP_CTRL_Address, &FP_CTRL_Value, sizeof(FP_CTRL_Value), SWD::TRANSFER_32BIT) != sizeof(FP_CTRL_Value))
     {
         logError("Failed to read FP_CTRL register.");
         return 0;
@@ -1308,7 +1308,7 @@ static uint32_t getFPBLiteralComparatorCount()
 static void clearFPBComparator(uint32_t comparatorAddress)
 {
     uint32_t comparatorValue = 0;
-    if (!writeTargetMemory(comparatorAddress, &comparatorValue, sizeof(comparatorValue), SWD::TRANSFER_32BIT))
+    if (writeTargetMemory(comparatorAddress, &comparatorValue, sizeof(comparatorValue), SWD::TRANSFER_32BIT) != sizeof(comparatorValue))
     {
         logError("Failed to write to FP comparator register.");
     }
@@ -1328,7 +1328,7 @@ static void enableFPB()
 
 static void writeFPControlRegister(uint32_t FP_CTRL_Value)
 {
-    if (!writeTargetMemory(FP_CTRL_Address, &FP_CTRL_Value, sizeof(FP_CTRL_Value), SWD::TRANSFER_32BIT))
+    if (writeTargetMemory(FP_CTRL_Address, &FP_CTRL_Value, sizeof(FP_CTRL_Value), SWD::TRANSFER_32BIT) != sizeof(FP_CTRL_Value))
     {
         logError("Failed to write FP_CTRL register.");
     }
@@ -1396,7 +1396,7 @@ static PlatformTrapReason cacheTrapReason(void)
 
 static bool readDFSR(uint32_t* pDFSR)
 {
-    if (!readTargetMemory(DFSR_Address, pDFSR, sizeof(*pDFSR), SWD::TRANSFER_32BIT))
+    if (readTargetMemory(DFSR_Address, pDFSR, sizeof(*pDFSR), SWD::TRANSFER_32BIT) != sizeof(*pDFSR))
     {
         logError("Failed to read DFSR.");
         return false;
@@ -1418,7 +1418,7 @@ static PlatformTrapReason findMatchedWatchpoint(void)
     for (uint32_t i = 0 ; i < comparatorCount ; i++)
     {
         uint32_t function = 0;
-        if (!readTargetMemory(currentComparatorAddress + offsetof(DWT_COMP_Type, function), &function, sizeof(function), SWD::TRANSFER_32BIT))
+        if (readTargetMemory(currentComparatorAddress + offsetof(DWT_COMP_Type, function), &function, sizeof(function), SWD::TRANSFER_32BIT) != sizeof(function))
         {
             logError("Failed to read DWT function register.");
             return reason;
@@ -1460,7 +1460,7 @@ static PlatformTrapReason getReasonFromMatchComparator(uint32_t comparatorAddres
     }
 
     uint32_t compValue = 0;
-    if (!readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, comp), &compValue, sizeof(compValue), SWD::TRANSFER_32BIT))
+    if (readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, comp), &compValue, sizeof(compValue), SWD::TRANSFER_32BIT) != sizeof(compValue))
     {
         logError("Failed to read DWT comp register.");
         return reason;
@@ -1495,7 +1495,7 @@ static void clearDFSR()
 
 static bool writeDFSR(uint32_t dfsr)
 {
-    if (!writeTargetMemory(DFSR_Address, &dfsr, sizeof(dfsr), SWD::TRANSFER_32BIT))
+    if (writeTargetMemory(DFSR_Address, &dfsr, sizeof(dfsr), SWD::TRANSFER_32BIT) != sizeof(dfsr))
     {
         logError("Failed to write to DFSR.");
         return false;
@@ -2102,7 +2102,7 @@ static uint32_t enableFPBBreakpoint(uint32_t breakpointAddress, bool is32BitInst
     }
 
     uint32_t comparatorValue = calculateFPBComparatorValue(breakpointAddress, is32BitInstruction);
-    if (!writeTargetMemory(freeFPBBreakpointComparator, &comparatorValue, sizeof(comparatorValue), SWD::TRANSFER_32BIT))
+    if (writeTargetMemory(freeFPBBreakpointComparator, &comparatorValue, sizeof(comparatorValue), SWD::TRANSFER_32BIT) != sizeof(comparatorValue))
     {
         logErrorF("Failed to set breakpoint at address 0x%08lX.", breakpointAddress);
         return 0;
@@ -2120,7 +2120,7 @@ static uint32_t findFPBBreakpointComparator(uint32_t breakpointAddress, bool is3
     for (uint32_t i = 0 ; i < codeComparatorCount ; i++)
     {
         uint32_t currentComparatorValue = 0;
-        if (!readTargetMemory(currentComparatorAddress, &currentComparatorValue, sizeof(currentComparatorValue), SWD::TRANSFER_32BIT))
+        if (readTargetMemory(currentComparatorAddress, &currentComparatorValue, sizeof(currentComparatorValue), SWD::TRANSFER_32BIT) != sizeof(currentComparatorValue))
         {
             logErrorF("Failed to read from FPB comparator at address 0x%08lX.", currentComparatorAddress);
             return 0;
@@ -2272,7 +2272,7 @@ static uint32_t findFreeFPBBreakpointComparator()
     for (uint32_t i = 0 ; i < codeComparatorCount ; i++)
     {
         uint32_t currentComparatorValue = 0;
-        if (!readTargetMemory(currentComparatorAddress, &currentComparatorValue, sizeof(currentComparatorValue), SWD::TRANSFER_32BIT))
+        if (readTargetMemory(currentComparatorAddress, &currentComparatorValue, sizeof(currentComparatorValue), SWD::TRANSFER_32BIT) != sizeof(currentComparatorValue))
         {
             logErrorF("Failed to read from FPB comparator at address 0x%08lX.", currentComparatorAddress);
             return 0;
@@ -2545,7 +2545,7 @@ static bool doesDWTComparatorMatch(uint32_t comparatorAddress,
 static bool doesDWTComparatorFunctionMatch(uint32_t comparatorAddress, uint32_t function)
 {
     uint32_t functionValue = 0;
-    if (!readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, function), &functionValue, sizeof(functionValue), SWD::TRANSFER_32BIT))
+    if (readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, function), &functionValue, sizeof(functionValue), SWD::TRANSFER_32BIT) != sizeof(functionValue))
     {
         logError("Failed to read DWT function register.");
         return false;
@@ -2584,7 +2584,7 @@ static uint32_t maskOffDWTFunctionBits(uint32_t functionValue)
 static bool doesDWTComparatorAddressMatch(uint32_t comparatorAddress, uint32_t address)
 {
     uint32_t compValue = 0;
-    if (!readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, comp), &compValue, sizeof(compValue), SWD::TRANSFER_32BIT))
+    if (readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, comp), &compValue, sizeof(compValue), SWD::TRANSFER_32BIT) != sizeof(compValue))
     {
         logError("Failed to read DWT comparator register.");
         return false;
@@ -2595,7 +2595,7 @@ static bool doesDWTComparatorAddressMatch(uint32_t comparatorAddress, uint32_t a
 static bool doesDWTComparatorMaskMatch(uint32_t comparatorAddress, uint32_t size)
 {
     uint32_t maskValue = 0;
-    if (!readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, mask), &maskValue, sizeof(maskValue), SWD::TRANSFER_32BIT))
+    if (readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, mask), &maskValue, sizeof(maskValue), SWD::TRANSFER_32BIT) != sizeof(maskValue))
     {
         logError("Failed to read DWT mask register.");
         return false;
@@ -2640,7 +2640,7 @@ static bool isDWTComparatorFree(uint32_t comparatorAddress)
     const uint32_t DWT_COMP_FUNCTION_FUNCTION_DISABLED = 0x0;
 
     uint32_t functionValue = 0;
-    if (!readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, function), &functionValue, sizeof(functionValue), SWD::TRANSFER_32BIT))
+    if (readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, function), &functionValue, sizeof(functionValue), SWD::TRANSFER_32BIT) != sizeof(functionValue))
     {
         logError("Failed to read DWT function register.");
         return false;
@@ -2658,12 +2658,12 @@ static bool attemptToSetDWTComparator(uint32_t comparatorAddress,
         logErrorF("Failed to set DWT mask register to a size of %lu bytes.", watchpointSize);
         return false;
     }
-    if (!writeTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, comp), &watchpointAddress, sizeof(watchpointAddress), SWD::TRANSFER_32BIT))
+    if (writeTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, comp), &watchpointAddress, sizeof(watchpointAddress), SWD::TRANSFER_32BIT) != sizeof(watchpointAddress))
     {
         logError("Failed to write DWT comparator register.");
         return false;
     }
-    if (!writeTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, function), &watchpointType, sizeof(watchpointType), SWD::TRANSFER_32BIT))
+    if (writeTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, function), &watchpointType, sizeof(watchpointType), SWD::TRANSFER_32BIT) != sizeof(watchpointType))
     {
         logError("Failed to write DWT function register.");
         return false;
@@ -2676,7 +2676,7 @@ static bool attemptToSetDWTComparatorMask(uint32_t comparatorAddress, uint32_t w
     uint32_t maskBitCount;
 
     maskBitCount = calculateLog2(watchpointSize);
-    if (!writeTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, mask), &maskBitCount, sizeof(maskBitCount), SWD::TRANSFER_32BIT))
+    if (writeTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, mask), &maskBitCount, sizeof(maskBitCount), SWD::TRANSFER_32BIT) != sizeof(maskBitCount))
     {
         logError("Failed to write DWT mask register.");
         return false;
@@ -2684,7 +2684,7 @@ static bool attemptToSetDWTComparatorMask(uint32_t comparatorAddress, uint32_t w
 
     // Processor may limit number of bits to be masked off so check.
     uint32_t maskValue = 0;
-    if (!readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, mask), &maskValue, sizeof(maskValue), SWD::TRANSFER_32BIT))
+    if (readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, mask), &maskValue, sizeof(maskValue), SWD::TRANSFER_32BIT) != sizeof(maskValue))
     {
         logError("Failed to read DWT mask register.");
         return false;
@@ -2736,7 +2736,7 @@ static void displayUsageFaultCauseToGdbConsole(void);
 uint8_t Platform_DetermineCauseOfException(void)
 {
     uint32_t DFSR_Value = 0;
-    if (!readTargetMemory(DFSR_Address, &DFSR_Value, sizeof(DFSR_Value), SWD::TRANSFER_32BIT))
+    if (readTargetMemory(DFSR_Address, &DFSR_Value, sizeof(DFSR_Value), SWD::TRANSFER_32BIT) != sizeof(DFSR_Value))
     {
         logError("Failed to read DFSR register.");
         // NOTE: Catch all signal will be SIGSTOP.
@@ -2856,7 +2856,7 @@ static void displayHardFaultCauseToGdbConsole(void)
     const uint32_t vectorTableReadBit = 1 << 1;
     uint32_t       hardFaultStatusRegister = 0xBAADFEED;
 
-    if (!g_swd.readTargetMemory(HFSR_Address, &hardFaultStatusRegister, sizeof(hardFaultStatusRegister), SWD::TRANSFER_32BIT))
+    if (readTargetMemory(HFSR_Address, &hardFaultStatusRegister, sizeof(hardFaultStatusRegister), SWD::TRANSFER_32BIT) != sizeof(hardFaultStatusRegister))
     {
         logError("Failed to read the HFSR register.");
         return;
@@ -2895,7 +2895,7 @@ static void displayMemFaultCauseToGdbConsole(void)
     const uint32_t instructionFetch = 1;
     uint32_t       CFSR_Value = 0xBAADFEED;
 
-    if (!g_swd.readTargetMemory(CFSR_Address, &CFSR_Value, sizeof(CFSR_Value), SWD::TRANSFER_32BIT))
+    if (readTargetMemory(CFSR_Address, &CFSR_Value, sizeof(CFSR_Value), SWD::TRANSFER_32BIT) != sizeof(CFSR_Value))
     {
         logError("Failed to read the CFSR register.");
         return;
@@ -2916,7 +2916,7 @@ static void displayMemFaultCauseToGdbConsole(void)
     {
         const uint32_t MMFAR_Address = 0xE000ED34;
         uint32_t       MMFAR_Value;
-        if (!g_swd.readTargetMemory(MMFAR_Address, &MMFAR_Value, sizeof(MMFAR_Value), SWD::TRANSFER_32BIT))
+        if (readTargetMemory(MMFAR_Address, &MMFAR_Value, sizeof(MMFAR_Value), SWD::TRANSFER_32BIT) != sizeof(MMFAR_Value))
         {
             logError("Failed to read the MMFAR register.");
             return;
@@ -2960,7 +2960,7 @@ static void displayBusFaultCauseToGdbConsole(void)
     static const uint32_t instructionPrefetch = 1;
     uint32_t              CFSR_Value = 0xBAADFEED;
 
-    if (!g_swd.readTargetMemory(CFSR_Address, &CFSR_Value, sizeof(CFSR_Value), SWD::TRANSFER_32BIT))
+    if (readTargetMemory(CFSR_Address, &CFSR_Value, sizeof(CFSR_Value), SWD::TRANSFER_32BIT) != sizeof(CFSR_Value))
     {
         logError("Failed to read the CFSR register.");
         return;
@@ -2981,7 +2981,7 @@ static void displayBusFaultCauseToGdbConsole(void)
     {
         const uint32_t BFAR_Address = 0xE000ED38;
         uint32_t       BFAR_Value;
-        if (!g_swd.readTargetMemory(BFAR_Address, &BFAR_Value, sizeof(BFAR_Value), SWD::TRANSFER_32BIT))
+        if (readTargetMemory(BFAR_Address, &BFAR_Value, sizeof(BFAR_Value), SWD::TRANSFER_32BIT) != sizeof(BFAR_Value))
         {
             logError("Failed to read the BFAR register.");
             return;
@@ -3030,7 +3030,7 @@ static void displayUsageFaultCauseToGdbConsole(void)
     static const uint32_t undefinedInstructionBit = 1;
     uint32_t              CFSR_Value = 0xBAADFEED;
 
-    if (!g_swd.readTargetMemory(CFSR_Address, &CFSR_Value, sizeof(CFSR_Value), SWD::TRANSFER_32BIT))
+    if (readTargetMemory(CFSR_Address, &CFSR_Value, sizeof(CFSR_Value), SWD::TRANSFER_32BIT) != sizeof(CFSR_Value))
     {
         logError("Failed to read the CFSR register.");
         return;
@@ -3251,7 +3251,7 @@ void Platform_ResetDevice(void)
     const uint32_t AIRCR_KEY_VALUE = 0x05FA << AIRCR_KEY_Shift;
     const uint32_t AIRCR_SYSRESETREQ_Bit = 1 << 2;
     uint32_t AIRCR_Value = 0;
-    if (!readTargetMemory(AIRCR_Address, &AIRCR_Value, sizeof(AIRCR_Value), SWD::TRANSFER_32BIT))
+    if (readTargetMemory(AIRCR_Address, &AIRCR_Value, sizeof(AIRCR_Value), SWD::TRANSFER_32BIT) != sizeof(AIRCR_Value))
     {
         logError("Failed to read AIRCR register for device reset.");
     }
@@ -3260,7 +3260,7 @@ void Platform_ResetDevice(void)
     // Then set the SYSRESETREQ bit to request a device reset.
     AIRCR_Value = (AIRCR_Value & ~AIRCR_KEY_Mask) | AIRCR_KEY_VALUE | AIRCR_SYSRESETREQ_Bit;
 
-    if (!writeTargetMemory(AIRCR_Address, &AIRCR_Value, sizeof(AIRCR_Value), SWD::TRANSFER_32BIT))
+    if (writeTargetMemory(AIRCR_Address, &AIRCR_Value, sizeof(AIRCR_Value), SWD::TRANSFER_32BIT) != sizeof(AIRCR_Value))
     {
         logError("Failed to write AIRCR register for device reset.");
     }
