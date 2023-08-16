@@ -138,6 +138,12 @@ class SWD
         //  Finding the MEM-AP which is the debug entry.
         bool initTargetForDebugging();
 
+        // Method to power down the CPU's debug subsystem.
+        bool powerDownDebugPort()
+        {
+            return controlPower(true, false);
+        }
+
         // Method which returns the currently connected DPv2 target, if any.
         //
         // Returns one of the DPv2Targets elements or DPv2Targets::UNKNOWN if no DPv2 target is connected.

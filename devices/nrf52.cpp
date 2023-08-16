@@ -24,6 +24,13 @@
 #include "nrf52.h"
 #include "mri_platform.h"
 
+// MRI C headers
+extern "C"
+{
+    #include <core/core.h>
+    #include <core/gdb_console.h>
+}
+
 
 // nRF52 FLASH memory location.
 // The actual size for the attached target is determined by reading the device's FICR.
@@ -73,11 +80,13 @@ static bool is4kAligned(uint32_t value);
 static bool isAttemptingToFlashInvalidAddress(const DeviceMemoryRegion* pFlashRegion, uint32_t address, uint32_t length);
 static bool eraseEnable(SWD* pSWD);
 static bool erasePage(SWD* pSWD, uint32_t pageAddress);
+static bool waitForEraseToComplete(SWD* pSWD);
 static bool eraseDisable(SWD* pSWD);
 static bool isAddressAndLengthWordAligned(uint32_t address, uint32_t length);
 static bool isWordAligned(uint32_t value);
 static bool writeEnable(SWD* pSWD);
 static bool writeDisable(SWD* pSWD);
+static bool eraseFlashAndUICR(SWD* pSWD);
 
 
 // mri-swd will call this function on each of the devices listed in g_supportedDevices until a non-NULL response
@@ -288,6 +297,16 @@ static bool erasePage(SWD* pSWD, uint32_t pageAddress)
         return false;
     }
 
+    if (!waitForEraseToComplete(pSWD))
+    {
+        logError("Failed to erase all of FLASH and UICR.");
+        return false;
+    }
+    return true;
+}
+
+static bool waitForEraseToComplete(SWD* pSWD)
+{
     absolute_time_t endTime = make_timeout_time_ms(FLASH_PAGE_ERASE_TIMEOUT_MS);
     uint32_t nvmcReady = 0;
     do
@@ -295,7 +314,7 @@ static bool erasePage(SWD* pSWD, uint32_t pageAddress)
         const uint32_t NVMC_READY_Address = 0x4001E400;
         if (!pSWD->readTargetMemory(NVMC_READY_Address, &nvmcReady, sizeof(nvmcReady), SWD::TRANSFER_32BIT))
         {
-            logError("Failed to read NVMC.READY");
+            logError("Failed to read NVMC.READY.");
             return false;
         }
     }
@@ -303,7 +322,7 @@ static bool erasePage(SWD* pSWD, uint32_t pageAddress)
 
     if (nvmcReady == 0)
     {
-        logErrorF("Timed out waiting for FLASH page at address 0x%08lX to be erased.", pageAddress);
+        logError("Timed out waiting for NVMC.READY.");
         return false;
     }
 
@@ -442,6 +461,69 @@ const DeviceMemoryLayout* nrf52GetMemoryLayout(DeviceObject* pvObject, SWD* pSWD
 }
 
 
+// User has issued a "monitor" command in GDB. This function is called to give the device specific code an
+// opportunity to handle the command before letting the mri-swd core code handle it.
+//
+// pvObject is a pointer to the object allocated by detect().
+// pSWD is a pointer to the SWD object used for interfacing to the device.
+//
+// Returns true if this command has been handled by this device specific code.
+// Returns false if the more generic mri-swd monitor command handler should be used instead.
+static bool nrf52HandleMonitorCommand(DeviceObject* pvObject, SWD* pSWD, const char** ppArgs, size_t argCount)
+{
+    // Check for "help" command to list nRF52 specific commands.
+    if (argCount >= 1 && strcasecmp(ppArgs[0], "help") == 0)
+    {
+        WriteStringToGdbConsole("Supported nRF52 monitor commands:\r\n");
+        WriteStringToGdbConsole("nrf52 erase_flash_uicr\r\n");
+        PrepareStringResponse("OK");
+        return true;
+    }
+
+    // All other supported commands must be prefixed with "nrf52".
+    if (argCount < 2 || strcasecmp(ppArgs[0], "nrf52") != 0)
+    {
+        return false;
+    }
+
+    // Parse and handle nRF52 specific monitor commands.
+    if (strcasecmp(ppArgs[1], "erase_flash_uicr") == 0)
+    {
+        eraseFlashAndUICR(pSWD);
+        return true;
+    }
+
+    return false;
+}
+
+static bool eraseFlashAndUICR(SWD* pSWD)
+{
+    if (!eraseEnable(pSWD))
+    {
+        return false;
+    }
+
+    const uint32_t NVMC_ERASEALL_Address = 0x4001E50C;
+    const uint32_t eraseVal = 1;
+    if (!pSWD->writeTargetMemory(NVMC_ERASEALL_Address, &eraseVal, sizeof(eraseVal), SWD::TRANSFER_32BIT))
+    {
+        logError("Failed to write to NVMC.ERASEALL.");
+        return false;
+    }
+
+    if (!waitForEraseToComplete(pSWD))
+    {
+        logError("Failed to erase all of FLASH and UICR.");
+        return false;
+    }
+
+    if (!eraseDisable(pSWD))
+    {
+        return false;
+    }
+    return true;
+}
+
 // The function pointer table for this device. A pointer to it can be found in g_supportedDevices (in devices.cpp).
 DeviceFunctionTable g_nrf52DeviceSupport =
 {
@@ -454,5 +536,6 @@ DeviceFunctionTable g_nrf52DeviceSupport =
     .flashErase = nrf52FlashErase,
     .flashProgram = nrf52FlashProgram,
     .flashEnd = nrf52FlashEnd,
-    .getMemoryLayout = nrf52GetMemoryLayout
+    .getMemoryLayout = nrf52GetMemoryLayout,
+    .handleMonitorCommand = nrf52HandleMonitorCommand
 };

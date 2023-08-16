@@ -18,28 +18,30 @@
 ## Important Notes
 ![Dogfood Setup](dogfood.jpg)
 
-* __[5/17/2023]:__ The code found within this repository is now at the point where I can start using it to flash and debug the `mri-swd` firmware itself instead of the Segger J-Link that I had been using previously. This testing will help me to find bugs, missing features, and rough edges to correct over the upcoming weeks, getting it ready for others to use.
-* The initial goal is to just be able to debug and program the dual core [RP2040 microcontroller](https://www.raspberrypi.com/products/rp2040/). Support for other microcontrollers will be added in the future.
+* __[8/16/2023]:__ The code found within this repository is now at the point where I can start using it to flash and debug the `mri-swd` firmware itself instead of the Segger J-Link that I had been using previously. I am now using it daily to debug a nRF52840 based project. This has helped to surface more issues that have now been corrected.
+* The initial goal is to just be able to debug and program the dual core [RP2040 microcontroller](https://www.raspberrypi.com/products/rp2040/). Support has also been added for the [nRF52xxx family of microcontrollers](https://infocenter.nordicsemi.com/index.jsp?topic=%2Fstruct_nrf52%2Fstruct%2Fnrf52.html). Support for other microcontrollers will be added in the future.
 * The `mri-swd` firmware is initially being developed to run on the low cost [Pico W](https://www.adafruit.com/product/5526). It will use the Pico W's WiFi capabilities to wirelessly communicate with GDB. No intermediate program like OpenOCD will be required since the [mri remote debug stub](https://github.com/adamgreen/mri) functionality will be running on the Pico W itself.
 
 
 ## Supported Features
-* Supports debugging of **Core 0 on the RP2040**
-* Supports debugging of nRF52 microcontrollers.
+* Supports debugging of ARMv6-M and ARMv7-M (Cortex-M) based microcontrollers. Tested so far:
+  * **RP2040**
+  * **nRF52xxx**
 * RAM/FLASH/ROM Read
 * RAM Write
 * CPU Register Read/Write
-* `load` (**FLASH Programming**)
+* `load` (**FLASH Programming** of RP2040 and nRF52xxx)
 * `step` and `next` (Single Stepping)
 * `break` (Hardware Breakpoints)
 * `watch`, `awatch`, `rwatch` (Hardware Watchpoints)
-* `monitor reset` (Reboot the microcontroller)
+* `monitor reset [halt]` (Reboot the microcontroller)
+* `monitor detach` (Power down target DAP and shutdown mri-swd)
 * GDB connection over WiFi on port 2331
+* Semihosting
 
 ## Unsupported Features
-* Debugging of **Core 1 on the RP2040**
+* Debugging of **Second RP2040 Core**
 * FLASH programming of microcontrollers other than the RP2040 or nRF52xxx.
-* Semihosting
 * RTOS Thread Support
 * Connecting GDB over USB. Only WiFi for now.
 
@@ -190,15 +192,15 @@ In the root folder can be found  a [config.h](config.h) which can be used to cus
 * ~~RP2040 FLASH Programming~~
 * ~~Improve Robustness~~
 * ~~Basic nRF52 (Cortex-M4F) Debugging Support~~
+* ~~Semihosting Support~~
 * Addition of a small OLED Display
   * Report IP address
   * Report WiFi connections
   * Report target detected
   * Report target Vcc voltage
   * etc
+* Bridge microcontroller's UART on another WiFi TCP/IP port.
+* Custom PCB
 * Improve Usability
 * Improve Performance
 * RP2040 Core 1 Support
-* Bridge microcontroller's UART on another WiFi TCP/IP port.
-* Custom PCB
-* Semihosting Support

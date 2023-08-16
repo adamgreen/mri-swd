@@ -168,11 +168,15 @@ struct DeviceFunctionTable
     // Returns a pointer to the memory layout description for this device. Can't be NULL.
     const DeviceMemoryLayout* (*getMemoryLayout)(DeviceObject* pvObject, SWD* pSWD);
 
-#ifdef UNDONE
-    // Resets the device from GDB "monitor reset" request. The arguments to the monitor reset are passed into the
-    // function as well so that different types of reset can be performed based on user request.
-    bool reset(pv, pSWD, pMonitorCommand)
-#endif // UNDONE
+    // User has issued a "monitor" command in GDB. This function is called to give the device specific code an
+    // opportunity to handle the command before letting the mri-swd core code handle it.
+    //
+    // pvObject is a pointer to the object allocated by detect().
+    // pSWD is a pointer to the SWD object used for interfacing to the device.
+    //
+    // Returns true if this command has been handled by this device specific code.
+    // Returns false if the more generic mri-swd monitor command handler should be used instead.
+    bool (*handleMonitorCommand)(DeviceObject* pvObject, SWD* pSWD, const char** ppArgs, size_t argCount);
 };
 
 

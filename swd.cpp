@@ -125,9 +125,10 @@ bool SWD::init(PIO pio, uint32_t frequency, uint32_t swclkPin, uint32_t swdioPin
     pio_gpio_init(m_pio, swdioPin);
     pio_gpio_init(m_pio, swclkPin);
 
-    // Enable pull-up on both SWD pins so that disconnected signals give known values.
-    gpio_pull_up(swclkPin);
+    // Enable pull-up on SWDIO and pull-down on SWCLK so that disconnected signals give known values.
+    // This pull-up/down configuration matches some of the target chips I have checked like the nRF52840.
     gpio_pull_up(swdioPin);
+    gpio_pull_down(swclkPin);
 
     // Fetch the default state machine configuration for running this PIO program on a state machine.
     pio_sm_config smConfig = swd_program_get_default_config(m_programOffset);
@@ -193,6 +194,11 @@ void SWD::uninit()
 
     // Free up the space in the PIO instance.
     pio_remove_program(m_pio, &swd_program, m_programOffset);
+
+    // Switch SWD pins to be inputs with previously configured pull-up/downs.
+    gpio_set_dir_in_masked((1 << m_swclkPin) | (1 << m_swdioPin));
+    gpio_set_function(m_swclkPin, GPIO_FUNC_SIO);
+    gpio_set_function(m_swdioPin, GPIO_FUNC_SIO);
 
     m_stateMachine = UNKNOWN_VAL;
     m_pio = NULL;
@@ -803,6 +809,7 @@ uint32_t SWD::readTargetMemory(uint32_t address, void* pvBuffer, uint32_t buffer
     while (bytesLeft > 0)
     {
         uint32_t bytesRead = readTargetMemoryInternal(address, pBuffer, bytesLeft, readSize);
+        assert ( bytesRead % (readSize / 8) == 0 );
         if (bytesRead == 0)
         {
             if (getLastReadWriteError() == SWD_FAULT_ERROR)
@@ -929,6 +936,7 @@ uint32_t SWD::writeTargetMemory(uint32_t address, const void* pvBuffer, uint32_t
     while (bytesLeft > 0)
     {
         uint32_t bytesWritten = writeTargetMemoryInternal(address, pBuffer, bytesLeft, writeSize);
+        assert ( bytesWritten % (writeSize / 8) == 0 );
         if (bytesWritten == 0)
         {
             if (getLastReadWriteError() == SWD_FAULT_ERROR)

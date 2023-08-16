@@ -567,5 +567,6 @@ DeviceFunctionTable g_rp2040DeviceSupport =
     .flashErase = rp2040FlashErase,
     .flashProgram = rp2040FlashProgram,
     .flashEnd = rp2040FlashEnd,
-    .getMemoryLayout = rp2040GetMemoryLayout
+    .getMemoryLayout = rp2040GetMemoryLayout,
+    .handleMonitorCommand = NULL
 };

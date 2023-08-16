@@ -104,6 +104,7 @@ err_t GDBSocket::closeClient()
         }
         m_pClientPCB = NULL;
     }
+    m_bytesInFlight = 0;
     return error;
 }
 

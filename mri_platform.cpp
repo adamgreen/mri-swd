@@ -35,6 +35,7 @@ extern "C"
     #include <core/memory.h>
     #include <core/cmd_common.h>
     #include <core/gdb_console.h>
+    #include <semihost/newlib/newlib_stubs.h>
 }
 
 
@@ -89,11 +90,12 @@ static MriContext     g_context;
 static SWD       g_swd;
 static GDBSocket g_gdbSocket;
 static uint32_t  g_originalPC;
+static bool      g_haltOnAttach = false;
 static bool      g_wasStopFromGDB = false;
 static bool      g_wasMemoryExceptionEncountered = false;
-static bool      g_isSingleSteppingEnabled = false;
 static bool      g_isResetting = false;
 static bool      g_isInDebugger = false;
+static bool      g_isDetaching = false;
 static bool      g_doesHaltDebuggingNeedToBeEnabled = false;
 static PlatformTrapReason g_trapReason;
 static FpuDiscoveryStates g_fpu = FPU_NONE;
@@ -140,7 +142,6 @@ static void waitForRegisterTransferToComplete();
 static bool hasRegisterTransferCompleted(uint32_t DHCSR_Value);
 static void restoreContext();
 static bool writeCpuRegister(uint32_t registerIndex, uint32_t value);
-static void enableSingleSteppingIfNeeded();
 static bool requestCpuToResume();
 
 static bool g_isSwdConnected = false;
@@ -169,6 +170,9 @@ void mainDebuggerLoop()
                 logError("Failed to initialize SWD connection to debuggee.");
                 return;
             }
+
+            // UNDONE: Will later probably sample a physical switch here to determine if this should be done.
+            g_haltOnAttach = HALT_ON_ATTACH;
 
             determineCpuProperties();
             updateSwdFrequencyForDevice();
@@ -476,12 +480,12 @@ static void innerDebuggerLoop()
             continue;
         }
 
-        // Check to see if GDB has sent a command via TCP/IP.
-        bool haveGdbStopRequest = !g_gdbSocket.m_tcpToMriQueue.isEmpty();
-        if (haveGdbStopRequest)
+        // See if the target should be halted because of attach or because GDB has sent a command via TCP/IP.
+        if (g_haltOnAttach || (g_gdbSocket.isGdbConnected() && !g_gdbSocket.m_tcpToMriQueue.isEmpty()))
         {
-            logInfo("GDB has requested a CPU halt.");
+            logInfoF("%s has requested a CPU halt.", g_haltOnAttach ? "User" : "GDB");
             g_wasStopFromGDB = true;
+            g_haltOnAttach = false;
             requestCpuToHalt();
         }
 
@@ -507,15 +511,7 @@ static void innerDebuggerLoop()
             }
             else
             {
-                if (g_gdbSocket.isGdbConnected())
-                {
-                    logInfo("Forcing GDB to disconnect due to unexpected device RESET.");
-                    g_gdbSocket.closeClient();
-                }
-                else
-                {
-                    logInfo("External device RESET detected.");
-                }
+                logInfo("External device RESET detected.");
             }
             continue;
         }
@@ -543,9 +539,26 @@ static void innerDebuggerLoop()
             else
             {
                 restoreContext();
-                enableSingleSteppingIfNeeded();
                 requestCpuToResume();
-                logInfoF("CPU execution has been resumed. %s", g_isSingleSteppingEnabled ? "Single stepping enabled." : "");
+
+                // UNDONE: Move out into a detachDebugger() method.
+                if (g_isDetaching)
+                {
+                    g_swd.powerDownDebugPort();
+                    g_swd.uninit();
+                    g_gdbSocket.closeClient();
+
+                    logInfo("CPU execution has been resumed and debugger detached.");
+                    logInfo("Debug hardware will need to be reset to reconnect.");
+                    while (true)
+                    {
+                        __wfe();
+                    }
+                }
+                else
+                {
+                    logInfoF("CPU execution has been resumed. %s", Platform_IsSingleStepping() ? "Single stepping enabled." : "");
+                }
             }
         }
     }
@@ -963,31 +976,6 @@ static bool writeCpuRegister(uint32_t registerIndex, uint32_t value)
     return true;
 }
 
-static const uint32_t DHCSR_C_STEP_Bit = 1 << 2;
-static const uint32_t DHCSR_C_MASKINTS_Bit = 1 << 3;
-
-static void enableSingleSteppingIfNeeded()
-{
-    const uint32_t bitsToEnableSingleStepWithInterruptsDisabled = DHCSR_C_STEP_Bit | DHCSR_C_MASKINTS_Bit;
-    uint32_t DHCSR_Val = 0;
-
-    readDHCSR(&DHCSR_Val);
-    if (g_isSingleSteppingEnabled)
-    {
-        DHCSR_Val |= bitsToEnableSingleStepWithInterruptsDisabled;
-    }
-    else
-    {
-        DHCSR_Val &= ~bitsToEnableSingleStepWithInterruptsDisabled;
-    }
-
-    if (!writeDHCSR(DHCSR_Val))
-    {
-        logErrorF("Failed to update C_STEP & C_MASKINTS bits in DHCSR to %s single stepping.",
-                     g_isSingleSteppingEnabled ? "enable" : "disable");
-    }
-}
-
 static bool requestCpuToResume()
 {
     uint32_t DHCSR_Val = 0;
@@ -1113,6 +1101,7 @@ struct DWT_COMP_Type
 // breakpoint units (called BP on ARMv6M and FPB on ARMv7M) on Cortex-M devices.
 static void enableWatchpointBreakpointAndVectorCatchSupport();
 static void enableDWTandVectorCatches();
+static bool setOrClearBitsInDEMCR(uint32_t bitMask, bool set);
 static void initDWT();
 static uint32_t clearDWTComparators();
 static uint32_t getDWTComparatorCount();
@@ -1143,8 +1132,6 @@ static void enableWatchpointBreakpointAndVectorCatchSupport()
 
 static void enableDWTandVectorCatches()
 {
-    // Debug Exception and Monitor Control Register, DEMCR
-    const uint32_t DEMCR_Address = 0xE000EDFC;
     // DEMCR_DWTENA is the name on ARMv6M and it is called TRCENA on ARMv7M.
     const uint32_t DEMCR_DWTENA_Bit = 1 << 24;
     // Enable Halting debug trap on a HardFault exception.
@@ -1168,22 +1155,44 @@ static void enableDWTandVectorCatches()
                                         DEMCR_VC_STATERR_Bit | DEMCR_VC_CHKERR_Bit | DEMCR_VC_NOCPERR_Bit |
                                         DEMCR_VC_MMERR_Bit;
 
-    uint32_t DEMCR_Value = 0;
-
-    if (readTargetMemory(DEMCR_Address, &DEMCR_Value, sizeof(DEMCR_Value), SWD::TRANSFER_32BIT) != sizeof(DEMCR_Value))
-    {
-        logError("Failed to read DEMCR register.");
-        return;
-    }
-
-    DEMCR_Value |= DEMCR_DWTENA_Bit | allVectorCatchBits;
-
-    if (writeTargetMemory(DEMCR_Address, &DEMCR_Value, sizeof(DEMCR_Value), SWD::TRANSFER_32BIT) != sizeof(DEMCR_Value))
+    if (!setOrClearBitsInDEMCR(DEMCR_DWTENA_Bit | allVectorCatchBits, true))
     {
         logError("Failed to set DWTENA/TRCENA and vector catch bits in DEMCR register.");
         return;
     }
 }
+
+static bool setOrClearBitsInDEMCR(uint32_t bitMask, bool set)
+{
+    // Debug Exception and Monitor Control Register, DEMCR
+    const uint32_t DEMCR_Address = 0xE000EDFC;
+
+    uint32_t DEMCR_Value = 0;
+    if (readTargetMemory(DEMCR_Address, &DEMCR_Value, sizeof(DEMCR_Value), SWD::TRANSFER_32BIT) != sizeof(DEMCR_Value))
+    {
+        logError("Failed to read DEMCR register.");
+        return false;
+    }
+
+    // Set or clear the requested bits.
+    if (set)
+    {
+        DEMCR_Value |= bitMask;
+    }
+    else
+    {
+        DEMCR_Value &= ~bitMask;
+    }
+
+    if (writeTargetMemory(DEMCR_Address, &DEMCR_Value, sizeof(DEMCR_Value), SWD::TRANSFER_32BIT) != sizeof(DEMCR_Value))
+    {
+        logError("Failed to write DEMCR register.");
+        return false;
+    }
+    return true;
+}
+
+
 
 static void initDWT()
 {
@@ -1346,7 +1355,7 @@ static PlatformTrapReason findMatchedWatchpoint(void);
 static PlatformTrapReason getReasonFromMatchComparator(uint32_t comparatorAddress, uint32_t function);
 static void clearDFSR();
 static bool writeDFSR(uint32_t dfsr);
-
+static void disableResetVectorCatch();
 
 void Platform_EnteringDebugger(void)
 {
@@ -1355,6 +1364,7 @@ void Platform_EnteringDebugger(void)
     g_originalPC = Platform_GetProgramCounter();
     Platform_DisableSingleStep();
     g_trapReason = cacheTrapReason();
+    disableResetVectorCatch();
 }
 
 // Debug Fault Status Register, DFSR
@@ -1502,6 +1512,19 @@ static bool writeDFSR(uint32_t dfsr)
     }
     return true;
 }
+
+// Enable Reset Vector Catch. This causes a Local reset to halt a running system.
+const uint32_t DEMCR_VC_CORERESET_Bit = 1 << 0;
+
+static void disableResetVectorCatch()
+{
+    if (!setOrClearBitsInDEMCR(DEMCR_VC_CORERESET_Bit, false))
+    {
+        logError("Failed to clear reset vector catch bits in DEMCR register.");
+        return;
+    }
+}
+
 
 
 
@@ -1925,24 +1948,49 @@ static int writeBinaryBufferToWordMemory(Buffer* pBuffer, void* pvMemory)
 
 
 // *********************************************************************************************************************
-// Routines called by the MRI core to single step the CPU.
-// These implementation just use the g_isSingleSteppingEnabled global to track the single stepping state desired by
-// the MRI core and the actual single stepping is enabled in mainDebuggerLoop() just before the CPU is taken out of
-// halt mode to resume code execution.
+// Routines called by the MRI core to enable/disable single stepping on the target CPU.
 // *********************************************************************************************************************
+static void configureSingleSteppingBitsInDHCSR(bool enableSingleStepping);
 void Platform_EnableSingleStep(void)
 {
-    g_isSingleSteppingEnabled = true;
+    configureSingleSteppingBitsInDHCSR(true);
 }
 
 void Platform_DisableSingleStep(void)
 {
-    g_isSingleSteppingEnabled = false;
+    configureSingleSteppingBitsInDHCSR(false);
+}
+
+static const uint32_t DHCSR_C_STEP_Bit = 1 << 2;
+static const uint32_t DHCSR_C_MASKINTS_Bit = 1 << 3;
+
+static void configureSingleSteppingBitsInDHCSR(bool enableSingleStepping)
+{
+    const uint32_t bitsToEnableSingleStepWithInterruptsDisabled = DHCSR_C_STEP_Bit | DHCSR_C_MASKINTS_Bit;
+    uint32_t DHCSR_Val = 0;
+
+    readDHCSR(&DHCSR_Val);
+    if (enableSingleStepping)
+    {
+        DHCSR_Val |= bitsToEnableSingleStepWithInterruptsDisabled;
+    }
+    else
+    {
+        DHCSR_Val &= ~bitsToEnableSingleStepWithInterruptsDisabled;
+    }
+
+    if (!writeDHCSR(DHCSR_Val))
+    {
+        logErrorF("Failed to update C_STEP & C_MASKINTS bits in DHCSR to %s single stepping.",
+                     enableSingleStepping ? "enable" : "disable");
+    }
 }
 
 int Platform_IsSingleStepping(void)
 {
-    return g_isSingleSteppingEnabled;
+    uint32_t DHCSR_Val = 0;
+    readDHCSR(&DHCSR_Val);
+    return DHCSR_Val & DHCSR_C_STEP_Bit;
 }
 
 
@@ -2796,7 +2844,7 @@ uint8_t Platform_DetermineCauseOfException(void)
     {
         uint32_t DHCSR_Value = 0;
         readDHCSR(&DHCSR_Value);
-        if (DHCSR_Value & DHCSR_C_STEP_Bit)
+        if ((DHCSR_Value & DHCSR_C_STEP_Bit) && !g_wasStopFromGDB)
         {
             logInfo("Debug event caught: Single Step.");
             return SIGTRAP;
@@ -3269,26 +3317,6 @@ void Platform_ResetDevice(void)
 
 
 
-PlatformInstructionType Platform_TypeOfCurrentInstruction(void)
-{
-    return MRI_PLATFORM_INSTRUCTION_OTHER;
-}
-
-PlatformSemihostParameters Platform_GetSemihostCallParameters(void)
-{
-    PlatformSemihostParameters param;
-
-    memset(&param, 0, sizeof(param));
-    return param;
-}
-
-void Platform_SetSemihostCallReturnAndErrnoValues(int returnValue, int errNo)
-{
-}
-
-
-
-
 // *********************************************************************************************************************
 // Platform_HandleGDBCommand() is called by the MRI core to give platforms a chance to override and handle any command
 // sent from GDB. The mri-swd platform implements vFlash* support to enable programming of targets. It also implements
@@ -3296,6 +3324,12 @@ void Platform_SetSemihostCallReturnAndErrnoValues(int returnValue, int errNo)
 // require waiting for the target or the WiFi router to reappear.
 // *********************************************************************************************************************
 static uint32_t forceMriCoreToReturn(Buffer* pBuffer);
+static uint32_t handleMonitorCommand(Buffer* pBuffer);
+static bool dispatchMonitorCommandToDevice(Buffer* pBuffer);
+static uint32_t handleMonitorDetachCommand();
+static uint32_t handleMonitorResetCommand(Buffer* pBuffer);
+static void enableResetVectorCatch();
+static uint32_t handleMonitorHelpCommand();
 static uint32_t handleFlashEraseCommand(Buffer* pBuffer);
 static uint32_t handleFlashWriteCommand(Buffer* pBuffer);
 static uint32_t handleFlashDoneCommand(Buffer* pBuffer);
@@ -3308,12 +3342,17 @@ uint32_t Platform_HandleGDBCommand(Buffer* pBuffer)
         return forceMriCoreToReturn(pBuffer);
     }
 
-    const char   vFlashEraseCommand[] = "vFlashErase";
-    const char   vFlashWriteCommand[] = "vFlashWrite";
-    const char   vFlashDoneCommand[] = "vFlashDone";
+    const char rcmdCommand[] = "qRcmd";
+    const char vFlashEraseCommand[] = "vFlashErase";
+    const char vFlashWriteCommand[] = "vFlashWrite";
+    const char vFlashDoneCommand[] = "vFlashDone";
 
     Buffer_Reset(pBuffer);
-    if (Buffer_MatchesString(pBuffer, vFlashEraseCommand, sizeof(vFlashEraseCommand)-1))
+    if (Buffer_MatchesString(pBuffer, rcmdCommand, sizeof(rcmdCommand)-1))
+    {
+        return handleMonitorCommand(pBuffer);
+    }
+    else if (Buffer_MatchesString(pBuffer, vFlashEraseCommand, sizeof(vFlashEraseCommand)-1))
     {
         return handleFlashEraseCommand(pBuffer);
     }
@@ -3337,6 +3376,165 @@ static uint32_t forceMriCoreToReturn(Buffer* pBuffer)
     logInfo("Forcing MRI core to exit due to network or SWD error.");
     PrepareStringResponse("E99");
     return HANDLER_RETURN_RESUME_PROGRAM | HANDLER_RETURN_RETURN_IMMEDIATELY;
+}
+
+static uint32_t handleMonitorCommand(Buffer* pBuffer)
+{
+    static const char detach[] = "detach";
+    static const char reset[] = "reset";
+    static const char help[] = "help";
+
+    if (!Buffer_IsNextCharEqualTo(pBuffer, ','))
+    {
+        PrepareStringResponse(MRI_ERROR_INVALID_ARGUMENT);
+        return 0;
+    }
+
+    // "monitor help" can be handled by both the devcie specific code and this more generic code to allow listing of all
+    // commands supported by the core and the device.
+    Buffer bufferCopy = *pBuffer;
+    bool isMonitorHelp = Buffer_MatchesHexString(&bufferCopy, help, sizeof(help)-1);
+
+    // Allow the device specific code the chance to handle the monitor command.
+    bool handledByDevice = dispatchMonitorCommandToDevice(pBuffer);
+    if (isMonitorHelp)
+    {
+        // Even if device specific handler handled "monitor help" command, we still want to list the core commands
+        // supported.
+        return handleMonitorHelpCommand();
+    }
+    if (handledByDevice)
+    {
+        return HANDLER_RETURN_HANDLED;
+    }
+
+    // Command wasn't handled by the device specific code so handle it in this core code instead.
+    if (Buffer_MatchesHexString(pBuffer, detach, sizeof(detach)-1))
+    {
+        return handleMonitorDetachCommand();
+    }
+    else if (Buffer_MatchesHexString(pBuffer, reset, sizeof(reset)-1))
+    {
+        return handleMonitorResetCommand(pBuffer);
+    }
+    else
+    {
+        // Returning 0 means that MRI should handle this command instead.
+        return 0;
+    }
+}
+
+static bool dispatchMonitorCommandToDevice(Buffer* pBuffer)
+{
+    if (g_pDevice == NULL || g_pDevice->handleMonitorCommand == NULL)
+    {
+        // No device specific command handler so just return false.
+        return false;
+    }
+
+    // Convert the hex string into a normal C string.
+    Buffer bufferCopy = *pBuffer;
+    size_t commandLength = Buffer_BytesLeft(&bufferCopy);
+    if (commandLength % 2 != 0)
+    {
+        // GDB didn't send an even number of hex digits for the command string.
+        return false;
+    }
+    commandLength = commandLength / 2 + 1;
+    char commandCopy[commandLength];
+
+    char* pDest = &commandCopy[0];
+    for (size_t i = 0 ; i < commandLength - 1 ; i++)
+    {
+        *pDest++ = Buffer_ReadByteAsHex(&bufferCopy);
+    }
+    assert ( pDest == &commandCopy[commandLength-1] );
+    *pDest++ = '\0';
+
+    // Break up whitespace separated tokens into argv, argc parameters.
+    const char* arguments[10];
+    size_t argCount = 0;
+    bool skippingWhitespace = true;
+    for (char* pCurr = &commandCopy[0] ; *pCurr != '\0' ; pCurr++)
+    {
+        char byte = *pCurr;
+        if (byte == ' ' || byte == '\t' || byte == '\r' || byte == '\n')
+        {
+            if (!skippingWhitespace)
+            {
+                *pCurr = '\0';
+            }
+            skippingWhitespace = true;
+        }
+        else if (skippingWhitespace)
+        {
+            if (argCount >= count_of(arguments))
+            {
+                break;
+            }
+            arguments[argCount++] = pCurr;
+            skippingWhitespace = false;
+        }
+    }
+
+    return g_pDevice->handleMonitorCommand(g_pDeviceObject, &g_swd, &arguments[0], argCount);
+}
+
+static uint32_t handleMonitorDetachCommand()
+{
+    g_isDetaching = true;
+    WriteStringToGdbConsole("Will detach on next continue. Debugger will require reset to reconnect.\r\n");
+    PrepareStringResponse("OK");
+    return HANDLER_RETURN_HANDLED;
+}
+
+static uint32_t handleMonitorResetCommand(Buffer* pBuffer)
+{
+    // If no optional parameters are specified then let MRI core handle this request instead.
+    if (Buffer_BytesLeft(pBuffer) == 0)
+    {
+        return 0;
+    }
+
+    // Next character should be hex version of ' ', space character.
+    if (Buffer_ReadByteAsHex(pBuffer) != ' ')
+    {
+        PrepareStringResponse(MRI_ERROR_INVALID_ARGUMENT);
+        return HANDLER_RETURN_HANDLED;
+    }
+
+    static const char halt[] = "halt";
+    if (Buffer_MatchesHexString(pBuffer, halt, sizeof(halt)-1))
+    {
+        // A request to reset and then halt in Reset Handler has been made.
+        RequestResetOnNextContinue();
+        enableResetVectorCatch();
+        WriteStringToGdbConsole("Will reset and then halt on next continue.\r\n");
+        PrepareStringResponse("OK");
+        return HANDLER_RETURN_HANDLED;
+    }
+
+    PrepareStringResponse(MRI_ERROR_INVALID_ARGUMENT);
+    return HANDLER_RETURN_HANDLED;
+}
+
+static void enableResetVectorCatch()
+{
+    if (!setOrClearBitsInDEMCR(DEMCR_VC_CORERESET_Bit, true))
+    {
+        logError("Failed to set reset vector catch bit in DEMCR register.");
+        return;
+    }
+}
+
+static uint32_t handleMonitorHelpCommand()
+{
+    WriteStringToGdbConsole("Supported monitor commands:\r\n");
+    WriteStringToGdbConsole("detach\r\n");
+    WriteStringToGdbConsole("reset [halt]\r\n");
+    WriteStringToGdbConsole("showfault\r\n");
+    PrepareStringResponse("OK");
+    return HANDLER_RETURN_HANDLED;
 }
 
 
@@ -3370,7 +3568,7 @@ static uint32_t  handleFlashEraseCommand(Buffer* pBuffer)
         PrepareStringResponse(MRI_ERROR_INVALID_ARGUMENT);
         return HANDLER_RETURN_HANDLED;
     }
-    logInfoF("Erasing %lu bytes of FLASH at 0x%08lX.", addressLength.length, addressLength.address);
+    logInfoF("Erasing 0x%lX (%lu) bytes of FLASH at 0x%08lX.", addressLength.length, addressLength.length, addressLength.address);
     if (!g_pDevice->flashBegin(g_pDeviceObject, &g_swd))
     {
         PrepareStringResponse(MRI_ERROR_INVALID_ARGUMENT);
@@ -3414,7 +3612,7 @@ static uint32_t  handleFlashWriteCommand(Buffer* pBuffer)
     assert ( g_pDevice );
 
     uint32_t length = Buffer_BytesLeft(pBuffer);
-    logInfoF("Writing %lu bytes to FLASH at 0x%08lX.", length, address);
+    logInfoF("Writing 0x%lX (%lu) bytes to FLASH at 0x%08lX.", length, length, address);
     if (!g_pDevice->flashProgram(g_pDeviceObject, &g_swd, address, pBuffer->pCurrent, length))
     {
         PrepareStringResponse(MRI_ERROR_MEMORY_ACCESS_FAILURE);
@@ -3516,6 +3714,7 @@ bool runCodeOnDevice(CortexM_Registers* pRegistersInOut, uint32_t timeout_ms)
     return true;
 }
 
+// UNDONE: Shouldn't need to call this anymore as single stepping is disabled on the way into the debugger now.
 static bool disableSingleStepAndInterrupts()
 {
     uint32_t DHCSR_Val = 0;
@@ -3602,12 +3801,165 @@ void Platform_HandleFaultFromHighPriorityCode(void)
 
 
 
-int Semihost_IsDebuggeeMakingSemihostCall(void)
+// *********************************************************************************************************************
+// Routines called by the MRI core to determine if the stop was caused by semihost request.
+// *********************************************************************************************************************
+static int isInstructionMbedSemihostBreakpoint(uint16_t instruction);
+static int isInstructionNewlibSemihostBreakpoint(uint16_t instruction);
+static int isInstructionHardcodedBreakpoint(uint16_t instruction);
+PlatformInstructionType Platform_TypeOfCurrentInstruction(void)
 {
-    return 0;
+    uint16_t currentInstruction;
+
+    __try
+    {
+        currentInstruction = getFirstHalfWordOfCurrentInstruction();
+    }
+    __catch
+    {
+        /* Will get here if PC isn't pointing to valid memory so treat as other. */
+        clearExceptionCode();
+        return MRI_PLATFORM_INSTRUCTION_OTHER;
+    }
+
+    bool isGdbTryingToBreakIn = g_gdbSocket.isGdbConnected() && !g_gdbSocket.m_tcpToMriQueue.isEmpty();
+    if (isInstructionMbedSemihostBreakpoint(currentInstruction))
+    {
+        return isGdbTryingToBreakIn ? MRI_PLATFORM_INSTRUCTION_HARDCODED_BREAKPOINT :
+                                      MRI_PLATFORM_INSTRUCTION_MBED_SEMIHOST_CALL;
+    }
+    else if (isInstructionNewlibSemihostBreakpoint(currentInstruction))
+    {
+        return isGdbTryingToBreakIn ? MRI_PLATFORM_INSTRUCTION_HARDCODED_BREAKPOINT :
+                                      MRI_PLATFORM_INSTRUCTION_NEWLIB_SEMIHOST_CALL;
+    }
+    else if (isInstructionHardcodedBreakpoint(currentInstruction))
+    {
+        return MRI_PLATFORM_INSTRUCTION_HARDCODED_BREAKPOINT;
+    }
+    else
+    {
+        return MRI_PLATFORM_INSTRUCTION_OTHER;
+    }
 }
 
+static int isInstructionMbedSemihostBreakpoint(uint16_t instruction)
+{
+    static const uint16_t mbedSemihostBreakpointMachineCode = 0xbeab;
+
+    return mbedSemihostBreakpointMachineCode == instruction;
+}
+
+static int isInstructionNewlibSemihostBreakpoint(uint16_t instruction)
+{
+    static const uint16_t newlibSemihostBreakpointMinMachineCode = 0xbe00 | MRI_NEWLIB_SEMIHOST_MIN;
+    static const uint16_t newlibSemihostBreakpointMaxMachineCode = 0xbe00 | MRI_NEWLIB_SEMIHOST_MAX;
+
+    return (instruction >= newlibSemihostBreakpointMinMachineCode &&
+            instruction <=  newlibSemihostBreakpointMaxMachineCode);
+}
+
+static int isInstructionHardcodedBreakpoint(uint16_t instruction)
+{
+    static const uint16_t hardCodedBreakpointMachineCode = 0xbe00;
+
+    return (hardCodedBreakpointMachineCode == instruction);
+}
+
+
+PlatformSemihostParameters Platform_GetSemihostCallParameters(void)
+{
+    PlatformSemihostParameters parameters;
+
+    parameters.parameter1 = Context_Get(&g_context, R0);
+    parameters.parameter2 = Context_Get(&g_context, R1);
+    parameters.parameter3 = Context_Get(&g_context, R2);
+    parameters.parameter4 = Context_Get(&g_context, R3);
+
+    return parameters;
+}
+
+
+void Platform_SetSemihostCallReturnAndErrnoValues(int returnValue, int errNo)
+{
+    Context_Set(&g_context, R0, returnValue);
+}
+
+
+
+// *********************************************************************************************************************
+// Semihost functionality for redirecting operations such as file I/O to the GNU debugger.
+// *********************************************************************************************************************
+static int writeToGdbConsole(const TransferParameters* pParameters);
+int Semihost_IsDebuggeeMakingSemihostCall(void)
+{
+    PlatformInstructionType instructionType = Platform_TypeOfCurrentInstruction();
+
+    return (instructionType == MRI_PLATFORM_INSTRUCTION_MBED_SEMIHOST_CALL ||
+            instructionType == MRI_PLATFORM_INSTRUCTION_NEWLIB_SEMIHOST_CALL);
+}
+
+
 int Semihost_HandleSemihostRequest(void)
+{
+    PlatformInstructionType    instructionType = Platform_TypeOfCurrentInstruction();
+    PlatformSemihostParameters parameters = Platform_GetSemihostCallParameters();
+
+    if (instructionType == MRI_PLATFORM_INSTRUCTION_MBED_SEMIHOST_CALL)
+        return Semihost_HandleMbedSemihostRequest(&parameters);
+    else if (instructionType == MRI_PLATFORM_INSTRUCTION_NEWLIB_SEMIHOST_CALL)
+        return Semihost_HandleNewlibSemihostRequest(&parameters);
+    else
+        return 0;
+}
+
+
+int Semihost_WriteToFileOrConsole(const TransferParameters* pParameters)
+{
+    const uint32_t STDOUT_FILE_NO = 1;
+    if (pParameters->fileDescriptor == STDOUT_FILE_NO)
+    {
+        return writeToGdbConsole(pParameters);
+    }
+    return IssueGdbFileWriteRequest(pParameters);
+}
+
+static int writeToGdbConsole(const TransferParameters* pParameters)
+{
+    uint32_t address = pParameters->bufferAddress;
+    uint32_t length = pParameters->bufferSize;
+    char buffer[length];
+
+    if (!readTargetMemory(address, buffer, length, SWD::TRANSFER_8BIT))
+    {
+        logErrorF("Failed to read %lu bytes of stdout output from 0x%08lX.", length, address);
+        length = 0;
+    }
+
+    size_t charsWritten = WriteSizedStringToGdbConsole(buffer, length);
+    SetSemihostReturnValues(charsWritten, 0);
+    FlagSemihostCallAsHandled();
+
+    if (WasControlCEncountered())
+    {
+        SetSignalValue(SIGINT);
+        return 0;
+    }
+    return 1;
+}
+
+
+
+// *********************************************************************************************************************
+// MBED semihosting API calls these routines to retrieve previosuly cached Ethernet UID on mbed-LPC1768 devices.
+// *********************************************************************************************************************
+const uint8_t* Platform_GetUid(void)
+{
+    return NULL;
+}
+
+
+uint32_t Platform_GetUidSize(void)
 {
     return 0;
 }
