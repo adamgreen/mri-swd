@@ -21,6 +21,9 @@
 * __[8/16/2023]:__ The code found within this repository is now at the point where I can start using it to flash and debug the `mri-swd` firmware itself instead of the Segger J-Link that I had been using previously. I am now using it daily to debug a nRF52840 based project. This has helped to surface more issues that have now been corrected.
 * The initial goal is to just be able to debug and program the dual core [RP2040 microcontroller](https://www.raspberrypi.com/products/rp2040/). Support has also been added for the [nRF52xxx family of microcontrollers](https://infocenter.nordicsemi.com/index.jsp?topic=%2Fstruct_nrf52%2Fstruct%2Fnrf52.html). Support for other microcontrollers will be added in the future.
 * The `mri-swd` firmware is initially being developed to run on the low cost [Pico W](https://www.adafruit.com/product/5526). It will use the Pico W's WiFi capabilities to wirelessly communicate with GDB. No intermediate program like OpenOCD will be required since the [mri remote debug stub](https://github.com/adamgreen/mri) functionality will be running on the Pico W itself.
+* With only one unpaid part-time developer, me, I have to limit the features and devices supported so that I can concentrate on making this debugger work as well as possible for the devices and features that it does support. This brings me to my list of  **Non-Goals**:
+  * JTAG Support
+  * Devices other than Cortex-M microcontrollers
 
 
 ## Supported Features
