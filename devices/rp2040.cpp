@@ -58,6 +58,9 @@ static const size_t ROM_FUNCTION_COUNT = 8;
 // Forward function declarations.
 static bool findRequiredBootRomRoutines(RP2040Object* pObject, SWD* pSWD);
 static bool checkRP2040BootRomMagicValue(SWD* pSWD);
+static void disableDmaChannels(RP2040Object* pObject, SWD* pSWD);
+static uint32_t getDmaChannelCount(RP2040Object* pObject, SWD* pSWD);
+static void disableDmaChannel(RP2040Object* pObject, SWD* pSWD, uint32_t i);
 static bool isAddressAndLength4kAligned(uint32_t address, uint32_t length);
 static bool is4kAligned(uint32_t value);
 static bool isAttemptingToFlashInvalidAddress(uint32_t address, uint32_t length);
@@ -139,6 +142,8 @@ static uint32_t rp2040MaximumSWDClockFrequency(DeviceObject* pvObject, SWD* pSWD
 static bool rp2040FlashBegin(DeviceObject* pvObject, SWD* pSWD)
 {
     assert ( pvObject );
+    RP2040Object* pObject = (RP2040Object*)pvObject;
+    disableDmaChannels(pObject, pSWD);
     return findRequiredBootRomRoutines((RP2040Object*)pvObject, pSWD);
 }
 
@@ -264,6 +269,47 @@ static bool checkRP2040BootRomMagicValue(SWD* pSWD)
 
     return true;
 }
+
+static void disableDmaChannels(RP2040Object* pObject, SWD* pSWD)
+{
+    uint32_t channelCount = getDmaChannelCount(pObject, pSWD);
+    for (uint32_t i = 0 ; i < channelCount ; i++)
+    {
+        disableDmaChannel(pObject, pSWD, i);
+    }
+}
+
+static uint32_t getDmaChannelCount(RP2040Object* pObject, SWD* pSWD)
+{
+    const uint32_t DMA_N_CHANNELS_Address = 0x50000448;
+    uint32_t channelCount = 0;
+    uint32_t bytesRead = pSWD->readTargetMemory(DMA_N_CHANNELS_Address, &channelCount, sizeof(channelCount), SWD::TRANSFER_32BIT);
+    if (bytesRead != sizeof(channelCount) || channelCount == 0)
+    {
+        logError("Failed to read RP2040 DMA N_CHANNELS register.");
+        return 0;
+    }
+    return channelCount;
+}
+
+static void disableDmaChannel(RP2040Object* pObject, SWD* pSWD, uint32_t i)
+{
+    const uint32_t DMA_BASE_Address = 0x50000000;
+    // The registers (including all of the aliases) for a channel take up this many bytes.
+    const uint32_t DMA_CHANNEL_Size = 0x40;
+    const uint32_t DMA_CHANNEL_CTRL_TRIG_Offset = 0xC;
+    uint32_t channelControlRegisterAddress = DMA_BASE_Address + i * DMA_CHANNEL_Size + DMA_CHANNEL_CTRL_TRIG_Offset;
+    const uint32_t channelControlRegisterValue = 0x00000000;
+
+    // Just clear all of the bits in the channel's control register including the enable bit as none of the DMA
+    // channel settings are valid anymore after loading in new firmware.
+    uint32_t bytesWritten = pSWD->writeTargetMemory(channelControlRegisterAddress, &channelControlRegisterValue, sizeof(channelControlRegisterValue), SWD::TRANSFER_32BIT);
+    if (bytesWritten != sizeof(channelControlRegisterValue))
+    {
+        logErrorF("Failed to disable DMA channel %lu.\n", i);
+    }
+}
+
 
 
 // GDB would like the FLASH at the specified address range to be erased in preparation for programming.
