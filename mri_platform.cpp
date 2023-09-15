@@ -2999,14 +2999,14 @@ static void displayMemFaultCauseToGdbConsole(void)
 
 static void displayBusFaultCauseToGdbConsole(void)
 {
-    static const uint32_t BFARValidBit = 1 << 7;
-    static const uint32_t FPLazyStatePreservationBit = 1 << 5;
-    static const uint32_t stackingErrorBit = 1 << 4;
-    static const uint32_t unstackingErrorBit = 1 << 3;
-    static const uint32_t impreciseDataAccessBit = 1 << 2;
-    static const uint32_t preciseDataAccessBit = 1 << 1;
-    static const uint32_t instructionPrefetch = 1;
-    uint32_t              CFSR_Value = 0xBAADFEED;
+    const uint32_t BFARValidBit = 1 << 7;
+    const uint32_t FPLazyStatePreservationBit = 1 << 5;
+    const uint32_t stackingErrorBit = 1 << 4;
+    const uint32_t unstackingErrorBit = 1 << 3;
+    const uint32_t impreciseDataAccessBit = 1 << 2;
+    const uint32_t preciseDataAccessBit = 1 << 1;
+    const uint32_t instructionPrefetch = 1;
+    uint32_t       CFSR_Value = 0xBAADFEED;
 
     if (readTargetMemory(CFSR_Address, &CFSR_Value, sizeof(CFSR_Value), SWD::TRANSFER_32BIT) != sizeof(CFSR_Value))
     {
@@ -3070,13 +3070,13 @@ static void displayBusFaultCauseToGdbConsole(void)
 
 static void displayUsageFaultCauseToGdbConsole(void)
 {
-    static const uint32_t divideByZeroBit = 1 << 9;
-    static const uint32_t unalignedBit = 1 << 8;
-    static const uint32_t coProcessorAccessBit = 1 << 3;
-    static const uint32_t invalidPCBit = 1 << 2;
-    static const uint32_t invalidStateBit = 1 << 1;
-    static const uint32_t undefinedInstructionBit = 1;
-    uint32_t              CFSR_Value = 0xBAADFEED;
+    const uint32_t divideByZeroBit = 1 << 9;
+    const uint32_t unalignedBit = 1 << 8;
+    const uint32_t coProcessorAccessBit = 1 << 3;
+    const uint32_t invalidPCBit = 1 << 2;
+    const uint32_t invalidStateBit = 1 << 1;
+    const uint32_t undefinedInstructionBit = 1;
+    uint32_t       CFSR_Value = 0xBAADFEED;
 
     if (readTargetMemory(CFSR_Address, &CFSR_Value, sizeof(CFSR_Value), SWD::TRANSFER_32BIT) != sizeof(CFSR_Value))
     {
@@ -3380,9 +3380,9 @@ static uint32_t forceMriCoreToReturn(Buffer* pBuffer)
 
 static uint32_t handleMonitorCommand(Buffer* pBuffer)
 {
-    static const char detach[] = "detach";
-    static const char reset[] = "reset";
-    static const char help[] = "help";
+    const char detach[] = "detach";
+    const char reset[] = "reset";
+    const char help[] = "help";
 
     if (!Buffer_IsNextCharEqualTo(pBuffer, ','))
     {
@@ -3503,7 +3503,7 @@ static uint32_t handleMonitorResetCommand(Buffer* pBuffer)
         return HANDLER_RETURN_HANDLED;
     }
 
-    static const char halt[] = "halt";
+    const char halt[] = "halt";
     if (Buffer_MatchesHexString(pBuffer, halt, sizeof(halt)-1))
     {
         // A request to reset and then halt in Reset Handler has been made.
@@ -3845,15 +3845,15 @@ PlatformInstructionType Platform_TypeOfCurrentInstruction(void)
 
 static int isInstructionMbedSemihostBreakpoint(uint16_t instruction)
 {
-    static const uint16_t mbedSemihostBreakpointMachineCode = 0xbeab;
+    const uint16_t mbedSemihostBreakpointMachineCode = 0xbeab;
 
     return mbedSemihostBreakpointMachineCode == instruction;
 }
 
 static int isInstructionNewlibSemihostBreakpoint(uint16_t instruction)
 {
-    static const uint16_t newlibSemihostBreakpointMinMachineCode = 0xbe00 | MRI_NEWLIB_SEMIHOST_MIN;
-    static const uint16_t newlibSemihostBreakpointMaxMachineCode = 0xbe00 | MRI_NEWLIB_SEMIHOST_MAX;
+    const uint16_t newlibSemihostBreakpointMinMachineCode = 0xbe00 | MRI_NEWLIB_SEMIHOST_MIN;
+    const uint16_t newlibSemihostBreakpointMaxMachineCode = 0xbe00 | MRI_NEWLIB_SEMIHOST_MAX;
 
     return (instruction >= newlibSemihostBreakpointMinMachineCode &&
             instruction <=  newlibSemihostBreakpointMaxMachineCode);
@@ -3861,7 +3861,7 @@ static int isInstructionNewlibSemihostBreakpoint(uint16_t instruction)
 
 static int isInstructionHardcodedBreakpoint(uint16_t instruction)
 {
-    static const uint16_t hardCodedBreakpointMachineCode = 0xbe00;
+    const uint16_t hardCodedBreakpointMachineCode = 0xbe00;
 
     return (hardCodedBreakpointMachineCode == instruction);
 }
