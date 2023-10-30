@@ -16,7 +16,7 @@
 
 
 ## Important Notes
-![Dogfood Setup](dogfood.jpg)
+![Dogfood Setup](images/dogfood.jpg)
 
 * __[8/16/2023]:__ The code found within this repository is now at the point where I can start using it to flash and debug the `mri-swd` firmware itself instead of the Segger J-Link that I had been using previously. I am now using it daily to debug a nRF52840 based project. This has helped to surface more issues that have now been corrected.
 * The initial goal is to just be able to debug and program the dual core [RP2040 microcontroller](https://www.raspberrypi.com/products/rp2040/). Support has also been added for the [nRF52xxx family of microcontrollers](https://infocenter.nordicsemi.com/index.jsp?topic=%2Fstruct_nrf52%2Fstruct%2Fnrf52.html). Support for other microcontrollers will be added in the future.
@@ -98,7 +98,7 @@ This build will encounter an error when building some of the pico-sdk sources. T
 
 
 ## Wiring Diagram
-![Target to Debugger Wiring Diagram](hookup.png)
+![Target to Debugger Wiring Diagram](images/hookup.png)
 
 Currently only 2 signal wires (and ground) need to be connected between the target RP2040 device and the Pico W based debugger device:
 | Pico W Debugger | Pico Target |
@@ -191,11 +191,20 @@ In the root folder can be found  a [config.h](config.h) which can be used to cus
 * ...
 
 
+
+## Current Hardware Progress
+![Image of version 1.0 of the Schematic](images/20231030-PCBv1.0-Schematic.png)</br>
+![Image of version 1.0 of PCB Front](images/20231030-PCBv1.0-Front.png)
+![Image of version 1.0 of PCB Back](images/20231030-PCBv1.0-Back.png)
+
+
+
 ## Next Steps
 * ~~RP2040 FLASH Programming~~
 * ~~Improve Robustness~~
 * ~~Basic nRF52 (Cortex-M4F) Debugging Support~~
 * ~~Semihosting Support~~
+* ~~Custom PCB~~
 * Addition of a small OLED Display
   * Report IP address
   * Report WiFi connections
@@ -203,7 +212,6 @@ In the root folder can be found  a [config.h](config.h) which can be used to cus
   * Report target Vcc voltage
   * etc
 * Bridge microcontroller's UART on another WiFi TCP/IP port.
-* Custom PCB
-* Improve Usability
 * Improve Performance
 * RP2040 Core 1 Support
+* Improve Usability

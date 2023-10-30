@@ -1,0 +1,5 @@
+(sym_lib_table
+  (version 7)
+  (lib (name "RPi_Pico")(type "KiCad")(uri "${KIPRJMOD}/Symbols/RPi_Pico.kicad_sym")(options "")(descr ""))
+  (lib (name "JS102011JCQN")(type "KiCad")(uri "${KIPRJMOD}/Symbols/JS102011JCQN.kicad_sym")(options "")(descr ""))
+)

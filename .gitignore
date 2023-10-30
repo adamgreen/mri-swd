@@ -1,11 +1,30 @@
-.idea
+# Files to be ignored by Git
+
+# Visual Studio Code IDE.
 .vscode
-_deps
-cmake-*
-build/
+
+# Makefile that is private to each developer's repository. It has their WiFi SSID / Password
 wifi_config.cmake
+
+# CMake / Pico SDK temporary build files.
+build/
+
+# Samples used for testing.
 perf/perf-pc/perf-pc
 obj/
-*.paint
-.DS_Store
+
+# Temporary KiCad files.
+*.kicad_prl
+fp-info-cache
+**/gerbers/
+**/*-backups/
+**/_autosave-*
+
+# Temporary log files.
 mri.log
+
+# Intermediate graphics where the final output is stored as .png
+*.paint
+
+# Metadata created by macOS.
+.DS_Store
