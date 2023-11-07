@@ -103,7 +103,7 @@ target_include_directories(mri-swd PRIVATE
     )
 
 target_compile_definitions(mri-swd PRIVATE
-    MRI_ALWAYS_USE_HARDWARE_BREAKPOINT=1
+    MRI_ALWAYS_USE_HARDWARE_BREAKPOINT=0
 )
 
 target_link_libraries(mri-swd PRIVATE

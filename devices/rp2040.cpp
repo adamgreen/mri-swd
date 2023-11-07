@@ -576,7 +576,7 @@ static const DeviceMemoryRegion g_memoryRegions[] =
 {
     { .address = 0x00000000, .length = 0x4000, .blockSize = 0, .type = DEVICE_MEMORY_ROM },
     { .address = 0x10000000, .length = 0x1000000, .blockSize = FLASH_PAGE_SIZE, .type = DEVICE_MEMORY_FLASH },
-    { .address = 0x20000000, .length = 0x42000, .blockSize = 0, .type = DEVICE_MEMORY_ROM }
+    { .address = 0x20000000, .length = 0x42000, .blockSize = 0, .type = DEVICE_MEMORY_RAM }
 };
 static const DeviceMemoryLayout g_memoryLayout =
 {
