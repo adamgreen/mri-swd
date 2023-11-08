@@ -82,7 +82,7 @@ enum FpuDiscoveryStates
 };
 
 // CPU register context information is stored here.
-static uint32_t       g_contextRegisters[registerCountFPU];
+static uintmri_t      g_contextRegisters[registerCountFPU];
 static ContextSection g_contextEntriesNoFPU = { .pValues = &g_contextRegisters[0], .count = registerCountNoFPU };
 static ContextSection g_contextEntriesFPU = { .pValues = &g_contextRegisters[0], .count = registerCountFPU };
 static MriContext     g_context;
@@ -1008,7 +1008,7 @@ static void checkForDeviceReset();
 static void waitToReceiveData();
 
 
-uint32_t Platform_CommHasReceiveData(void)
+int Platform_CommHasReceiveData(void)
 {
     checkForNetworkDown();
     checkForDeviceReset();
@@ -1045,7 +1045,7 @@ static void checkForDeviceReset()
     }
 }
 
-uint32_t  Platform_CommHasTransmitCompleted(void)
+int  Platform_CommHasTransmitCompleted(void)
 {
     return (g_gdbSocket.bytesInFlight() == 0);
 }
@@ -1547,7 +1547,7 @@ char* Platform_GetPacketBuffer(void)
     return g_packetBuffer;
 }
 
-uint32_t Platform_GetPacketBufferSize(void)
+uintmri_t Platform_GetPacketBufferSize(void)
 {
     return sizeof(g_packetBuffer);
 }
@@ -1595,11 +1595,11 @@ static void writeBytesToBufferAsHex(Buffer* pBuffer, void* pBytes, size_t byteCo
 // *********************************************************************************************************************
 // Routines called by the MRI core to read and write memory on the target device.
 // *********************************************************************************************************************
-uint32_t Platform_MemRead32(const void* pv)
+uint32_t Platform_MemRead32(uintmri_t address)
 {
     g_wasMemoryExceptionEncountered = false;
     uint32_t data = 0;
-    uint32_t bytesRead = readTargetMemory((uint32_t)pv, &data, sizeof(data), SWD::TRANSFER_32BIT);
+    uint32_t bytesRead = readTargetMemory(address, &data, sizeof(data), SWD::TRANSFER_32BIT);
     if (bytesRead != sizeof(data))
     {
         g_wasMemoryExceptionEncountered = true;
@@ -1608,11 +1608,11 @@ uint32_t Platform_MemRead32(const void* pv)
     return data;
 }
 
-uint16_t Platform_MemRead16(const void* pv)
+uint16_t Platform_MemRead16(uintmri_t address)
 {
     g_wasMemoryExceptionEncountered = false;
     uint16_t data = 0;
-    uint32_t bytesRead = readTargetMemory((uint32_t)pv, &data, sizeof(data), SWD::TRANSFER_16BIT);
+    uint32_t bytesRead = readTargetMemory(address, &data, sizeof(data), SWD::TRANSFER_16BIT);
     if (bytesRead != sizeof(data))
     {
         g_wasMemoryExceptionEncountered = true;
@@ -1621,11 +1621,11 @@ uint16_t Platform_MemRead16(const void* pv)
     return data;
 }
 
-uint8_t Platform_MemRead8(const void* pv)
+uint8_t Platform_MemRead8(uintmri_t address)
 {
     g_wasMemoryExceptionEncountered = false;
     uint8_t data = 0;
-    uint32_t bytesRead = readTargetMemory((uint32_t)pv, &data, sizeof(data), SWD::TRANSFER_8BIT);
+    uint32_t bytesRead = readTargetMemory(address, &data, sizeof(data), SWD::TRANSFER_8BIT);
     if (bytesRead != sizeof(data))
     {
         g_wasMemoryExceptionEncountered = true;
@@ -1634,30 +1634,30 @@ uint8_t Platform_MemRead8(const void* pv)
     return data;
 }
 
-void Platform_MemWrite32(void* pv, uint32_t value)
+void Platform_MemWrite32(uintmri_t address, uint32_t value)
 {
     g_wasMemoryExceptionEncountered = false;
-    uint32_t bytesWritten = writeTargetMemory((uint32_t)pv, &value, sizeof(value), SWD::TRANSFER_32BIT);
+    uint32_t bytesWritten = writeTargetMemory(address, &value, sizeof(value), SWD::TRANSFER_32BIT);
     if (bytesWritten != sizeof(value))
     {
         g_wasMemoryExceptionEncountered = true;
     }
 }
 
-void Platform_MemWrite16(void* pv, uint16_t value)
+void Platform_MemWrite16(uintmri_t address, uint16_t value)
 {
     g_wasMemoryExceptionEncountered = false;
-    uint32_t bytesWritten = writeTargetMemory((uint32_t)pv, &value, sizeof(value), SWD::TRANSFER_16BIT);
+    uint32_t bytesWritten = writeTargetMemory(address, &value, sizeof(value), SWD::TRANSFER_16BIT);
     if (bytesWritten != sizeof(value))
     {
         g_wasMemoryExceptionEncountered = true;
     }
 }
 
-void Platform_MemWrite8(void* pv, uint8_t value)
+void Platform_MemWrite8(uintmri_t address, uint8_t value)
 {
     g_wasMemoryExceptionEncountered = false;
-    uint32_t bytesWritten = writeTargetMemory((uint32_t)pv, &value, sizeof(value), SWD::TRANSFER_8BIT);
+    uint32_t bytesWritten = writeTargetMemory(address, &value, sizeof(value), SWD::TRANSFER_8BIT);
     if (bytesWritten != sizeof(value))
     {
         g_wasMemoryExceptionEncountered = true;
@@ -1669,7 +1669,7 @@ int Platform_WasMemoryFaultEncountered()
     return g_wasMemoryExceptionEncountered;
 }
 
-void Platform_SyncICacheToDCache(void *pv, uint32_t size)
+void Platform_SyncICacheToDCache(uintmri_t address, uintmri_t size)
 {
     // UNDONE: Implement and test on Portenta-H7.
 }
@@ -1681,25 +1681,25 @@ void Platform_SyncICacheToDCache(void *pv, uint32_t size)
 // Replacements for routines from memory.c to make them faster.
 // *********************************************************************************************************************
 // UNDONE: Be aware that the TAR read in calculateTransferCount() might return 0 once it goes past the end of valid memory.
-static uint32_t readMemoryBytesIntoHexBuffer(Buffer* pBuffer, const void*  pvMemory, uint32_t readByteCount);
-static uint32_t readMemoryHalfWordIntoHexBuffer(Buffer* pBuffer, const void*  pvMemory);
-static int isNotHalfWordAligned(const void* pvMemory);
-static uint32_t readMemoryWordIntoHexBuffer(Buffer* pBuffer, const void* pvMemory);
-static int isWordAligned(uint32_t value);
-uint32_t ReadMemoryIntoHexBuffer(Buffer* pBuffer, const void* pvMemory, uint32_t readByteCount)
+static uint32_t readMemoryBytesIntoHexBuffer(Buffer* pBuffer, uintmri_t address, uintmri_t readByteCount);
+static uint32_t readMemoryHalfWordIntoHexBuffer(Buffer* pBuffer, uintmri_t address);
+static int isNotHalfWordAligned(uintmri_t address);
+static uint32_t readMemoryWordIntoHexBuffer(Buffer* pBuffer, uintmri_t address);
+static int isWordAligned(uintmri_t value);
+uintmri_t ReadMemoryIntoHexBuffer(Buffer* pBuffer, uintmri_t address, uintmri_t readByteCount)
 {
     switch (readByteCount)
     {
     case 2:
-        return readMemoryHalfWordIntoHexBuffer(pBuffer, pvMemory);
+        return readMemoryHalfWordIntoHexBuffer(pBuffer, address);
     case 4:
-        return readMemoryWordIntoHexBuffer(pBuffer, pvMemory);
+        return readMemoryWordIntoHexBuffer(pBuffer, address);
     default:
-        return readMemoryBytesIntoHexBuffer(pBuffer, pvMemory, readByteCount);
+        return readMemoryBytesIntoHexBuffer(pBuffer, address, readByteCount);
     }
 }
 
-static uint32_t readMemoryBytesIntoHexBuffer(Buffer* pBuffer, const void*  pvMemory, uint32_t readByteCount)
+static uint32_t readMemoryBytesIntoHexBuffer(Buffer* pBuffer, uintmri_t address, uintmri_t readByteCount)
 {
     // Hex digit buffer is twice the size of binary buffer.
     uint8_t  buffer[PACKET_SIZE/2];
@@ -1710,27 +1710,27 @@ static uint32_t readMemoryBytesIntoHexBuffer(Buffer* pBuffer, const void*  pvMem
     }
 
     uint32_t bytesRead = 0;
-    if (isWordAligned(readByteCount) && isWordAligned((uint32_t)pvMemory))
+    if (isWordAligned(readByteCount) && isWordAligned(address))
     {
-        bytesRead = readTargetMemory((uint32_t)pvMemory, buffer, readByteCount, SWD::TRANSFER_32BIT);
+        bytesRead = readTargetMemory(address, buffer, readByteCount, SWD::TRANSFER_32BIT);
     }
     else
     {
-        bytesRead = readTargetMemory((uint32_t)pvMemory, buffer, readByteCount, SWD::TRANSFER_8BIT);
+        bytesRead = readTargetMemory(address, buffer, readByteCount, SWD::TRANSFER_8BIT);
     }
     writeBytesToBufferAsHex(pBuffer, buffer, bytesRead);
 
     return bytesRead;
 }
 
-static uint32_t readMemoryHalfWordIntoHexBuffer(Buffer* pBuffer, const void* pvMemory)
+static uint32_t readMemoryHalfWordIntoHexBuffer(Buffer* pBuffer, uintmri_t address)
 {
     uint16_t value;
 
-    if (isNotHalfWordAligned(pvMemory))
-        return readMemoryBytesIntoHexBuffer(pBuffer, pvMemory, 2);
+    if (isNotHalfWordAligned(address))
+        return readMemoryBytesIntoHexBuffer(pBuffer, address, 2);
 
-    value = Platform_MemRead16(pvMemory);
+    value = Platform_MemRead16(address);
     if (Platform_WasMemoryFaultEncountered())
         return 0;
     writeBytesToBufferAsHex(pBuffer, &value, sizeof(value));
@@ -1738,19 +1738,19 @@ static uint32_t readMemoryHalfWordIntoHexBuffer(Buffer* pBuffer, const void* pvM
     return sizeof(value);
 }
 
-static int isNotHalfWordAligned(const void* pvMemory)
+static int isNotHalfWordAligned(uintmri_t address)
 {
-    return (size_t)pvMemory & 1;
+    return address & 1;
 }
 
-static uint32_t readMemoryWordIntoHexBuffer(Buffer* pBuffer, const void* pvMemory)
+static uint32_t readMemoryWordIntoHexBuffer(Buffer* pBuffer, uintmri_t address)
 {
     uint32_t value;
 
-    if (!isWordAligned((uint32_t)pvMemory))
-        return readMemoryBytesIntoHexBuffer(pBuffer, pvMemory, 4);
+    if (!isWordAligned(address))
+        return readMemoryBytesIntoHexBuffer(pBuffer, address, 4);
 
-    value = Platform_MemRead32(pvMemory);
+    value = Platform_MemRead32(address);
     if (Platform_WasMemoryFaultEncountered())
         return 0;
     writeBytesToBufferAsHex(pBuffer, &value, sizeof(value));
@@ -1758,30 +1758,30 @@ static uint32_t readMemoryWordIntoHexBuffer(Buffer* pBuffer, const void* pvMemor
     return sizeof(value);
 }
 
-static int isWordAligned(uint32_t value)
+static int isWordAligned(uintmri_t value)
 {
     return (value & 3) == 0;
 }
 
 
-static int writeHexBufferToByteMemory(Buffer* pBuffer, void* pvMemory, uint32_t writeByteCount);
-static int writeHexBufferToHalfWordMemory(Buffer* pBuffer, void* pvMemory);
-static int readBytesFromHexBuffer(Buffer* pBuffer, void* pv, size_t length);
-static int writeHexBufferToWordMemory(Buffer* pBuffer, void* pvMemory);
-int WriteHexBufferToMemory(Buffer* pBuffer, void* pvMemory, uint32_t writeByteCount)
+static int writeHexBufferToByteMemory(Buffer* pBuffer, uintmri_t address, uintmri_t writeByteCount);
+static int writeHexBufferToHalfWordMemory(Buffer* pBuffer, uintmri_t address);
+static int readBytesFromHexBuffer(Buffer* pBuffer, void* pvMemory, size_t length);
+static int writeHexBufferToWordMemory(Buffer* pBuffer, uintmri_t address);
+int WriteHexBufferToMemory(Buffer* pBuffer, uintmri_t address, uintmri_t writeByteCount)
 {
     switch (writeByteCount)
     {
     case 2:
-        return writeHexBufferToHalfWordMemory(pBuffer, pvMemory);
+        return writeHexBufferToHalfWordMemory(pBuffer, address);
     case 4:
-        return writeHexBufferToWordMemory(pBuffer, pvMemory);
+        return writeHexBufferToWordMemory(pBuffer, address);
     default:
-        return writeHexBufferToByteMemory(pBuffer, pvMemory, writeByteCount);
+        return writeHexBufferToByteMemory(pBuffer, address, writeByteCount);
     }
 }
 
-static int writeHexBufferToByteMemory(Buffer* pBuffer, void* pvMemory, uint32_t writeByteCount)
+static int writeHexBufferToByteMemory(Buffer* pBuffer, uintmri_t address, uintmri_t writeByteCount)
 {
     // Hex digit buffer is twice the size of binary buffer.
     uint8_t  buffer[PACKET_SIZE/2];
@@ -1796,29 +1796,29 @@ static int writeHexBufferToByteMemory(Buffer* pBuffer, void* pvMemory, uint32_t 
     }
 
     uint32_t bytesWritten = 0;
-    if (isWordAligned(writeByteCount) && isWordAligned((uint32_t)pvMemory))
+    if (isWordAligned(writeByteCount) && isWordAligned(address))
     {
-        bytesWritten = writeTargetMemory((uint32_t)pvMemory, buffer, writeByteCount, SWD::TRANSFER_32BIT);
+        bytesWritten = writeTargetMemory(address, buffer, writeByteCount, SWD::TRANSFER_32BIT);
     }
     else
     {
-        bytesWritten = writeTargetMemory((uint32_t)pvMemory, buffer, writeByteCount, SWD::TRANSFER_8BIT);
+        bytesWritten = writeTargetMemory(address, buffer, writeByteCount, SWD::TRANSFER_8BIT);
     }
 
     return bytesWritten;
 }
 
-static int writeHexBufferToHalfWordMemory(Buffer* pBuffer, void* pvMemory)
+static int writeHexBufferToHalfWordMemory(Buffer* pBuffer, uintmri_t address)
 {
     uint16_t value;
 
-    if (isNotHalfWordAligned(pvMemory))
-        return writeHexBufferToByteMemory(pBuffer, pvMemory, 2);
+    if (isNotHalfWordAligned(address))
+        return writeHexBufferToByteMemory(pBuffer, address, 2);
 
     if (!readBytesFromHexBuffer(pBuffer, &value, sizeof(value)))
         return 0;
 
-    Platform_MemWrite16(pvMemory, value);
+    Platform_MemWrite16(address, value);
     if (Platform_WasMemoryFaultEncountered())
         return 0;
 
@@ -1838,17 +1838,17 @@ static int readBytesFromHexBuffer(Buffer* pBuffer, void* pv, size_t length)
     return 1;
 }
 
-static int writeHexBufferToWordMemory(Buffer* pBuffer, void* pvMemory)
+static int writeHexBufferToWordMemory(Buffer* pBuffer, uintmri_t address)
 {
     uint32_t value;
 
-    if (!isWordAligned((uint32_t)pvMemory))
-        return writeHexBufferToByteMemory(pBuffer, pvMemory, 4);
+    if (!isWordAligned(address))
+        return writeHexBufferToByteMemory(pBuffer, address, 4);
 
     if (!readBytesFromHexBuffer(pBuffer, &value, sizeof(value)))
         return 0;
 
-    Platform_MemWrite32(pvMemory, value);
+    Platform_MemWrite32(address, value);
     if (Platform_WasMemoryFaultEncountered())
         return 0;
 
@@ -1857,27 +1857,25 @@ static int writeHexBufferToWordMemory(Buffer* pBuffer, void* pvMemory)
 
 
 // UNDONE: Should be optimized like the hex version....might need this for load.
-static int  writeBinaryBufferToByteMemory(Buffer*  pBuffer, void* pvMemory, uint32_t writeByteCount);
-static int  writeBinaryBufferToHalfWordMemory(Buffer* pBuffer, void* pvMemory);
+static int  writeBinaryBufferToByteMemory(Buffer*  pBuffer, uintmri_t address, uintmri_t writeByteCount);
+static int  writeBinaryBufferToHalfWordMemory(Buffer* pBuffer, uintmri_t address);
 static int readBytesFromBinaryBuffer(Buffer*  pBuffer, void* pvMemory, uint32_t writeByteCount);
-static int  writeBinaryBufferToWordMemory(Buffer* pBuffer, void* pvMemory);
-int WriteBinaryBufferToMemory(Buffer* pBuffer, void* pvMemory, uint32_t writeByteCount)
+static int  writeBinaryBufferToWordMemory(Buffer* pBuffer, uintmri_t address);
+int WriteBinaryBufferToMemory(Buffer* pBuffer, uintmri_t address, uintmri_t writeByteCount)
 {
     switch (writeByteCount)
     {
     case 2:
-        return writeBinaryBufferToHalfWordMemory(pBuffer, pvMemory);
+        return writeBinaryBufferToHalfWordMemory(pBuffer, address);
     case 4:
-        return writeBinaryBufferToWordMemory(pBuffer, pvMemory);
+        return writeBinaryBufferToWordMemory(pBuffer, address);
     default:
-        return writeBinaryBufferToByteMemory(pBuffer, pvMemory, writeByteCount);
+        return writeBinaryBufferToByteMemory(pBuffer, address, writeByteCount);
     }
 }
 
-static int writeBinaryBufferToByteMemory(Buffer*  pBuffer, void* pvMemory, uint32_t writeByteCount)
+static int writeBinaryBufferToByteMemory(Buffer*  pBuffer, uintmri_t address, uintmri_t writeByteCount)
 {
-    uint8_t* p = (uint8_t*) pvMemory;
-
     while (writeByteCount-- > 0)
     {
         char currChar;
@@ -1887,7 +1885,7 @@ static int writeBinaryBufferToByteMemory(Buffer*  pBuffer, void* pvMemory, uint3
         __catch
             __rethrow_and_return(0);
 
-        Platform_MemWrite8(p++, (uint8_t)currChar);
+        Platform_MemWrite8(address++, (uint8_t)currChar);
         if (Platform_WasMemoryFaultEncountered())
             return 0;
     }
@@ -1895,17 +1893,17 @@ static int writeBinaryBufferToByteMemory(Buffer*  pBuffer, void* pvMemory, uint3
     return 1;
 }
 
-static int writeBinaryBufferToHalfWordMemory(Buffer* pBuffer, void* pvMemory)
+static int writeBinaryBufferToHalfWordMemory(Buffer* pBuffer, uintmri_t address)
 {
     uint16_t value;
 
-    if (isNotHalfWordAligned(pvMemory))
-        return writeBinaryBufferToByteMemory(pBuffer, pvMemory, 2);
+    if (isNotHalfWordAligned(address))
+        return writeBinaryBufferToByteMemory(pBuffer, address, 2);
 
     if (!readBytesFromBinaryBuffer(pBuffer, &value, sizeof(value)))
         return 0;
 
-    Platform_MemWrite16(pvMemory, value);
+    Platform_MemWrite16(address, value);
     if (Platform_WasMemoryFaultEncountered())
         return 0;
 
@@ -1927,17 +1925,17 @@ static int readBytesFromBinaryBuffer(Buffer*  pBuffer, void* pvMemory, uint32_t 
     return 1;
 }
 
-static int writeBinaryBufferToWordMemory(Buffer* pBuffer, void* pvMemory)
+static int writeBinaryBufferToWordMemory(Buffer* pBuffer, uintmri_t address)
 {
     uint32_t value;
 
-    if (!isWordAligned((uint32_t)pvMemory))
-        return writeBinaryBufferToByteMemory(pBuffer, pvMemory, 4);
+    if (!isWordAligned(address))
+        return writeBinaryBufferToByteMemory(pBuffer, address, 4);
 
     if (!readBytesFromBinaryBuffer(pBuffer, &value, sizeof(value)))
         return 0;
 
-    Platform_MemWrite32(pvMemory, value);
+    Platform_MemWrite32(address, value);
     if (Platform_WasMemoryFaultEncountered())
         return 0;
 
@@ -2004,12 +2002,12 @@ static uint16_t throwingMemRead16(uint32_t address);
 static bool isInstruction32Bit(uint16_t firstWordOfInstruction);
 
 
-uint32_t Platform_GetProgramCounter(void)
+uintmri_t Platform_GetProgramCounter(void)
 {
     return Context_Get(&g_context, PC);
 }
 
-void Platform_SetProgramCounter(uint32_t newPC)
+void Platform_SetProgramCounter(uintmri_t newPC)
 {
     Context_Set(&g_context, PC, newPC);
 }
@@ -2048,7 +2046,7 @@ static uint16_t getFirstHalfWordOfCurrentInstruction(void)
 
 static uint16_t throwingMemRead16(uint32_t address)
 {
-    uint16_t instructionWord = Platform_MemRead16((const uint16_t*)address);
+    uint16_t instructionWord = Platform_MemRead16(address);
     if (Platform_WasMemoryFaultEncountered())
     {
         __throw_and_return(memFaultException, 0);
@@ -2097,7 +2095,7 @@ static bool isFPBComparatorEnabledRevision2(uint32_t comparator);
 static uint32_t disableFPBBreakpointComparator(uint32_t breakpointAddress, bool is32BitInstruction);
 
 
-__throws void Platform_SetHardwareBreakpointOfGdbKind(uint32_t address, uint32_t kind)
+__throws void Platform_SetHardwareBreakpointOfGdbKind(uintmri_t address, uintmri_t kind)
 {
     bool is32BitInstruction = false;
 
@@ -2115,7 +2113,7 @@ __throws void Platform_SetHardwareBreakpointOfGdbKind(uint32_t address, uint32_t
     {
         __throw(exceededHardwareResourcesException);
     }
-    logInfoF("Hardware breakpoint set at address 0x%08lX.", address);
+    logInfoF("Hardware breakpoint set at address 0x%08X.", address);
 }
 
 static bool doesKindIndicate32BitInstruction(uint32_t kind)
@@ -2379,7 +2377,7 @@ __throws void Platform_SetHardwareBreakpoint(uint32_t address)
     logInfoF("Hardware breakpoint set at address 0x%08lX.", address);
 }
 
-__throws void Platform_ClearHardwareBreakpointOfGdbKind(uint32_t address, uint32_t kind)
+__throws void Platform_ClearHardwareBreakpointOfGdbKind(uintmri_t address, uintmri_t kind)
 {
     bool is32BitInstruction = false;
     __try
@@ -2406,7 +2404,7 @@ static uint32_t disableFPBBreakpointComparator(uint32_t breakpointAddress, bool 
     return existingFPBBreakpoint;
 }
 
-__throws void Platform_ClearHardwareBreakpoint(uint32_t address)
+__throws void Platform_ClearHardwareBreakpoint(uintmri_t address)
 {
     uint16_t  firstInstructionWord;
 
@@ -2462,7 +2460,7 @@ static uint32_t disableDWTWatchpoint(uint32_t watchpointAddress,
                                      uint32_t watchpointType);
 
 
-__throws void Platform_SetHardwareWatchpoint(uint32_t address, uint32_t size,  PlatformWatchpointType type)
+__throws void Platform_SetHardwareWatchpoint(uintmri_t address, uintmri_t size,  PlatformWatchpointType type)
 {
     uint32_t nativeType = convertWatchpointTypeToCortexMType(type);
     if (!isValidDWTComparatorSetting(address, size, nativeType))
@@ -2475,7 +2473,7 @@ __throws void Platform_SetHardwareWatchpoint(uint32_t address, uint32_t size,  P
     {
         __throw(exceededHardwareResourcesException);
     }
-    logInfoF("Hardware watchpoint set at address 0x%08lX.", address);
+    logInfoF("Hardware watchpoint set at address 0x%08X.", address);
 }
 
 static uint32_t convertWatchpointTypeToCortexMType(PlatformWatchpointType type)
@@ -2740,7 +2738,7 @@ static bool attemptToSetDWTComparatorMask(uint32_t comparatorAddress, uint32_t w
     return maskValue == maskBitCount;
 }
 
-__throws void Platform_ClearHardwareWatchpoint(uint32_t address, uint32_t size,  PlatformWatchpointType type)
+__throws void Platform_ClearHardwareWatchpoint(uintmri_t address, uintmri_t size,  PlatformWatchpointType type)
 {
     uint32_t nativeType = convertWatchpointTypeToCortexMType(type);
 
@@ -3246,7 +3244,7 @@ static const char g_targetFpuXML[] =
     "</feature>\n"
     "</target>\n";
 
-uint32_t Platform_GetTargetXmlSize(void)
+uintmri_t Platform_GetTargetXmlSize(void)
 {
     if (g_fpu >= FPU_MAYBE)
     {
@@ -3275,7 +3273,7 @@ const char* Platform_GetTargetXml(void)
 // *********************************************************************************************************************
 // Routines called by the MRI core to retrieve the XML describing the CPU's memory layout.
 // *********************************************************************************************************************
-uint32_t Platform_GetDeviceMemoryMapXmlSize(void)
+uintmri_t Platform_GetDeviceMemoryMapXmlSize(void)
 {
     return g_memoryLayoutSize;
 }
@@ -3568,7 +3566,7 @@ static uint32_t  handleFlashEraseCommand(Buffer* pBuffer)
         PrepareStringResponse(MRI_ERROR_INVALID_ARGUMENT);
         return HANDLER_RETURN_HANDLED;
     }
-    logInfoF("Erasing 0x%lX (%lu) bytes of FLASH at 0x%08lX.", addressLength.length, addressLength.length, addressLength.address);
+    logInfoF("Erasing 0x%X (%u) bytes of FLASH at 0x%08X.", addressLength.length, addressLength.length, addressLength.address);
     if (!g_pDevice->flashBegin(g_pDeviceObject, &g_swd))
     {
         PrepareStringResponse(MRI_ERROR_INVALID_ARGUMENT);
@@ -3750,32 +3748,32 @@ static bool reenableInterrupts()
 
 
 
-uint32_t Platform_RtosGetHaltedThreadId(void)
+uintmri_t Platform_RtosGetHaltedThreadId(void)
 {
     return 0;
 }
 
-uint32_t Platform_RtosGetFirstThreadId(void)
+uintmri_t Platform_RtosGetFirstThreadId(void)
 {
     return 0;
 }
 
-uint32_t Platform_RtosGetNextThreadId(void)
+uintmri_t Platform_RtosGetNextThreadId(void)
 {
     return 0;
 }
 
-const char* Platform_RtosGetExtraThreadInfo(uint32_t threadId)
+const char* Platform_RtosGetExtraThreadInfo(uintmri_t threadId)
 {
     return NULL;
 }
 
-MriContext* Platform_RtosGetThreadContext(uint32_t threadId)
+MriContext* Platform_RtosGetThreadContext(uintmri_t threadId)
 {
     return NULL;
 }
 
-int Platform_RtosIsThreadActive(uint32_t threadId)
+int Platform_RtosIsThreadActive(uintmri_t threadId)
 {
     return 0;
 }
@@ -3785,7 +3783,7 @@ int Platform_RtosIsSetThreadStateSupported(void)
     return 0;
 }
 
-void Platform_RtosSetThreadState(uint32_t threadId, PlatformThreadState state)
+void Platform_RtosSetThreadState(uintmri_t threadId, PlatformThreadState state)
 {
 }
 
@@ -3959,7 +3957,7 @@ const uint8_t* Platform_GetUid(void)
 }
 
 
-uint32_t Platform_GetUidSize(void)
+uintmri_t Platform_GetUidSize(void)
 {
     return 0;
 }
