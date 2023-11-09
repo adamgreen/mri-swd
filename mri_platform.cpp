@@ -29,6 +29,7 @@ extern "C"
 {
     #include <core/core.h>
     #include <core/mri.h>
+    #include <core/packet.h>
     #include <core/platforms.h>
     #include <core/semihost.h>
     #include <core/signal.h>
@@ -1010,9 +1011,14 @@ static void waitToReceiveData();
 
 int Platform_CommHasReceiveData(void)
 {
-    checkForNetworkDown();
-    checkForDeviceReset();
-    return !g_gdbSocket.m_tcpToMriQueue.isEmpty();
+    int hasReceiveData = !g_gdbSocket.m_tcpToMriQueue.isEmpty();
+    if (!hasReceiveData)
+    {
+        // Only check for network and SWD disconnect when there is no data from GDB to process.
+        checkForNetworkDown();
+        checkForDeviceReset();
+    }
+    return hasReceiveData;
 }
 
 static void checkForNetworkDown()
@@ -3329,6 +3335,7 @@ static uint32_t handleMonitorResetCommand(Buffer* pBuffer);
 static void enableResetVectorCatch();
 static uint32_t handleMonitorHelpCommand();
 static uint32_t handleFlashEraseCommand(Buffer* pBuffer);
+static void sendOkResponseWithNewPacketBuffer();
 static uint32_t handleFlashWriteCommand(Buffer* pBuffer);
 static uint32_t handleFlashDoneCommand(Buffer* pBuffer);
 uint32_t Platform_HandleGDBCommand(Buffer* pBuffer)
@@ -3536,6 +3543,9 @@ static uint32_t handleMonitorHelpCommand()
 }
 
 
+// Have any FLASH errors been encountered since the erase command was started.
+static bool g_flashErrorDetected = false;
+
 /* Handle the 'vFlashErase' command which erases the specified pages in FLASH.
 
     Command Format:     vFlashErase:AAAAAAAA,LLLLLLLL
@@ -3572,14 +3582,30 @@ static uint32_t  handleFlashEraseCommand(Buffer* pBuffer)
         PrepareStringResponse(MRI_ERROR_INVALID_ARGUMENT);
         return HANDLER_RETURN_HANDLED;
     }
+
+    // Return OK packet now before starting the erase so that GDB can start sending the next packet at the same time.
+    sendOkResponseWithNewPacketBuffer();
+    g_flashErrorDetected = false;
+
     if (!g_pDevice->flashErase(g_pDeviceObject, &g_swd, addressLength.address, addressLength.length))
     {
-        PrepareStringResponse(MRI_ERROR_MEMORY_ACCESS_FAILURE);
-        return HANDLER_RETURN_HANDLED;
+        // Set flag to return error to GDB on next FLASHing operation.
+        g_flashErrorDetected = true;
     }
 
-    PrepareStringResponse("OK");
-    return HANDLER_RETURN_HANDLED;
+    // Let higher level MRI code know that we handled this command and already sent back the "OK" response.
+    return HANDLER_RETURN_HANDLED | HANDLER_RETURN_RETURN_IMMEDIATELY;
+}
+
+static void sendOkResponseWithNewPacketBuffer()
+{
+    char   packetBuffer[10];
+    Packet packet;
+
+    Packet_Init(&packet, packetBuffer, sizeof(packetBuffer));
+    Buffer_WriteString(&packet.dataBuffer, "OK");
+    Buffer_SetEndOfBuffer(&packet.dataBuffer);
+    Packet_SendToGDB(&packet);
 }
 
 /* Handle the 'vFlashWrite' command which writes to the specified location in FLASH.
@@ -3593,8 +3619,14 @@ static uint32_t  handleFlashEraseCommand(Buffer* pBuffer)
 */
 static uint32_t  handleFlashWriteCommand(Buffer* pBuffer)
 {
-    uint32_t  address = 0;
+    // First check to see if the previous erase or write already failed.
+    if (g_flashErrorDetected)
+    {
+        PrepareStringResponse(MRI_ERROR_MEMORY_ACCESS_FAILURE);
+        return HANDLER_RETURN_HANDLED;
+    }
 
+    uint32_t  address = 0;
     __try
     {
         __throwing_func( ThrowIfNextCharIsNotEqualTo(pBuffer, ':') );
@@ -3609,16 +3641,19 @@ static uint32_t  handleFlashWriteCommand(Buffer* pBuffer)
     }
     assert ( g_pDevice );
 
+    // Return OK packet now before starting the write so that GDB can start sending the next packet at the same time.
+    sendOkResponseWithNewPacketBuffer();
+
     uint32_t length = Buffer_BytesLeft(pBuffer);
     logInfoF("Writing 0x%lX (%lu) bytes to FLASH at 0x%08lX.", length, length, address);
     if (!g_pDevice->flashProgram(g_pDeviceObject, &g_swd, address, pBuffer->pCurrent, length))
     {
-        PrepareStringResponse(MRI_ERROR_MEMORY_ACCESS_FAILURE);
-        return HANDLER_RETURN_HANDLED;
+        // Set flag to return error to GDB on next FLASHing operation.
+        g_flashErrorDetected = true;
     }
 
-    PrepareStringResponse("OK");
-    return HANDLER_RETURN_HANDLED;
+    // Let higher level MRI code know that we handled this command and already sent back the "OK" response.
+    return HANDLER_RETURN_HANDLED | HANDLER_RETURN_RETURN_IMMEDIATELY;
 }
 
 
@@ -3632,6 +3667,13 @@ static uint32_t handleFlashDoneCommand(Buffer* pBuffer)
     assert ( g_pDevice );
 
     logInfo("Completed FLASH update.");
+
+    // First check to see if the previous write failed.
+    if (g_flashErrorDetected)
+    {
+        PrepareStringResponse(MRI_ERROR_MEMORY_ACCESS_FAILURE);
+        return HANDLER_RETURN_HANDLED;
+    }
 
     if (!g_pDevice->flashEnd(g_pDeviceObject, &g_swd))
     {
