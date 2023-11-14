@@ -46,5 +46,7 @@ struct CortexM_Registers
 void mainDebuggerLoop();
 
 bool runCodeOnDevice(CortexM_Registers* pRegistersInOut, uint32_t timeout_ms);
+bool startCodeOnDevice(const CortexM_Registers* pRegistersIn);
+bool waitForCodeToHalt(CortexM_Registers* pRegistersOut, uint32_t timeout_ms);
 
 #endif /* MRI_PLATFORM_H_ */

@@ -23,6 +23,8 @@
 #include <string.h>
 #include "rp2040.h"
 #include "mri_platform.h"
+#include "LocalFlashing.h"
+#include <rp2040-LocalFlashing.h>
 
 
 // RP2040 FLASH memory location.
@@ -36,39 +38,38 @@ static const uint32_t RAM_START_ADDRESS = 0x20000000;
 static const uint32_t RAM_SIZE = 264*1024;
 static const uint32_t RAM_END_ADDRESS = RAM_START_ADDRESS + RAM_SIZE;
 
-
 // RP2040 object caches pointers to the ROM based FLASH related routines in the object context.
 struct RP2040Object
 {
-    uint32_t _connect_internal_flash;
-    uint32_t _flash_exit_xip;
-    uint32_t _flash_range_erase;
-    uint32_t _flash_range_program;
-    uint32_t _flash_flush_cache;
-    uint32_t _flash_enter_cmd_xip;
-    uint32_t _debug_trampoline;
-    uint32_t _debug_trampoline_end;
-    bool     isInitialized;
+    LocalFlashingConfig localFlashingConfig;
+    uint32_t            indicesAddress;
+    uint32_t            freeIndex;
+    uint32_t            writeIndex;
+    uint32_t            ramWrite;
+    uint32_t            ramRead;
 };
-
-// Number of function pointers to be filled out in the RP2040Object structure.
-static const size_t ROM_FUNCTION_COUNT = 8;
 
 
 // Forward function declarations.
-static bool findRequiredBootRomRoutines(RP2040Object* pObject, SWD* pSWD);
-static bool checkRP2040BootRomMagicValue(SWD* pSWD);
+static bool loadLocalFlashingCodeOnDevice(RP2040Object* pObject, SWD* pSWD);
+static bool startLocalFlashingCodeOnDevice(RP2040Object* pObject, SWD* pSWD);
 static void disableDmaChannels(RP2040Object* pObject, SWD* pSWD);
 static uint32_t getDmaChannelCount(RP2040Object* pObject, SWD* pSWD);
 static void disableDmaChannel(RP2040Object* pObject, SWD* pSWD, uint32_t i);
 static bool isAddressAndLength4kAligned(uint32_t address, uint32_t length);
 static bool is4kAligned(uint32_t value);
 static bool isAttemptingToFlashInvalidAddress(uint32_t address, uint32_t length);
-static bool disableFlashXIP(RP2040Object* pObject, SWD* pSWD);
-static bool reenableFlashXIP(RP2040Object* pObject, SWD* pSWD);
-static bool callBootRomRoutine(RP2040Object* pObject, SWD* pSWD, uint32_t functionOffset, uint32_t param1, uint32_t param2, uint32_t param3, uint32_t param4);
-static int32_t alignStartOfWriteByCopyingExistingFlashData(SWD* pSWD, uint8_t* pDest, uint32_t alignedStart, uint32_t unalignedStart);
-static uint32_t copyBytes(uint8_t* pDest, size_t destSize, const uint8_t* pSrc, uint32_t srcSize);
+static uint32_t freeCompletedQueueEntries(RP2040Object* pObject, SWD* pSWD);
+static bool readQueueEntry(RP2040Object* pObject, SWD* pSWD, uint32_t index, LocalFlashingQueueEntry* pOut);
+static bool writeQueueEntry(RP2040Object* pObject, SWD* pSWD, uint32_t index, const LocalFlashingQueueEntry* pIn);
+static void freeRamFromEntry(RP2040Object* pObject, LocalFlashingQueueEntry* pEntry);
+static bool addEntryToQueue(RP2040Object* pObject, SWD* pSWD, const LocalFlashingQueueEntry* pEntry);
+static bool waitForFreeQueueEntry(RP2040Object* pObject, SWD* pSWD);
+static bool readQueueIndices(RP2040Object* pObject, SWD* pSWD, LocalFlashingQueueIndices* pOut);
+static bool writeWriteIndex(RP2040Object* pObject, SWD* pSWD, uint32_t writeIndex);
+static uint32_t freeCompletedQueueEntriesToFreeNeededRam(RP2040Object* pObject, SWD* pSWD, uint32_t byteCount);
+static bool canAllocateTargetRam(RP2040Object* pObject, uint32_t bytesNeeded);
+static uint32_t allocateTargetRam(RP2040Object* pObject, uint32_t byteCount);
 
 
 // mri-swd will call this function on each of the devices listed in g_supportedDevices until a non-NULL response
@@ -144,129 +145,46 @@ static bool rp2040FlashBegin(DeviceObject* pvObject, SWD* pSWD)
     assert ( pvObject );
     RP2040Object* pObject = (RP2040Object*)pvObject;
     disableDmaChannels(pObject, pSWD);
-    return findRequiredBootRomRoutines((RP2040Object*)pvObject, pSWD);
+    if (!loadLocalFlashingCodeOnDevice(pObject, pSWD))
+    {
+        return false;
+    }
+    return startLocalFlashingCodeOnDevice(pObject, pSWD);
 }
 
-static bool findRequiredBootRomRoutines(RP2040Object* pObject, SWD* pSWD)
+static bool loadLocalFlashingCodeOnDevice(RP2040Object* pObject, SWD* pSWD)
 {
-    if (pObject->isInitialized)
-    {
-        // Function table has already been initialized so just return.
-        return true;
-    }
+    assert ( sizeof(g_rp2040_LocalFlashing) >= sizeof(pObject->localFlashingConfig) );
+    memcpy(&pObject->localFlashingConfig, g_rp2040_LocalFlashing, sizeof(pObject->localFlashingConfig));
 
-    if (!checkRP2040BootRomMagicValue(pSWD))
+    uint32_t bytesWritten = pSWD->writeTargetMemory(pObject->localFlashingConfig.loadAddress, g_rp2040_LocalFlashing, sizeof(g_rp2040_LocalFlashing), SWD::TRANSFER_8BIT);
+    if (bytesWritten != sizeof(g_rp2040_LocalFlashing))
     {
-        logError("Failed verification of the RP2040 Boot ROM magic value.");
+        logErrorF("Failed to write %lu bytes of local flashing code to target at address 0x%08X.",
+            sizeof(g_rp2040_LocalFlashing), pObject->localFlashingConfig.loadAddress);
         return false;
     }
-
-    // Read the 16-bit Boot ROM function table pointer from address 0x14.
-    const uint32_t romFuctionTableAddress = 0x14;
-    uint16_t address = 0;
-    uint32_t bytesRead = pSWD->readTargetMemory(romFuctionTableAddress, &address, sizeof(address), SWD::TRANSFER_16BIT);
-    if (bytesRead != sizeof(address) || address == 0)
-    {
-        logError("Failed to read RP2040 Boot ROM function table pointer.");
-        return false;
-    }
-
-    // The codes in the RP2040 Boot ROM function table entries are 16-bit values formed from 2 characters.
-    #define ROM_CODE(X, Y) ((X) | (Y<<8))
-
-    // Each function table entry is composed of a 16-bit ROM_CODE and a 16-bit pointer offset into the 64k Boot ROM.
-    struct FunctionTableEntry
-    {
-        uint16_t code;
-        uint16_t offset;
-    };
-    FunctionTableEntry entries[32];
-
-    // Search the function table for the routines we need to program the FLASH.
-    uint32_t entriesLeftToFind = ROM_FUNCTION_COUNT;
-    while (entriesLeftToFind > 0)
-    {
-        bytesRead = pSWD->readTargetMemory(address, entries, sizeof(entries), SWD::TRANSFER_16BIT);
-        if (bytesRead != sizeof(entries))
-        {
-            logErrorF("Failed to read RP2040 Boot ROM function table at 0x08X. Bytes read: %lu.", address, bytesRead);
-            return false;
-        }
-
-        for (size_t i = 0 ; i < count_of(entries) && entriesLeftToFind > 0 ; i++)
-        {
-            uint32_t offset = entries[i].offset;
-            uint32_t code = entries[i].code;
-            switch (code)
-            {
-                case 0x0000:
-                    // Have encountered the end of the function table before finding all of the needed routines.
-                    assert ( entriesLeftToFind > 0 );
-                    logErrorF("Failed to find all of the required functions in the RP2040 Boot ROM. "
-                                "Still required %lu functions.", entriesLeftToFind);
-                    return false;
-                case ROM_CODE('I', 'F'):
-                    pObject->_connect_internal_flash = offset;
-                    entriesLeftToFind--;
-                    break;
-                case ROM_CODE('E', 'X'):
-                    pObject->_flash_exit_xip = offset;
-                    entriesLeftToFind--;
-                    break;
-                case ROM_CODE('R', 'E'):
-                    pObject->_flash_range_erase = offset;
-                    entriesLeftToFind--;
-                    break;
-                case ROM_CODE('R', 'P'):
-                    pObject->_flash_range_program = offset;
-                    entriesLeftToFind--;
-                    break;
-                case ROM_CODE('F', 'C'):
-                    pObject->_flash_flush_cache = offset;
-                    entriesLeftToFind--;
-                    break;
-                case ROM_CODE('C', 'X'):
-                    pObject->_flash_enter_cmd_xip = offset;
-                    entriesLeftToFind--;
-                    break;
-                case ROM_CODE('D', 'T'):
-                    pObject->_debug_trampoline = offset;
-                    entriesLeftToFind--;
-                    break;
-                case ROM_CODE('D', 'E'):
-                    pObject->_debug_trampoline_end = offset;
-                    entriesLeftToFind--;
-                    break;
-                default:
-                    break;
-            }
-        }
-        address += bytesRead;
-    }
-
-    pObject->isInitialized = true;
+    pObject->indicesAddress = pObject->localFlashingConfig.loadAddress + offsetof(LocalFlashingConfig, queueIndices);
+    pObject->writeIndex = pObject->localFlashingConfig.queueIndices.writeIndex;
+    pObject->freeIndex = pObject->writeIndex;
+    pObject->ramWrite = 0;
+    pObject->ramRead = 0;
     return true;
 }
 
-static bool checkRP2040BootRomMagicValue(SWD* pSWD)
+static bool startLocalFlashingCodeOnDevice(RP2040Object* pObject, SWD* pSWD)
 {
-    // The RP2040 should contain this magic value at address 0x10.
-    const uint32_t bootRomMagicAddress = 0x10;
-    const uint8_t  bootRomMagicValue[] = { 'M', 'u', 0x01 };
+    // Set the CPU registers required for starting the FLASHing routine on the device.
+    CortexM_Registers registers;
+    memset(&registers, 0, sizeof(registers));
+    registers.SP = pObject->localFlashingConfig.stackAddress;
+    registers.LR = pObject->localFlashingConfig.routineAddress;
+    registers.PC = pObject->localFlashingConfig.routineAddress;
 
-    uint8_t  value[3] = { 0, 0, 0 };
-    uint32_t bytesRead = pSWD->readTargetMemory(bootRomMagicAddress, &value, sizeof(value), SWD::TRANSFER_8BIT);
-    if (bytesRead != sizeof(value))
+    if (!startCodeOnDevice(&registers))
     {
-        logError("Failed to read RP2040 Boot ROM magic value.");
         return false;
     }
-    if (memcmp(&value, bootRomMagicValue, sizeof(bootRomMagicValue)) != 0)
-    {
-        logErrorF("RP2040 ROM magic value is invalid (0x%02X 0x%02X 0x%02X).", value[0], value[1], value[2]);
-        return false;
-    }
-
     return true;
 }
 
@@ -311,7 +229,6 @@ static void disableDmaChannel(RP2040Object* pObject, SWD* pSWD, uint32_t i)
 }
 
 
-
 // GDB would like the FLASH at the specified address range to be erased in preparation for programming.
 //
 // pvObject is a pointer to the object allocated by detect().
@@ -336,26 +253,24 @@ static bool rp2040FlashErase(DeviceObject* pvObject, SWD* pSWD, uint32_t address
         return false;
     }
 
-    if (!disableFlashXIP(pObject, pSWD))
+    uint32_t errorCode = freeCompletedQueueEntries(pObject, pSWD);
+    if (errorCode != 0)
     {
-        logError("Failed to disable FLASH XIP.");
         return false;
     }
 
-    // UNDONE: These are probably specific to the FLASH used on the Pico and compatible devices.
-    const uint32_t FLASH_BLOCK_SIZE = 1u << 16;
-    const uint32_t FLASH_BLOCK_ERASE_CMD = 0xd8;
-    if (!callBootRomRoutine(pObject, pSWD, pObject->_flash_range_erase, addressStart - FLASH_START_ADDRESS, length, FLASH_BLOCK_SIZE, FLASH_BLOCK_ERASE_CMD))
+    // Add FLASH erase operation to device's queue.
+    LocalFlashingQueueEntry entry =
     {
-        logErrorF("Failed calling _flash_range_erase(0x%08lX, %lu, %lu, 0x%02X) in RP2040 Boot ROM.",
-                addressStart - FLASH_START_ADDRESS, length, FLASH_BLOCK_SIZE, FLASH_BLOCK_ERASE_CMD);
-        reenableFlashXIP(pObject, pSWD);
-        return false;
-    }
-
-    if (!reenableFlashXIP(pObject, pSWD))
+        .op = LOCAL_FLASHING_OP_ERASE,
+        .errorCode = 0,
+        .flashAddress = addressStart,
+        .ramAddress = LOCAL_FLASHING_RAM_UNUSED,
+        .size = length,
+        .alloc = 0
+    };
+    if (!addEntryToQueue(pObject, pSWD, &entry))
     {
-        logError("Failed to reenable FLASH XIP.");
         return false;
     }
 
@@ -382,68 +297,148 @@ static bool isAttemptingToFlashInvalidAddress(uint32_t address, uint32_t length)
     return false;
 }
 
-static bool disableFlashXIP(RP2040Object* pObject, SWD* pSWD)
+static uint32_t freeCompletedQueueEntries(RP2040Object* pObject, SWD* pSWD)
 {
-    if (!callBootRomRoutine(pObject, pSWD, pObject->_connect_internal_flash, 0, 0, 0, 0))
+    uint32_t errorCode = 0;
+    while (pObject->freeIndex != pObject->writeIndex)
     {
-        logError("Failed calling _connect_internal_flash() in RP2040 Boot ROM.");
-        return false;
-    }
-    if (!callBootRomRoutine(pObject, pSWD, pObject->_flash_exit_xip, 0, 0, 0, 0))
-    {
-        logError("Failed calling _flash_exit_xip() in RP2040 Boot ROM.");
-        return false;
-    }
+        LocalFlashingQueueEntry entry;
+        if (!readQueueEntry(pObject, pSWD, pObject->freeIndex, &entry))
+        {
+            logError("Failed call to readQueueEntry().");
+            return 0xFFFFFFFF;
+        }
+        if (entry.op != LOCAL_FLASHING_OP_COMPLETE)
+        {
+            // We have encountered the first entry that hasn't been completed yet so return.
+            break;
+        }
 
+        // Remember the first error code we encounter.
+        if (errorCode == 0 && entry.errorCode != 0)
+        {
+            errorCode = entry.errorCode;
+        }
+
+        // Free any RAM associated with this operation as it is no longer in use.
+        freeRamFromEntry(pObject, &entry);
+
+        // Mark the completed entry as free now that any associated RAM has been freed.
+        entry.op = LOCAL_FLASHING_OP_FREE;
+        if (!writeQueueEntry(pObject, pSWD, pObject->freeIndex, &entry))
+        {
+            logError("Failed call to writeQueueEntry().");
+            return 0xFFFFFFFF;
+        }
+        pObject->freeIndex = (pObject->freeIndex + 1) % pObject->localFlashingConfig.queueLength;
+    }
+    return errorCode;
+}
+
+static bool readQueueEntry(RP2040Object* pObject, SWD* pSWD, uint32_t index, LocalFlashingQueueEntry* pOut)
+{
+    uint32_t entryAddress = pObject->localFlashingConfig.queueAddress + index * sizeof(*pOut);
+    uint32_t bytesRead = pSWD->readTargetMemory(entryAddress, pOut, sizeof(*pOut), SWD::TRANSFER_32BIT);
+    if (bytesRead != sizeof(*pOut))
+    {
+        logErrorF("Failed to read LocalFlashingQueueEntry element %lu from target.", index);
+        return false;
+    }
     return true;
 }
 
-static bool reenableFlashXIP(RP2040Object* pObject, SWD* pSWD)
+static bool writeQueueEntry(RP2040Object* pObject, SWD* pSWD, uint32_t index, const LocalFlashingQueueEntry* pIn)
 {
-    if (!callBootRomRoutine(pObject, pSWD, pObject->_flash_flush_cache, 0, 0, 0, 0))
+    uint32_t entryAddress = pObject->localFlashingConfig.queueAddress + index * sizeof(*pIn);
+    uint32_t bytesWritten = pSWD->writeTargetMemory(entryAddress, pIn, sizeof(*pIn), SWD::TRANSFER_32BIT);
+    if (bytesWritten != sizeof(*pIn))
     {
-        logError("Failed calling _flash_flush_cache() in RP2040 Boot ROM.");
+        logErrorF("Failed to write LocalFlashingQueueEntry element %lu to target.", index);
         return false;
     }
-    if (!callBootRomRoutine(pObject, pSWD, pObject->_flash_enter_cmd_xip, 0, 0, 0, 0))
-    {
-        logError("Failed calling _flash_enter_cmd_xip() in RP2040 Boot ROM.");
-        return false;
-    }
-
     return true;
 }
 
-static bool callBootRomRoutine(RP2040Object* pObject, SWD* pSWD, uint32_t functionOffset, uint32_t param1, uint32_t param2, uint32_t param3, uint32_t param4)
+static void freeRamFromEntry(RP2040Object* pObject, LocalFlashingQueueEntry* pEntry)
 {
-    // Set the CPU registers required for calling the Boot ROM function.
-    CortexM_Registers registers;
-    memset(&registers, 0, sizeof(registers));
-    registers.R0 = param1;
-    registers.R1 = param2;
-    registers.R2 = param3;
-    registers.R3 = param4;
-    registers.R7 = functionOffset;
-    registers.SP = RAM_END_ADDRESS;
-    registers.LR = pObject->_debug_trampoline_end;
-    registers.PC = pObject->_debug_trampoline;
+    if (pEntry->alloc == 0)
+    {
+        return;
+    }
 
-    bool result = runCodeOnDevice(&registers, EXEC_RP2040_BOOT_ROM_FUNC_TIMEOUT_MS);
-    if (!result)
+    uint32_t endOffset = pEntry->ramAddress + pEntry->alloc - pObject->localFlashingConfig.ramAddress;
+    if (endOffset >= pObject->localFlashingConfig.ramLength)
+    {
+        endOffset = 0;
+    }
+    pObject->ramRead = endOffset;
+    pEntry->alloc = 0;
+}
+
+static bool addEntryToQueue(RP2040Object* pObject, SWD* pSWD, const LocalFlashingQueueEntry* pEntry)
+{
+    if (!waitForFreeQueueEntry(pObject, pSWD))
     {
         return false;
     }
-
-    // Should be stopped at the _debug_trampoline_end symbol.
-    // * Set thumb bit in PC to match function pointer address.
-    uint32_t pc = registers.PC | 1;
-    if (pc != pObject->_debug_trampoline_end)
+    if (!writeQueueEntry(pObject, pSWD, pObject->writeIndex, pEntry))
     {
-        logErrorF("RP2040 Boot ROM routine didn't stop as expected. Expected: 0x%08lX Actual: 0x%08lX.",
-                  pObject->_debug_trampoline_end, pc);
         return false;
     }
+    pObject->writeIndex = (pObject->writeIndex + 1) % pObject->localFlashingConfig.queueLength;
+    if (!writeWriteIndex(pObject, pSWD, pObject->writeIndex))
+    {
+        return false;
+    }
+    return true;
+}
 
+static bool waitForFreeQueueEntry(RP2040Object* pObject, SWD* pSWD)
+{
+    absolute_time_t endTime = make_timeout_time_ms(EXEC_RP2040_BOOT_ROM_FUNC_TIMEOUT_MS);
+    do
+    {
+        LocalFlashingQueueIndices indices;
+        if (!readQueueIndices(pObject, pSWD, &indices))
+        {
+            return false;
+        }
+        if (indices.writeIndex != pObject->writeIndex)
+        {
+            logErrorF("Expected writeIndex=%lu. Actual=%lu", pObject->writeIndex, indices.writeIndex);
+            return false;
+        }
+        uint32_t nextIndex = (pObject->writeIndex + 1) % pObject->localFlashingConfig.queueLength;
+        if (nextIndex != indices.readIndex)
+        {
+            // Queue isn't full so we have at least one free entry.
+            return true;
+        }
+    } while (absolute_time_diff_us(get_absolute_time(), endTime) > 0);
+
+    return false;
+}
+
+static bool readQueueIndices(RP2040Object* pObject, SWD* pSWD, LocalFlashingQueueIndices* pOut)
+{
+    uint32_t bytesRead = pSWD->readTargetMemory(pObject->indicesAddress, pOut, sizeof(*pOut), SWD::TRANSFER_32BIT);
+    if (bytesRead != sizeof(*pOut))
+    {
+        logError("Failed to read LocalFlashingQueueIndices from target.");
+        return false;
+    }
+    return true;
+}
+
+static bool writeWriteIndex(RP2040Object* pObject, SWD* pSWD, uint32_t writeIndex)
+{
+    uint32_t address = pObject->indicesAddress + offsetof(LocalFlashingQueueIndices, writeIndex);
+    uint32_t bytesWritten = pSWD->writeTargetMemory(address, &writeIndex, sizeof(writeIndex), SWD::TRANSFER_32BIT);
+    if (bytesWritten != sizeof(writeIndex))
+    {
+        logErrorF("Failed to write %lu to LocalFlashingQueueIndices.writeIndex to target.", writeIndex);
+        return false;
+    }
     return true;
 }
 
@@ -468,90 +463,116 @@ static bool rp2040FlashProgram(DeviceObject* pvObject, SWD* pSWD, uint32_t addre
         return false;
     }
 
-    // Need to align both the address and length to 256-bytes.
-    const uint32_t alignment = 256;
-    uint32_t alignedStartAddress = addressStart & ~(alignment-1);
-
-    // Copy bytes into 256-byte aligned buffer on the stack.
-    const uint32_t maxPacketBytes = PACKET_SIZE-4;
-    uint8_t buffer[maxPacketBytes + 2*alignment];
-
-    // Align start of FLASH write to word boundary by padding with existing bytes from beginning of first word in FLASH.
-    uint32_t bytesLeft = sizeof(buffer);
-    uint8_t* pDest = buffer;
-    int32_t size = alignStartOfWriteByCopyingExistingFlashData(pSWD, pDest, alignedStartAddress, addressStart);
-    if (size < 0)
+    uint32_t errorCode = freeCompletedQueueEntriesToFreeNeededRam(pObject, pSWD, bufferSize);
+    if (errorCode != 0)
     {
+        logErrorF("Failed call to freeCompletedQueueEntriesToFreeNeededRam(pSWD, %lu) with error %lu", bufferSize, errorCode);
         return false;
     }
-    bytesLeft -= size;
-    pDest += size;
+    uint32_t targetRamAddress = allocateTargetRam(pObject, bufferSize);
 
-    // Copy the bytes provided by GDB into aligned buffer.
-    size = copyBytes(pDest, bytesLeft, (const uint8_t*)pBuffer, bufferSize);
-    bytesLeft -= size;
-    pDest += size;
+    // Make sure that the buffer is 32-bit aligned.
+    const uint32_t alignment = sizeof(uint32_t);
+    uint32_t alignedBuffer[PACKET_SIZE / sizeof(uint32_t)];
+    uint32_t alignedSize = (bufferSize + alignment - 1) & ~(alignment - 1);
+    assert ( alignedSize <= sizeof(alignedBuffer) );
+    memcpy(alignedBuffer, pBuffer, bufferSize);
 
-    // Pad last few bytes with 0xFF to make the length of the write aligned as well.
-    uint32_t endAddress = addressStart + size;
-    uint32_t alignedEndAddress = (endAddress+alignment-1) & ~(alignment-1);
-    memset(pDest, 0xFF, alignedEndAddress-endAddress);
-    uint32_t byteCount = alignedEndAddress-alignedStartAddress;
-
-    // Copy buffer from debugger to beginning of target RAM.
-    uint32_t bytesCopied = pSWD->writeTargetMemory(RAM_START_ADDRESS, buffer, byteCount, SWD::TRANSFER_32BIT);
-    if (bytesCopied != byteCount)
+    // Copy buffer from debugger to target RAM.
+    uint32_t bytesCopied = pSWD->writeTargetMemory(targetRamAddress, alignedBuffer, alignedSize, SWD::TRANSFER_32BIT);
+    if (bytesCopied != alignedSize)
     {
-        logErrorF("Failed to copy %lu bytes to target RAM.", byteCount);
+        logErrorF("Failed to copy %lu bytes to target RAM @ 0x%08lX.", alignedSize, targetRamAddress);
         return false;
     }
 
-    // Disable FLASH XIP before writing to it.
-    if (!disableFlashXIP(pObject, pSWD))
+    // Add FLASH write operation to device's queue.
+    LocalFlashingQueueEntry entry =
     {
-        logError("Failed to disable FLASH XIP.");
+        .op = LOCAL_FLASHING_OP_WRITE,
+        .errorCode = 0,
+        .flashAddress = addressStart,
+        .ramAddress = targetRamAddress,
+        .size = bufferSize,
+        .alloc = alignedSize
+    };
+    if (!addEntryToQueue(pObject, pSWD, &entry))
+    {
         return false;
     }
 
-    // Copy bytes from device RAM to FLASH.
-    bool result = callBootRomRoutine(pObject, pSWD, pObject->_flash_range_program,
-                                     alignedStartAddress-FLASH_START_ADDRESS, RAM_START_ADDRESS, byteCount, 0);
-    if (!result)
-    {
-        logError("Failed calling _flash_range_program() in RP2040 Boot ROM.");
-    }
-
-    // Need to re-enable for future alignment padding reads.
-    if (!reenableFlashXIP(pObject, pSWD))
-    {
-        logError("Failed to re-enable FLASH XIP.");
-        return false;
-    }
-
-    return result;
+    return true;
 }
 
-static int32_t alignStartOfWriteByCopyingExistingFlashData(SWD* pSWD, uint8_t* pDest, uint32_t alignedStart, uint32_t unalignedStart)
+static uint32_t freeCompletedQueueEntriesToFreeNeededRam(RP2040Object* pObject, SWD* pSWD, uint32_t byteCount)
 {
-    uint32_t bytesToCopy = unalignedStart - alignedStart;
-    uint32_t bytesRead = pSWD->readTargetMemory(alignedStart, pDest, bytesToCopy, SWD::TRANSFER_8BIT);
-    if (bytesRead != bytesToCopy)
+    if (byteCount > pObject->localFlashingConfig.ramLength)
     {
-        logErrorF("Failed to read unaligned %lu bytes at 0x%08lX.", bytesToCopy, alignedStart);
-        return -1;
+        return 0xFFFFFFFF;
+    }
+    while (!canAllocateTargetRam(pObject, byteCount))
+    {
+        uint32_t result = freeCompletedQueueEntries(pObject, pSWD);
+        if (result != 0)
+        {
+            return result;
+        }
     }
 
-    return bytesToCopy;
+    return 0;
 }
 
-static uint32_t copyBytes(uint8_t* pDest, size_t destSize, const uint8_t* pSrc, uint32_t srcSize)
+static bool canAllocateTargetRam(RP2040Object* pObject, uint32_t bytesNeeded)
 {
-    uint8_t* pStart = pDest;
-    while (destSize-- > 0 && srcSize-- > 0)
+    // This check is a little more complicated than a usual circular buffer since the allocation needs to be contiguous,
+    // so it can't split bytes across the end of the buffer.
+    if (pObject->ramRead <= pObject->ramWrite)
     {
-        *pDest++ = *pSrc++;
+        uint32_t endSpace = pObject->localFlashingConfig.ramLength - pObject->ramWrite;
+        uint32_t startSpace = pObject->ramRead;
+        return (bytesNeeded <= endSpace || bytesNeeded <= startSpace);
     }
-    return pDest - pStart;
+    else
+    {
+        uint32_t freeSpace = pObject->ramRead - pObject->ramWrite;
+        return (bytesNeeded <= freeSpace);
+    }
+}
+
+static uint32_t allocateTargetRam(RP2040Object* pObject, uint32_t byteCount)
+{
+    if (pObject->ramRead <= pObject->ramWrite)
+    {
+        // Read pointer is still lagging behind write pointer.
+        uint32_t endSpace = pObject->localFlashingConfig.ramLength - pObject->ramWrite;
+        if (byteCount <= endSpace)
+        {
+            // Fits in free space at end of target RAM.
+            uint32_t alloc = pObject->ramWrite;
+            pObject->ramWrite = pObject->ramWrite + byteCount;
+            if (pObject->ramWrite >= pObject->localFlashingConfig.ramLength)
+            {
+                pObject->ramWrite = 0;
+            }
+            return pObject->localFlashingConfig.ramAddress + alloc;
+        }
+        else
+        {
+            // Fits in free space at the very beginning of target RAM.
+            uint32_t alloc = 0;
+            pObject->ramWrite = byteCount;
+            assert ( pObject->ramWrite < pObject->ramRead );
+            return pObject->localFlashingConfig.ramAddress + alloc;
+        }
+    }
+    else
+    {
+        // Write pointer has wrapped around and is now behind read pointer.
+        uint32_t alloc = pObject->ramWrite;
+        pObject->ramWrite = pObject->ramWrite + byteCount;
+        assert ( pObject->ramWrite < pObject->ramRead );
+        return pObject->localFlashingConfig.ramAddress + alloc;
+    }
 }
 
 
@@ -564,7 +585,42 @@ static uint32_t copyBytes(uint8_t* pDest, size_t destSize, const uint8_t* pSrc, 
 // Returns true if successful and false otherwise.
 static bool rp2040FlashEnd(DeviceObject* pvObject, SWD* pSWD)
 {
-    assert ( pvObject && pSWD );
+    RP2040Object* pObject = (RP2040Object*)pvObject;
+    assert ( pObject && pSWD );
+
+    uint32_t errorCode = freeCompletedQueueEntries(pObject, pSWD);
+    if (errorCode != 0)
+    {
+        logErrorF("Failed call to freeCompletedQueueEntries() with error %lu", errorCode);
+        return false;
+    }
+
+    // Ask target to trigger breakpoint when it is done processing the queue.
+    LocalFlashingQueueEntry entry =
+    {
+        .op = LOCAL_FLASHING_OP_BREAKPOINT,
+        .errorCode = 0,
+        .flashAddress = 0,
+        .ramAddress = LOCAL_FLASHING_RAM_UNUSED,
+        .size = 0,
+        .alloc = 0
+    };
+    if (!addEntryToQueue(pObject, pSWD, &entry))
+    {
+        return false;
+    }
+
+    // Wait for breakpoint to trigger.
+    CortexM_Registers registers;
+    if (!waitForCodeToHalt(&registers, EXEC_RP2040_BOOT_ROM_FUNC_TIMEOUT_MS))
+    {
+        logError("Failed waiting for target to finish FLASHing.");
+        return false;
+    }
+
+    // UNDONE: Just doing for assert.
+    freeCompletedQueueEntries(pObject, pSWD);
+    assert ( pObject->ramRead == pObject->ramWrite && pObject->freeIndex == pObject->writeIndex );
 
     return true;
 }

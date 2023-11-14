@@ -3690,18 +3690,18 @@ static uint32_t handleFlashDoneCommand(Buffer* pBuffer)
 
 
 // *********************************************************************************************************************
-// Device specific code can call runCodeOnDevice() to have desired code executed on the target device.
+// Device specific code can call these routines to have desired code executed on the target device.
 // *********************************************************************************************************************
 static bool disableSingleStepAndInterrupts();
 static bool reenableInterrupts();
-bool runCodeOnDevice(CortexM_Registers* pRegistersInOut, uint32_t timeout_ms)
+bool startCodeOnDevice(const CortexM_Registers* pRegistersIn)
 {
     // UNDONE: Should take a bitmask of which register to write and read as it does all 16 now and this takes time.
     // Set the CPU registers required for executing code on device.
     bool result = true;
-    for (uint32_t i = 0 ; i < count_of(pRegistersInOut->registers) ; i++)
+    for (uint32_t i = 0 ; i < count_of(pRegistersIn->registers) ; i++)
     {
-        result &= writeCpuRegister(i, pRegistersInOut->registers[i]);
+        result &= writeCpuRegister(i, pRegistersIn->registers[i]);
     }
     if (!result)
     {
@@ -3720,34 +3720,6 @@ bool runCodeOnDevice(CortexM_Registers* pRegistersInOut, uint32_t timeout_ms)
     if (!requestCpuToResume())
     {
         logError("Failed to start executing debugger code on target device.");
-        return false;
-    }
-
-    // Wait for executing code to complete.
-    absolute_time_t endTime = make_timeout_time_ms(timeout_ms);
-    uint32_t DHCSR_Val = 0;
-    do
-    {
-        if (!readDHCSR(&DHCSR_Val))
-        {
-            break;
-        }
-    } while (!isCpuHalted(DHCSR_Val) && absolute_time_diff_us(get_absolute_time(), endTime) > 0);
-    reenableInterrupts();
-    if (!isCpuHalted(DHCSR_Val))
-    {
-        logError("Timeout out waiting for code execution on device to complete.");
-        return false;
-    }
-
-    // Retrieve the register contents after the code has completed execution so that the caller can see their contents.
-    for (uint32_t i = 0 ; i < count_of(pRegistersInOut->registers) ; i++)
-    {
-        result &= readCpuRegister(i, &pRegistersInOut->registers[i]);
-    }
-    if (!result)
-    {
-        logError("Failed to fetch registers after executing code on device.");
         return false;
     }
 
@@ -3781,6 +3753,55 @@ static bool reenableInterrupts()
 
     DHCSR_Val &= ~DHCSR_C_MASKINTS_Bit;
     if (!writeDHCSR(DHCSR_Val))
+    {
+        return false;
+    }
+    return true;
+}
+
+
+bool waitForCodeToHalt(CortexM_Registers* pRegistersOut, uint32_t timeout_ms)
+{
+    // Wait for executing code to complete.
+    absolute_time_t endTime = make_timeout_time_ms(timeout_ms);
+    uint32_t DHCSR_Val = 0;
+    do
+    {
+        if (!readDHCSR(&DHCSR_Val))
+        {
+            break;
+        }
+    } while (!isCpuHalted(DHCSR_Val) && absolute_time_diff_us(get_absolute_time(), endTime) > 0);
+    reenableInterrupts();
+    if (!isCpuHalted(DHCSR_Val))
+    {
+        logError("Timeout out waiting for code execution on device to complete.");
+        return false;
+    }
+
+    // Retrieve the register contents after the code has completed execution so that the caller can see their contents.
+    bool result = true;
+    for (uint32_t i = 0 ; i < count_of(pRegistersOut->registers) ; i++)
+    {
+        result &= readCpuRegister(i, &pRegistersOut->registers[i]);
+    }
+    if (!result)
+    {
+        logError("Failed to fetch registers after executing code on device.");
+        return false;
+    }
+
+    return true;
+}
+
+
+bool runCodeOnDevice(CortexM_Registers* pRegistersInOut, uint32_t timeout_ms)
+{
+    if (!startCodeOnDevice(pRegistersInOut))
+    {
+        return false;
+    }
+    if (!waitForCodeToHalt(pRegistersInOut, timeout_ms))
     {
         return false;
     }

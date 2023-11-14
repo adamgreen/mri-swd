@@ -116,8 +116,29 @@ pico_add_extra_outputs(mri-swd)
 pico_enable_stdio_usb(mri-swd 1)
 pico_enable_stdio_uart(mri-swd 0)
 
+# Show the size of the binary.
+pico_find_compiler(PICO_OBJSIZE ${PICO_GCC_TRIPLE}-size)
 add_custom_target(size_elf ALL
-        COMMAND arm-none-eabi-size $<TARGET_FILE:${PROJECT_NAME}>
+        COMMAND ${PICO_OBJSIZE} $<TARGET_FILE:${PROJECT_NAME}>
         COMMENT "Sizing  ${PROJECT_NAME}"
         VERBATIM
 )
+
+# bin2h tool required to build local flashing binary header files.
+add_custom_target(bin2h_target DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/bin2h)
+add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/bin2h
+        DEPENDS ${CMAKE_CURRENT_LIST_DIR}/bin2h/main.c ${CMAKE_CURRENT_LIST_DIR}/bin2h/common.c ${CMAKE_CURRENT_LIST_DIR}/bin2h/try_catch.c
+        COMMAND CC ${CMAKE_CURRENT_LIST_DIR}/bin2h/main.c ${CMAKE_CURRENT_LIST_DIR}/bin2h/common.c ${CMAKE_CURRENT_LIST_DIR}/bin2h/try_catch.c -o ${CMAKE_CURRENT_BINARY_DIR}/bin2h
+        VERBATIM)
+
+# Supported devices
+# RP2040
+add_custom_target(rp2040-LocalFlashing DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/rp2040-LocalFlashing.h)
+add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/rp2040-LocalFlashing.h
+        DEPENDS ${CMAKE_CURRENT_LIST_DIR}/devices/rp2040-LocalFlashing.c
+        COMMAND ${PICO_COMPILER_CC} -mcpu=cortex-m0plus -mthumb -O3 -g3  -std=gnu11 -Wall -Wextra -Werror -Wno-unused-parameter -fno-jump-tables -fno-builtin -ffunction-sections -fdata-sections -nostartfiles -Wl,-Map=${CMAKE_CURRENT_BINARY_DIR}/rp2040-LocalFlashing.map -Wl,--script=${CMAKE_CURRENT_LIST_DIR}/devices/rp2040-LocalFlashing.ld -Wl,-z,max-page-size=4096 -Wl,--gc-sections ${CMAKE_CURRENT_LIST_DIR}/devices/rp2040-LocalFlashing.c -o ${CMAKE_CURRENT_BINARY_DIR}/rp2040-LocalFlashing.elf
+        COMMAND ${PICO_OBJCOPY} -Obinary ${CMAKE_CURRENT_BINARY_DIR}/rp2040-LocalFlashing.elf ${CMAKE_CURRENT_BINARY_DIR}/rp2040-LocalFlashing.bin
+        COMMAND ${CMAKE_CURRENT_BINARY_DIR}/bin2h ${CMAKE_CURRENT_BINARY_DIR}/rp2040-LocalFlashing.bin ${CMAKE_CURRENT_BINARY_DIR}/rp2040-LocalFlashing.h g_rp2040_LocalFlashing
+        VERBATIM)
+add_dependencies(rp2040-LocalFlashing bin2h_target)
+add_dependencies(mri-swd rp2040-LocalFlashing)
