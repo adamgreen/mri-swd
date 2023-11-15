@@ -2,6 +2,7 @@
 ## Monitor for Remote Inspection - SWD Edition
 `mri-swd` is a [Pico W](https://www.adafruit.com/product/5526) based debug probe for debugging Cortex-M based microcontrollers with the [GNU debugger (GDB)](https://www.sourceware.org/gdb/). GDB can connect to the `mri-swd` debug probe over WiFi and the debug probe then connects to the debug target using SWD.
 
+![mri-swd PCB mounted on 3π+ 2040 bot](images/20231114-PCB-MountedOn3pi+2040.jpg)
 
 ## Table of Contents
 * [Important Notes](#important-notes): Important goals, non-goals, and limitations of this `mri-swd` project.
@@ -195,7 +196,8 @@ In the root folder can be found  a [config.h](config.h) which can be used to cus
 ## Current Hardware Progress
 ![Image of version 1.0 of the Schematic](images/20231030-PCBv1.0-Schematic.png)</br>
 ![Image of version 1.0 of PCB Front](images/20231030-PCBv1.0-Front.png)
-![Image of version 1.0 of PCB Back](images/20231030-PCBv1.0-Back.png)
+![Image of version 1.0 of PCB Back](images/20231030-PCBv1.0-Back.png)</br>
+![Image of version 1.0 of PCB Front once Soldered](images/20231114-PCBv1.0-Soldered.jpg)
 
 
 
