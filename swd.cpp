@@ -1123,7 +1123,12 @@ uint32_t SWD::calculateTransferCount(uint32_t startAddress, uint32_t expectedAdd
     {
         tar = expectedAddress;
     }
-    assert ( tar >= startAddress );
+
+    if (tar < startAddress)
+    {
+        logErrorF("Failed to read appropriate value from TAR. 0x%08X is less than 0x%08X", tar, startAddress);
+        return 0;
+    }
     return tar - startAddress;
 }
 
