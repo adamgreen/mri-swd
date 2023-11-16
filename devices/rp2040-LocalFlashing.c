@@ -31,6 +31,7 @@ static const uint32_t RAM_START_ADDRESS = 0x20000000;
 
 // Function prototypes.
 static void flashingRoutine(void);
+static void initCache(void);
 static void findRequiredBootRomRoutines(void);
 static void checkRP2040BootRomMagicValue(void);
 static void rp2040FlashErase(uint32_t addressStart, uint32_t length);
@@ -38,15 +39,17 @@ static void disableFlashXIP(void);
 static void reenableFlashXIP(void);
 static void rp2040FlashProgram(uint32_t addressStart, const void* pBuffer, size_t bufferSize);
 static uint32_t alignStartOfWriteByCopyingExistingFlashData(uint8_t* pDest, uint32_t alignedStart, uint32_t unalignedStart);
+static int isAddressInCache(uint32_t address);
 static uint32_t copyBytes(uint8_t* pDest, size_t destSize, const uint8_t* pSrc, uint32_t srcSize);
 static void memset(void* b, int c, size_t len);
 static void memcpy(void* dst, const void* src, size_t n);
+static void cacheBytes(uint32_t startAddress, const uint8_t* pBuffer, uint32_t size);
 
 
 // Data shared between mri-swd debugger and this code running on the target when loading new code into FLASH.
-LocalFlashingQueueEntry g_queue[32];
-uint32_t                g_ram[232*1024 / sizeof(uint32_t)];
-LocalFlashingConfig     g_config =
+static LocalFlashingQueueEntry g_queue[32];
+static uint32_t                g_ram[232*1024 / sizeof(uint32_t)];
+LocalFlashingConfig            g_config =
 {
     .queueIndices = { .writeIndex = 0, .readIndex = 0 },
     .queueAddress = (uint32_t)g_queue,
@@ -57,6 +60,13 @@ LocalFlashingConfig     g_config =
     .routineAddress = (uint32_t)flashingRoutine,
     .loadAddress = RAM_START_ADDRESS
 };
+
+// Cache last 256 bytes written to FLASH to be used for alignment on next write if needed.
+static uint8_t  g_cache[256];
+static uint32_t g_cacheStartAddress;
+static uint32_t g_cacheEndAddress;
+static int      g_isFlashEnabled;
+
 
 // Pointers to Boot ROM functions.
 typedef void (*rom_connect_internal_flash_fn)(void);
@@ -76,7 +86,9 @@ rom_flash_enter_cmd_xip_fn      g_flash_enter_cmd_xip;
 
 static void flashingRoutine(void)
 {
+    initCache();
     findRequiredBootRomRoutines();
+    g_isFlashEnabled = 1;
 
     while (1)
     {
@@ -108,6 +120,7 @@ static void flashingRoutine(void)
                 // Shouldn't get FREE or COMPLETED opcodes so they are treated the same as BREAKPOINT so that mri-swd
                 // detects that the target has halted and times out.
             case LOCAL_FLASHING_OP_BREAKPOINT:
+                reenableFlashXIP();
                 pEntry->op = LOCAL_FLASHING_OP_COMPLETE;
                 g_config.queueIndices.readIndex = readIndex;
                 __asm volatile ("bkpt #0");
@@ -117,6 +130,12 @@ static void flashingRoutine(void)
         pEntry->op = LOCAL_FLASHING_OP_COMPLETE;
         g_config.queueIndices.readIndex = readIndex;
     }
+}
+
+static void initCache(void)
+{
+    g_cacheStartAddress = 0;
+    g_cacheEndAddress = 0;
 }
 
 static void findRequiredBootRomRoutines(void)
@@ -198,19 +217,28 @@ static void rp2040FlashErase(uint32_t addressStart, uint32_t length)
     const uint32_t FLASH_BLOCK_ERASE_CMD = 0xd8;
     disableFlashXIP();
     g_flash_range_erase(addressStart - FLASH_START_ADDRESS, length, FLASH_BLOCK_SIZE, FLASH_BLOCK_ERASE_CMD);
-    reenableFlashXIP();
 }
 
 static void disableFlashXIP(void)
 {
+    if (!g_isFlashEnabled)
+    {
+        return;
+    }
     g_connect_internal_flash();
     g_flash_exit_xip();
+    g_isFlashEnabled = 0;
 }
 
 static void reenableFlashXIP(void)
 {
+    if (g_isFlashEnabled)
+    {
+        return;
+    }
     g_flash_flush_cache();
     g_flash_enter_cmd_xip();
+    g_isFlashEnabled = 1;
 }
 
 static void rp2040FlashProgram(uint32_t addressStart, const void* pBuffer, size_t bufferSize)
@@ -241,16 +269,38 @@ static void rp2040FlashProgram(uint32_t addressStart, const void* pBuffer, size_
     uint32_t byteCount = alignedEndAddress-alignedStartAddress;
 
     // Copy bytes from device RAM to FLASH.
+    cacheBytes(alignedStartAddress, buffer, byteCount);
     disableFlashXIP();
     g_flash_range_program(alignedStartAddress-FLASH_START_ADDRESS, buffer, byteCount);
-    reenableFlashXIP();
 }
 
 static uint32_t alignStartOfWriteByCopyingExistingFlashData(uint8_t* pDest, uint32_t alignedStart, uint32_t unalignedStart)
 {
     uint32_t bytesToCopy = unalignedStart - alignedStart;
-    memcpy(pDest, (void*)alignedStart, bytesToCopy);
+    if (bytesToCopy == 0)
+    {
+        // It is already aligned so just return.
+        return 0;
+    }
+    else if (isAddressInCache(alignedStart) && isAddressInCache(unalignedStart-1))
+    {
+        // The required data was written in the last write and cached away.
+        uint32_t offsetInCache = alignedStart - g_cacheStartAddress;
+        memcpy(pDest, &g_cache[offsetInCache], bytesToCopy);
+    }
+    else
+    {
+        // Need to re-enable FLASH and read the required data from it.
+        reenableFlashXIP();
+        memcpy(pDest, (void*)alignedStart, bytesToCopy);
+    }
     return bytesToCopy;
+}
+
+static int isAddressInCache(uint32_t address)
+{
+    return address >= g_cacheStartAddress && address < g_cacheEndAddress;
+
 }
 
 static uint32_t copyBytes(uint8_t* pDest, size_t destSize, const uint8_t* pSrc, uint32_t srcSize)
@@ -279,5 +329,23 @@ static void memcpy(void* dst, const void* src, size_t n)
     while (n-- > 0)
     {
         *pDest++ = *pSrc++;
+    }
+}
+
+static void cacheBytes(uint32_t startAddress, const uint8_t* pBuffer, uint32_t size)
+{
+    uint32_t endAddress = startAddress + size;
+    if (size < sizeof(g_cache))
+    {
+        memcpy(g_cache, pBuffer, size);
+        g_cacheStartAddress = startAddress;
+        g_cacheEndAddress = endAddress;
+    }
+    else
+    {
+        startAddress = endAddress - sizeof(g_cache);
+        memcpy(g_cache, pBuffer + size - sizeof(g_cache), sizeof(g_cache));
+        g_cacheStartAddress = startAddress;
+        g_cacheEndAddress = endAddress;
     }
 }
