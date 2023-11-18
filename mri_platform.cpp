@@ -22,6 +22,7 @@
 #include "swd.h"
 #include "mri_platform.h"
 #include "config.h"
+#include "version.h"
 #include "devices/devices.h"
 
 // MRI C headers
@@ -36,6 +37,7 @@ extern "C"
     #include <core/memory.h>
     #include <core/cmd_common.h>
     #include <core/gdb_console.h>
+    #include <core/version.h>
     #include <semihost/newlib/newlib_stubs.h>
 }
 
@@ -3333,6 +3335,7 @@ static bool dispatchMonitorCommandToDevice(Buffer* pBuffer);
 static uint32_t handleMonitorDetachCommand();
 static uint32_t handleMonitorResetCommand(Buffer* pBuffer);
 static void enableResetVectorCatch();
+static uint32_t handleMonitorVersionCommand(Buffer* pBuffer);
 static uint32_t handleMonitorHelpCommand();
 static uint32_t handleFlashEraseCommand(Buffer* pBuffer);
 static void sendOkResponseWithNewPacketBuffer();
@@ -3388,6 +3391,7 @@ static uint32_t handleMonitorCommand(Buffer* pBuffer)
     const char detach[] = "detach";
     const char reset[] = "reset";
     const char help[] = "help";
+    const char version[] = "version";
 
     if (!Buffer_IsNextCharEqualTo(pBuffer, ','))
     {
@@ -3421,6 +3425,10 @@ static uint32_t handleMonitorCommand(Buffer* pBuffer)
     else if (Buffer_MatchesHexString(pBuffer, reset, sizeof(reset)-1))
     {
         return handleMonitorResetCommand(pBuffer);
+    }
+    else if (Buffer_MatchesHexString(pBuffer, version, sizeof(version)-1))
+    {
+        return handleMonitorVersionCommand(pBuffer);
     }
     else
     {
@@ -3532,12 +3540,22 @@ static void enableResetVectorCatch()
     }
 }
 
+static uint32_t handleMonitorVersionCommand(Buffer* pBuffer)
+{
+    WriteStringToGdbConsole("|mri-swd| Monitor for Remote Inspection - SWD Edition\r\n");
+    WriteStringToGdbConsole(" mri-swd  Version: " MRI_SWD_VERSION_STRING " [" MRI_SWD_BRANCH "]\r\n");
+    WriteStringToGdbConsole(" mri-core Version: " MRI_VERSION_STRING "\r\n");
+    PrepareStringResponse("OK");
+    return HANDLER_RETURN_HANDLED;
+}
+
 static uint32_t handleMonitorHelpCommand()
 {
     WriteStringToGdbConsole("Supported monitor commands:\r\n");
     WriteStringToGdbConsole("detach\r\n");
     WriteStringToGdbConsole("reset [halt]\r\n");
     WriteStringToGdbConsole("showfault\r\n");
+    WriteStringToGdbConsole("version\r\n");
     PrepareStringResponse("OK");
     return HANDLER_RETURN_HANDLED;
 }
