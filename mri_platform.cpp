@@ -519,6 +519,16 @@ static void innerDebuggerLoop()
             continue;
         }
 
+        // Handle setting up halting debug mode if needed.
+        if (g_doesHaltDebuggingNeedToBeEnabled)
+        {
+            uint32_t DHCSR_Val = 0;
+            if (readDHCSRWithRetry(&DHCSR_Val, READ_DHCSR_TIMEOUT_MS))
+            {
+                enableHaltDebugging(DHCSR_Val);
+                g_doesHaltDebuggingNeedToBeEnabled = false;
+            }
+        }
         // See if the target should be halted because of attach or because GDB has sent a command via TCP/IP.
         if (g_haltOnAttach || (g_gdbSocket.isGdbConnected() && !g_gdbSocket.m_tcpToMriQueue.isEmpty()))
         {
@@ -535,11 +545,6 @@ static void innerDebuggerLoop()
             logInfo("SWD target is no longer responding. Will attempt to reattach.");
             g_isSwdConnected = false;
             continue;
-        }
-        if (g_doesHaltDebuggingNeedToBeEnabled)
-        {
-            g_doesHaltDebuggingNeedToBeEnabled = false;
-            enableHaltDebugging(DHCSR_Val);
         }
         if (isDeviceResetting(DHCSR_Val))
         {

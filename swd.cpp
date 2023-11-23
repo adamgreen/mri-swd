@@ -1252,8 +1252,7 @@ bool SWD::write(SwdApOrDp APnDP, uint32_t address, uint32_t data)
 
 bool SWD::handleTransferResponse(uint32_t ack, bool ignoreProtocolError, bool* pRetry)
 {
-    // UNDONE: Why is ACK_PARITY not included in this list?
-    if (ack != ACK_OK && ack != ACK_WAIT && ack != ACK_FAIL)
+    if (ack != ACK_OK && ack != ACK_WAIT && ack != ACK_FAIL && ack != ACK_PARITY)
     {
         // Any unrecognized response will be treated as a protocol error.
         ack = ACK_PROT_ERROR;
