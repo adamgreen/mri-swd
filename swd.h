@@ -16,13 +16,17 @@
 #ifndef SWD_H_
 #define SWD_H_
 
+#include <string.h>
 #include <pico/stdlib.h>
 #include <hardware/pio.h>
 #include <hardware/dma.h>
 
+class SwdTarget;
 
 class SWD
 {
+    friend SwdTarget;
+
     public:
         // Enumeration of DPv2 SWD targets supported by this debugger.
         // Target items followed by '*' can be detected by searchForKnownSwdTarget().
@@ -32,7 +36,10 @@ class SWD
             RP2040_CORE0 = 0x01002927,  // *
             RP2040_CORE1 = 0x11002927,
             RP2040_RESCUE = 0xf1002927,
-            UNKNOWN = 0
+            // No known target is currently selected on the SWD bus.
+            UNKNOWN = 0,
+            // A DPv1 target which doesn't require a DPv2 TARGETSEL value is selected on the SWD bus.
+            DPv1 = 0xFFFFFFFF
         };
 
         // Enumeration of Cortex-M CPU types supported by this debugger.
@@ -136,13 +143,7 @@ class SWD
         //  Enabling debug and system power for the currently select DP.
         //  Enabling overrun detection which is required for proper functioning of this SWD driver.
         //  Finding the MEM-AP which is the debug entry.
-        bool initTargetForDebugging();
-
-        // Method to power down the CPU's debug subsystem.
-        bool powerDownDebugPort()
-        {
-            return controlPower(true, false);
-        }
+        bool initTargetForDebugging(SwdTarget& target);
 
         // Method which returns the currently connected DPv2 target, if any.
         //
@@ -152,26 +153,6 @@ class SWD
             return m_target;
         }
 
-        // Method which returns the Cortex-M CPU type of the currently connected device.
-        //
-        // Returns one of the CpuTypes elements or CpuTypes::CPU_UNKNOWN if type can't be determined.
-        CpuTypes getCpuType()
-        {
-            return m_cpu;
-        }
-
-        // Method which returns pointers to 12 element array containing device's component & peripheral ID words.
-        const uint32_t* getComponentPeripheralIDs()
-        {
-            return &m_peripheralComponentIDs[0];
-        }
-
-        // Method which returns the 32-bit value of the Cortex-M CPUID register.
-        uint32_t getCpuID()
-        {
-            return m_cpuID;
-        }
-
         // Should byte, half-word, or word sized target accesses be used by read/writeTargetMemory()?
         enum TransferSize
         {
@@ -179,26 +160,6 @@ class SWD
             TRANSFER_16BIT = 16,
             TRANSFER_32BIT = 32
         };
-
-        // Method to issue a target memory read.
-        //
-        // address - the 32-bit target address from which to start the read.
-        // pvBuffer - Pointer to the data buffer to be filled in with the data read from the target.
-        // bufferSize - The size of the read to be made, in bytes.
-        // readSize - Is the size of each individual target read: 8, 16, or 32 bits.
-        //
-        // Returns the number of bytes successfully read. 0 if none were read successfully.
-        uint32_t readTargetMemory(uint32_t address, void* pvBuffer, uint32_t bufferSize, TransferSize readSize);
-
-        // Method to issue a target memory write.
-        //
-        // address - the 32-bit target address to which the write should be made.
-        // pvBuffer - Pointer to the data buffer to be written to the target.
-        // bufferSize - The size of the write to be made, in bytes.
-        // writeSize - Is the size of each individual target write: 8, 16, or 32 bits.
-        //
-        // Returns the number of bytes successfully written. 0 if none were written successfully.
-        uint32_t writeTargetMemory(uint32_t address, const void* pvBuffer, uint32_t bufferSize, TransferSize writeSize);
 
         // Method to find first DPv2 DP targets attached to SWD bus.
         // Can keep calling findNextSwdTarget() until it returns false to enumerate all of the connected targets.
@@ -223,93 +184,6 @@ class SWD
         // Return false otherwise and *pTarget isn't valid.
         bool findNextSwdTarget(DPv2Targets* pTarget);
 
-        // These bits are placed in the DP_* and AP_* register definitions to indicate required setting in DPBANKSEL or
-        // APBANKSEL for accesses to this register.
-        static const uint32_t BANKSEL_0 = 0x0 << 4;
-        static const uint32_t BANKSEL_1 = 0x1 << 4;
-        static const uint32_t BANKSEL_2 = 0x2 << 4;
-        static const uint32_t BANKSEL_3 = 0x3 << 4;
-        static const uint32_t BANKSEL_4 = 0x4 << 4;
-        static const uint32_t BANKSEL_F = 0xF << 4;
-
-        // These bits are placed in the DP_* and AP_* register definitions to indicate whether they are RO, WO, or RW.
-        static const uint32_t AP_DP_RO = 1 << 31;
-        static const uint32_t AP_DP_WO = 1 << 30;
-        static const uint32_t AP_DP_RW = AP_DP_RO | AP_DP_WO;
-
-        // SWD DP Register Addresses which can be passed into readDP()/writeDP methods.
-        static const uint32_t DP_DPIDR =     AP_DP_RO | 0x0;  // Read-only
-        static const uint32_t DP_ABORT =     AP_DP_WO | 0x0;  // Write-only
-        static const uint32_t DP_CTRL_STAT = AP_DP_RW | BANKSEL_0 | 0x4;    // Read/Write
-        static const uint32_t DP_DLCR =      AP_DP_RW | BANKSEL_1 | 0x4;    // Read/Write
-        static const uint32_t DP_TARGETID =  AP_DP_RO | BANKSEL_2 | 0x4;    // Read-only
-        static const uint32_t DP_DLPIDR =    AP_DP_RO | BANKSEL_3 | 0x4;    // Read-only
-        static const uint32_t DP_EVENTSTAT = AP_DP_RO | BANKSEL_4 | 0x4;    // Read-only
-        static const uint32_t DP_RESEND =    AP_DP_RO | 0x8;  // Read-only
-        static const uint32_t DP_SELECT =    AP_DP_WO | 0x8;  // Write-only
-        static const uint32_t DP_RDBUFF =    AP_DP_RO | 0xC;  // Read-only
-        static const uint32_t DP_TARGETSEL = AP_DP_WO | 0xC;  // Write-only
-
-        // SWD AP Register Addresses which can be passed into readAP()/writeAP method.
-        static const uint32_t AP_CSW =  AP_DP_RW | BANKSEL_0 | 0x0;
-        static const uint32_t AP_TAR =  AP_DP_RW | BANKSEL_0 | 0x4;
-        static const uint32_t AP_DRW =  AP_DP_RW | BANKSEL_0 | 0xC;
-        static const uint32_t AP_BD0 =  AP_DP_RW | BANKSEL_1 | 0x0;
-        static const uint32_t AP_BD1 =  AP_DP_RW | BANKSEL_1 | 0x4;
-        static const uint32_t AP_BD2 =  AP_DP_RW | BANKSEL_1 | 0x8;
-        static const uint32_t AP_BD3 =  AP_DP_RW | BANKSEL_1 | 0xC;
-        static const uint32_t AP_CFG =  AP_DP_RO | BANKSEL_F | 0x4;
-        static const uint32_t AP_BASE = AP_DP_RO | BANKSEL_F | 0x8;
-        static const uint32_t AP_IDR =  AP_DP_RO | BANKSEL_F | 0xC;
-
-        // Read a SWD DP register.
-        //
-        // address - Address of one of the DP_* registers listed above to be read into *pData.
-        // pData - Pointer to 32-bit buffer to be populated by this read.
-        //
-        // Returns true if SWD read was successful.
-        // Returns false otherwise.
-        bool readDP(uint32_t address, uint32_t* pData)
-        {
-            return read(DP, address, pData);
-        }
-
-        // Write a SWD DP register.
-        //
-        // address - Address of one of the DP_* registers listed above to be written.
-        // data - Data to be written into DP register at address.
-        //
-        // Returns true if SWD write was successful.
-        // Returns false otherwise.
-        bool writeDP(uint32_t address, uint32_t data)
-        {
-            return write(DP, address, data);
-        }
-
-        // Read a SWD AP register.
-        //
-        // address - Address of one of the AP_* registers listed above to be read into *pData.
-        // pData - Pointer to 32-bit buffer to be populated by this read.
-        //
-        // Returns true if SWD read was successful.
-        // Returns false otherwise.
-        bool readAP(uint32_t address, uint32_t* pData)
-        {
-            return read(AP, address, pData);
-        }
-
-        // Write a SWD AP register.
-        //
-        // address - Address of one of the AP_* registers listed above to be written.
-        // data - Data to be written into AP register at address.
-        //
-        // Returns true if SWD write was successful.
-        // Returns false otherwise.
-        bool writeAP(uint32_t address, uint32_t data)
-        {
-            return write(AP, address, data);
-        }
-
         // Error codes that can be returned by getLastReadWriteError() to give more information about a failed
         // read or write call.
         enum TransferError
@@ -322,19 +196,6 @@ class SWD
             SWD_FAULT_ERROR = 5,
             SWD_FAULT_OVERRUN = 6
         };
-
-        // Fetch the cause of the last read or write call which has failed.
-        TransferError getLastReadWriteError()
-        {
-            return m_lastReadWriteError;
-        }
-
-        // Method to select the AP.
-        //
-        // ap - The 8-bit AP id to be selected for future communications.
-        // Returns true if the AP id was successfully selected.
-        // Returns false otherwise.
-        bool selectAP(uint8_t ap);
 
         // Method to send SWD line reset followed by DPIDR read.
         //
@@ -431,8 +292,8 @@ class SWD
         }
 
         // Enable/Disable error logging from this object.
-        void disableErrorLogging();
-        void enableErrorLogging();
+        static void disableErrorLogging();
+        static void enableErrorLogging();
 
 
     protected:
@@ -459,8 +320,47 @@ class SWD
             CSW_SIZE_256BIT = 5
         };
 
+        // These bits are placed in the DP_* and AP_* register definitions to indicate required setting in DPBANKSEL or
+        // APBANKSEL for accesses to this register.
+        static const uint32_t BANKSEL_0 = 0x0 << 4;
+        static const uint32_t BANKSEL_1 = 0x1 << 4;
+        static const uint32_t BANKSEL_2 = 0x2 << 4;
+        static const uint32_t BANKSEL_3 = 0x3 << 4;
+        static const uint32_t BANKSEL_4 = 0x4 << 4;
+        static const uint32_t BANKSEL_F = 0xF << 4;
+
+        // These bits are placed in the DP_* and AP_* register definitions to indicate whether they are RO, WO, or RW.
+        static const uint32_t AP_DP_RO = 1 << 31;
+        static const uint32_t AP_DP_WO = 1 << 30;
+        static const uint32_t AP_DP_RW = AP_DP_RO | AP_DP_WO;
+
+        // SWD DP Register Addresses which can be passed into readDP()/writeDP methods.
+        static const uint32_t DP_DPIDR =     AP_DP_RO | 0x0;  // Read-only
+        static const uint32_t DP_ABORT =     AP_DP_WO | 0x0;  // Write-only
+        static const uint32_t DP_CTRL_STAT = AP_DP_RW | BANKSEL_0 | 0x4;    // Read/Write
+        static const uint32_t DP_DLCR =      AP_DP_RW | BANKSEL_1 | 0x4;    // Read/Write
+        static const uint32_t DP_TARGETID =  AP_DP_RO | BANKSEL_2 | 0x4;    // Read-only
+        static const uint32_t DP_DLPIDR =    AP_DP_RO | BANKSEL_3 | 0x4;    // Read-only
+        static const uint32_t DP_EVENTSTAT = AP_DP_RO | BANKSEL_4 | 0x4;    // Read-only
+        static const uint32_t DP_RESEND =    AP_DP_RO | 0x8;  // Read-only
+        static const uint32_t DP_SELECT =    AP_DP_WO | 0x8;  // Write-only
+        static const uint32_t DP_RDBUFF =    AP_DP_RO | 0xC;  // Read-only
+        static const uint32_t DP_TARGETSEL = AP_DP_WO | 0xC;  // Write-only
+
+        // SWD AP Register Addresses which can be passed into readAP()/writeAP method.
+        static const uint32_t AP_CSW =  AP_DP_RW | BANKSEL_0 | 0x0;
+        static const uint32_t AP_TAR =  AP_DP_RW | BANKSEL_0 | 0x4;
+        static const uint32_t AP_DRW =  AP_DP_RW | BANKSEL_0 | 0xC;
+        static const uint32_t AP_BD0 =  AP_DP_RW | BANKSEL_1 | 0x0;
+        static const uint32_t AP_BD1 =  AP_DP_RW | BANKSEL_1 | 0x4;
+        static const uint32_t AP_BD2 =  AP_DP_RW | BANKSEL_1 | 0x8;
+        static const uint32_t AP_BD3 =  AP_DP_RW | BANKSEL_1 | 0xC;
+        static const uint32_t AP_CFG =  AP_DP_RO | BANKSEL_F | 0x4;
+        static const uint32_t AP_BASE = AP_DP_RO | BANKSEL_F | 0x8;
+        static const uint32_t AP_IDR =  AP_DP_RO | BANKSEL_F | 0xC;
+
         // Unknown value.
-        const uint32_t UNKNOWN_VAL = 0xFFFFFFFF;
+        static const uint32_t UNKNOWN_VAL = 0xFFFFFFFF;
 
         void invalidateDpApState()
         {
@@ -469,6 +369,10 @@ class SWD
             m_apBank = UNKNOWN_VAL;
             m_ap = UNKNOWN_VAL;
             m_cswValid = false;
+        }
+        bool powerDownDebugPort()
+        {
+            return controlPower(true, false);
         }
         void setBitPatternSignalMode();
         void setPacketSignalMode();
@@ -480,14 +384,31 @@ class SWD
                                                                     uint32_t readLength) __attribute__ ((optimize(3)));
         bool readDPIDR();
         bool checkAP(uint32_t ap);
-        void determineCpuType();
-        const char* getCpuTypeString(CpuTypes cpu);
+        uint32_t readTargetMemory(uint32_t address, void* pvBuffer, uint32_t bufferSize, TransferSize readSize);
+        uint32_t writeTargetMemory(uint32_t address, const void* pvBuffer, uint32_t bufferSize, TransferSize writeSize);
         uint32_t readTargetMemoryInternal(uint32_t address, uint8_t* pDest, uint32_t bufferSize, TransferSize readSize);
         uint32_t writeTargetMemoryInternal(uint32_t address, const uint8_t* pSrc, uint32_t bufferSize, TransferSize writeSize);
         bool updateCSW(CSW_AddrIncs addrInc, TransferSize transferSize);
         uint32_t calculateTransferCount(uint32_t startAddress, uint32_t expectedAddress);
+        bool readDP(uint32_t address, uint32_t* pData)
+        {
+            return read(DP, address, pData);
+        }
+        bool writeDP(uint32_t address, uint32_t data)
+        {
+            return write(DP, address, data);
+        }
+        bool readAP(uint32_t address, uint32_t* pData)
+        {
+            return read(AP, address, pData);
+        }
+        bool writeAP(uint32_t address, uint32_t data)
+        {
+            return write(AP, address, data);
+        }
         bool read(SwdApOrDp APnDP, uint32_t address, uint32_t* pData);
         bool write(SwdApOrDp APnDP, uint32_t address, uint32_t data);
+        bool selectAP(uint8_t ap);
         bool selectBank(SwdApOrDp APnDP, uint32_t address);
         bool selectDpBank(uint32_t address);
         bool selectApBank(uint32_t address);
@@ -502,6 +423,10 @@ class SWD
         bool handleTransferResponse(uint32_t ack, bool ignoreProtocolError, bool* pRetry);
         void handleStickyErrors(uint32_t ack, bool* pRetry);
         void handleProtocolAndParityErrors();
+        TransferError getLastReadWriteError()
+        {
+            return m_lastReadWriteError;
+        }
 
         PIO             m_pio = NULL;
         uint32_t        m_stateMachine = UNKNOWN_VAL;
@@ -512,8 +437,6 @@ class SWD
         uint32_t        m_apBank = UNKNOWN_VAL;
         uint32_t        m_ap = UNKNOWN_VAL;
         uint32_t        m_dpidr = UNKNOWN_VAL;
-        uint32_t        m_peripheralComponentIDs[12];
-        uint32_t        m_cpuID = 0;
         uint32_t        m_csw = 0;
         uint32_t        m_nextTargetToTry = 0;
         uint32_t        m_nextTargetInstanceToTry = 0;
@@ -534,10 +457,170 @@ class SWD
         TransferError   m_lastReadWriteError = SWD_SUCCESS;
         SignalMode      m_signalMode = BIT_PATTERN;
         DPv2Targets     m_target = UNKNOWN;
-        CpuTypes        m_cpu = CPU_UNKNOWN;
         EnumTargetState m_targetEnumState = PARTNO_DESIGNER;
         bool            m_cswValid = false;
         bool            m_apWritePending = false;
+};
+
+
+
+
+class SwdTarget
+{
+    friend SWD;
+
+    public:
+        // UNDONE: Comment needs updating: Constructor just sets up object. Need to call init() methods to actually initialize the PIO state machine.
+        SwdTarget()
+        {
+            uninit();
+        }
+
+        // Call this method to change the SWCLK frequency of the underlying SWD bus.
+        //
+        // frequency - Frequency to run the SWCLK in Hz.
+        //
+        // Returns true if everything was initialized successfully and false otherwise.
+        bool setFrequency(uint32_t frequency)
+        {
+            return m_pSWD->setFrequency(frequency);
+        }
+
+
+        // Method to return the DPIDR value for the currently selected DP.
+        //
+        // Returns the 32-bit DPIDR value if DP has successfully been selected.
+        // Returns 0xFFFFFFFF otherwise.
+        uint32_t getDPIDR()
+        {
+            return m_dpidr;
+        }
+
+        // Method to power down the CPU's debug subsystem and free this target object so that it can be reused.
+        bool disconnect()
+        {
+            if (!m_pSWD->selectSwdTarget(m_target))
+            {
+                return false;
+            }
+            bool result = m_pSWD->powerDownDebugPort();
+            m_lastReadWriteError = m_pSWD->getLastReadWriteError();
+            if (!result)
+            {
+                return false;
+            }
+            uninit();
+            return true;
+        }
+
+        // Method to free this target object so that it can be reused.
+        void uninit()
+        {
+            m_target = SWD::UNKNOWN;
+            m_cpu = SWD::CPU_UNKNOWN;
+            m_cpuID = 0;
+            m_dpidr = SWD::UNKNOWN_VAL;
+            memset(m_peripheralComponentIDs, 0, sizeof(m_peripheralComponentIDs));
+        }
+
+        // Method which returns the currently connected DPv2 target, if any.
+        //
+        // Returns one of the DPv2Targets elements or DPv2Targets::UNKNOWN if it is a DPv1 target is connected.
+        SWD::DPv2Targets getTarget()
+        {
+            return m_target;
+        }
+
+        // Method which returns the Cortex-M CPU type of the currently connected device.
+        //
+        // Returns one of the CpuTypes elements or CpuTypes::CPU_UNKNOWN if type can't be determined.
+        SWD::CpuTypes getCpuType()
+        {
+            return m_cpu;
+        }
+
+        // Lookup name for the specified cpu parameter.
+        //
+        // cpu - An element from the SWD::CpuTypes enumeration to be converted to human readable string.
+        //
+        // Returns the human readable name of the supplied cpu ordinal. Example: SWD::CPU_CORTEX_M0 to "Cortex-M0".
+        const char* getCpuTypeString(SWD::CpuTypes cpu);
+
+        // Method which returns pointers to 12 element array containing device's component & peripheral ID words.
+        const uint32_t* getComponentPeripheralIDs()
+        {
+            return &m_peripheralComponentIDs[0];
+        }
+
+        // Method which returns the 32-bit value of the Cortex-M CPUID register.
+        uint32_t getCpuID()
+        {
+            return m_cpuID;
+        }
+
+        // Method to issue a target memory read.
+        //
+        // address - the 32-bit target address from which to start the read.
+        // pvBuffer - Pointer to the data buffer to be filled in with the data read from the target.
+        // bufferSize - The size of the read to be made, in bytes.
+        // readSize - Is the size of each individual target read: 8, 16, or 32 bits.
+        //
+        // Returns the number of bytes successfully read. 0 if none were read successfully.
+        uint32_t readMemory(uint32_t address, void* pvBuffer, uint32_t bufferSize, SWD::TransferSize readSize)
+        {
+            if (!m_pSWD->selectSwdTarget(m_target))
+            {
+                return 0;
+            }
+            uint32_t bytesRead = m_pSWD->readTargetMemory(address, pvBuffer, bufferSize, readSize);
+            m_lastReadWriteError = m_pSWD->getLastReadWriteError();
+            return bytesRead;
+        }
+
+        // Method to issue a target memory write.
+        //
+        // address - the 32-bit target address to which the write should be made.
+        // pvBuffer - Pointer to the data buffer to be written to the target.
+        // bufferSize - The size of the write to be made, in bytes.
+        // writeSize - Is the size of each individual target write: 8, 16, or 32 bits.
+        //
+        // Returns the number of bytes successfully written. 0 if none were written successfully.
+        uint32_t writeMemory(uint32_t address, const void* pvBuffer, uint32_t bufferSize, SWD::TransferSize writeSize)
+        {
+            if (!m_pSWD->selectSwdTarget(m_target))
+            {
+                return 0;
+            }
+            uint32_t bytesWritten = m_pSWD->writeTargetMemory(address, pvBuffer, bufferSize, writeSize);
+            m_lastReadWriteError = m_pSWD->getLastReadWriteError();
+            return bytesWritten;
+        }
+
+        // Fetch the cause of the last read or write call which has failed.
+        SWD::TransferError getLastReadWriteError()
+        {
+            return m_lastReadWriteError;
+        }
+
+        // Fetch the SWD bus object used by SwdTarget.
+        SWD* getSwdBus()
+        {
+            return m_pSWD;
+        }
+
+
+    protected:
+        bool init(SWD* pSWD);
+        bool fetchTargetDetails();
+        void determineCpuType();
+
+        SWD*                m_pSWD;
+        uint32_t            m_dpidr = SWD::UNKNOWN_VAL;
+        uint32_t            m_peripheralComponentIDs[12];
+        uint32_t            m_cpuID = 0;
+        SWD::TransferError  m_lastReadWriteError = SWD::SWD_SUCCESS;
+        SWD::DPv2Targets    m_target = SWD::UNKNOWN;
+        SWD::CpuTypes       m_cpu = SWD::CPU_UNKNOWN;
 };
 
 #endif // SWD_H_

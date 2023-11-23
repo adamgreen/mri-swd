@@ -32,13 +32,13 @@ size_t g_supportedDevicesLength = count_of(g_supportedDevices);
 
 
 // Return false to indicate that there is no FPU available.
-bool deviceHasNoFpu(DeviceObject* pvObject, SWD* pSWD)
+bool deviceHasNoFpu(DeviceObject* pvObject, SwdTarget* pSWD)
 {
     return false;
 }
 
 // Return true to indicate that there is a FPU available.
-bool deviceHasFpu(DeviceObject* pvObject, SWD* pSWD)
+bool deviceHasFpu(DeviceObject* pvObject, SwdTarget* pSWD)
 {
     return true;
 }
@@ -57,7 +57,15 @@ static const DeviceMemoryLayout g_defaultMemoryLayout =
     .regionCount = count_of(g_defaultMemoryRegions)
 };
 
-const DeviceMemoryLayout* deviceDefaultMemoryLayout(DeviceObject* pvObject, SWD* pSWD)
+const DeviceMemoryLayout* deviceDefaultMemoryLayout(DeviceObject* pvObject, SwdTarget* pSWD)
 {
     return &g_defaultMemoryLayout;
+}
+
+
+// Just return with pTargetCount set to 0 to indicate that no additional targets exist for this device.
+bool deviceNoAdditionalTargets(DeviceObject* pvObject, SwdTarget* pSWD, SwdTarget* pTargetArray, size_t targetArrayLength, size_t* pTargetCount)
+{
+    *pTargetCount = 0;
+    return true;
 }

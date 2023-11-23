@@ -35,6 +35,9 @@
 // support higher clock rates.
 #define DEFAULT_SWD_CLOCK_RATE 8000000
 
+// Maximum number of DPv2 targets supported on a single SWD bus. This is currently 2 for the dual core RP2040 device.
+#define MAX_DPV2_TARGETS 2
+
 // Amount of time in ms to delay between attempts to attach to a SWD target (ie. to recover from it not being powered
 // up).
 #define DELAY_BETWEEN_SWD_ATTACH_ATTEMPTS_MS 1000

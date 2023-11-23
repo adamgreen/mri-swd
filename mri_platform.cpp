@@ -90,16 +90,19 @@ static ContextSection g_contextEntriesNoFPU = { .pValues = &g_contextRegisters[0
 static ContextSection g_contextEntriesFPU = { .pValues = &g_contextRegisters[0], .count = registerCountFPU };
 static MriContext     g_context;
 
-static SWD       g_swd;
-static GDBSocket g_gdbSocket;
-static uint32_t  g_originalPC;
-static bool      g_haltOnAttach = false;
-static bool      g_wasStopFromGDB = false;
-static bool      g_wasMemoryExceptionEncountered = false;
-static bool      g_isResetting = false;
-static bool      g_isInDebugger = false;
-static bool      g_isDetaching = false;
-static bool      g_doesHaltDebuggingNeedToBeEnabled = false;
+static SWD        g_swdBus;
+static SwdTarget  g_swdTargets[MAX_DPV2_TARGETS];
+static size_t     g_swdTargetCount = 0;
+static SwdTarget* g_pSWD;
+static GDBSocket  g_gdbSocket;
+static uint32_t   g_originalPC;
+static bool       g_haltOnAttach = false;
+static bool       g_wasStopFromGDB = false;
+static bool       g_wasMemoryExceptionEncountered = false;
+static bool       g_isResetting = false;
+static bool       g_isInDebugger = false;
+static bool       g_isDetaching = false;
+static bool       g_doesHaltDebuggingNeedToBeEnabled = false;
 static PlatformTrapReason g_trapReason;
 static FpuDiscoveryStates g_fpu = FPU_NONE;
 
@@ -124,6 +127,7 @@ static void searchSupportedDevices();
 static FpuDiscoveryStates determineFpuAvailability();
 static void updateSwdFrequencyForDevice();
 static void setMemoryLayoutXML();
+static void checkForMultipleCores();
 static bool initNetwork();
 static void innerDebuggerLoop();
 static bool isNetworkDown();
@@ -152,7 +156,7 @@ static bool g_isNetworkConnected = false;
 
 void mainDebuggerLoop()
 {
-    if (!g_swd.init(DEFAULT_SWD_CLOCK_RATE, SWCLK_PIN, SWDIO_PIN))
+    if (!g_swdBus.init(DEFAULT_SWD_CLOCK_RATE, SWCLK_PIN, SWDIO_PIN))
     {
         logError("Failed to initialize the SWD port.");
         return;
@@ -165,21 +169,22 @@ void mainDebuggerLoop()
     {
         if (!g_isSwdConnected)
         {
-            cleanupDeviceObject();
-
+            assert ( g_swdTargetCount == 0 );
             g_isSwdConnected = initSWD();
             if (!g_isSwdConnected)
             {
-                logError("Failed to initialize SWD connection to debuggee.");
+                logError("Failed to initialize SWD connection to debug target.");
                 return;
             }
+            assert ( g_swdTargetCount > 0 );
 
-            // UNDONE: Will later probably sample a physical switch here to determine if this should be done.
+            // UNDONE: Should sample a physical switch here to determine if this should be done.
             g_haltOnAttach = HALT_ON_ATTACH;
 
             determineCpuProperties();
             updateSwdFrequencyForDevice();
             setMemoryLayoutXML();
+            checkForMultipleCores();
         }
 
         if (!g_isNetworkConnected)
@@ -205,6 +210,18 @@ void mainDebuggerLoop()
 
         innerDebuggerLoop();
 
+        if (!g_isSwdConnected)
+        {
+            cleanupDeviceObject();
+            // Send line reset to main SWD object to make sure that it forgets about the currently connected target.
+            g_swdBus.sendLineReset();
+            for (size_t i = 0 ; i < g_swdTargetCount ; i++)
+            {
+                g_swdTargets[i].uninit();
+            }
+            g_swdTargetCount = 0;
+            g_pSWD = NULL;
+        }
         if (!g_isNetworkConnected)
         {
             g_gdbSocket.uninit();
@@ -220,7 +237,7 @@ static void cleanupDeviceObject()
         return;
     }
 
-    g_pDevice->free(g_pDeviceObject, &g_swd);
+    g_pDevice->free(g_pDeviceObject, g_pSWD);
     g_pDeviceObject = NULL;
     g_pDevice = NULL;
 }
@@ -252,7 +269,6 @@ static bool waitForSwdAttach(uint32_t delayBetweenAttempts_ms)
         }
         targetFound = attemptSwdAttach();
     } while (!targetFound);
-    putchar('\n');
     logErrorEnable();
 
     return true;
@@ -263,15 +279,15 @@ static bool attemptSwdAttach()
     // Search through all known SWD DPv2 targets to see if any are found.
     // If that fails, try detecting SWD targets which don't go dormant, after making to switch SWJ-DP targets into SWD
     // mode.
-    if (g_swd.searchForKnownSwdTarget())
+    if (g_swdBus.searchForKnownSwdTarget())
     {
         // Have found one of the SWD DPv2 targets known by this debugger.
-        logInfoF("Found DPv2 SWD Target=0x%08X with DPIDR=0x%08lX", g_swd.getTarget(), g_swd.getDPIDR());
+        logInfoF("Found DPv2 SWD Target=0x%08X with DPIDR=0x%08lX", g_swdBus.getTarget(), g_swdBus.getDPIDR());
     }
-    else if (g_swd.sendJtagToSwdSequence())
+    else if (g_swdBus.sendJtagToSwdSequence())
     {
         // Have found a non-dormant SWD target.
-        logInfoF("Found SWD Target with DPIDR=0x%08lX", g_swd.getDPIDR());
+        logInfoF("Found SWD Target with DPIDR=0x%08lX", g_swdBus.getDPIDR());
     }
     else
     {
@@ -280,12 +296,14 @@ static bool attemptSwdAttach()
     }
 
     logInfo("Initializing target's debug components...");
-    bool result = g_swd.initTargetForDebugging();
+    bool result = g_swdBus.initTargetForDebugging(g_swdTargets[0]);
     if (!result)
     {
         logError("Failed to initialize target's debug components.");
         return false;
     }
+    g_pSWD = &g_swdTargets[0];
+    g_swdTargetCount = 1;
     logInfo("SWD initialization complete!");
     return true;
 }
@@ -302,12 +320,12 @@ static void searchSupportedDevices()
     for (size_t i = 0; i < g_supportedDevicesLength ; i++)
     {
         DeviceFunctionTable* pDevice = g_supportedDevices[i];
-        DeviceObject* pObject = pDevice->detect(&g_swd);
+        DeviceObject* pObject = pDevice->detect(g_pSWD);
         if (pObject)
         {
             g_pDevice = pDevice;
             g_pDeviceObject = pObject;
-            logInfoF("Found device of type %s.", pDevice->getName(g_pDeviceObject, &g_swd));
+            logInfoF("Found device of type %s.", pDevice->getName(g_pDeviceObject, g_pSWD));
 
             break;
         }
@@ -322,7 +340,7 @@ static FpuDiscoveryStates determineFpuAvailability()
 {
     if (g_pDevice)
     {
-        if (g_pDevice->hasFpu(g_pDeviceObject, &g_swd))
+        if (g_pDevice->hasFpu(g_pDeviceObject, g_pSWD))
         {
             logInfo("Device has FPU.");
             return FPU_AVAILABLE;
@@ -334,7 +352,7 @@ static FpuDiscoveryStates determineFpuAvailability()
     }
     else
     {
-        if (g_swd.getCpuType() >= SWD::CPU_CORTEX_M4)
+        if (g_pSWD->getCpuType() >= SWD::CPU_CORTEX_M4)
         {
             return FPU_MAYBE;
         }
@@ -352,8 +370,8 @@ static void updateSwdFrequencyForDevice()
         return;
     }
 
-    uint32_t swdFrequency = g_pDevice->getMaximumSWDClockFrequency(g_pDeviceObject, &g_swd);
-    if (!g_swd.setFrequency(swdFrequency))
+    uint32_t swdFrequency = g_pDevice->getMaximumSWDClockFrequency(g_pDeviceObject, g_pSWD);
+    if (!g_pSWD->setFrequency(swdFrequency))
     {
         logErrorF("Failed to re-initialize the SWD port to a frequency of %lu.", swdFrequency);
         return;
@@ -367,11 +385,11 @@ static void setMemoryLayoutXML()
     const DeviceMemoryLayout* pLayout;
     if (g_pDevice)
     {
-        pLayout = g_pDevice->getMemoryLayout(g_pDeviceObject, &g_swd);
+        pLayout = g_pDevice->getMemoryLayout(g_pDeviceObject, g_pSWD);
     }
     else
     {
-        pLayout = deviceDefaultMemoryLayout(NULL, &g_swd);
+        pLayout = deviceDefaultMemoryLayout(NULL, g_pSWD);
     }
     assert ( pLayout );
 
@@ -445,6 +463,24 @@ static void setMemoryLayoutXML()
     g_memoryLayoutSize = g_memoryLayoutAllocSize - bytesLeft;
 }
 
+static void checkForMultipleCores()
+{
+    if (!g_pDevice)
+    {
+        return;
+    }
+
+    size_t targetCount;
+    if (!g_pDevice->getAdditionalTargets(g_pDeviceObject, g_pSWD, &g_swdTargets[1], count_of(g_swdTargets)-1, &targetCount))
+    {
+        logError("Failed calling g_pDevice->getAdditionalTargets()");
+        return;
+    }
+    assert ( targetCount <= count_of(g_swdTargets)-1 );
+    g_swdTargetCount = targetCount + 1;
+    logInfoF("Device has %u core(s).", g_swdTargetCount);
+}
+
 static bool initNetwork()
 {
     logInfo("Initializing network...");
@@ -509,6 +545,7 @@ static void innerDebuggerLoop()
         {
             if (g_isResetting)
             {
+                checkForMultipleCores();
                 g_isResetting = false;
                 logInfo("Device RESET request completed.");
             }
@@ -547,8 +584,8 @@ static void innerDebuggerLoop()
                 // UNDONE: Move out into a detachDebugger() method.
                 if (g_isDetaching)
                 {
-                    g_swd.powerDownDebugPort();
-                    g_swd.uninit();
+                    g_pSWD->disconnect();
+                    g_swdBus.uninit();
                     g_gdbSocket.closeClient();
 
                     logInfo("CPU execution has been resumed and debugger detached.");
@@ -616,7 +653,7 @@ static bool readDHCSRWithRetry(uint32_t* pValue, uint32_t timeout_ms)
 {
     bool returnVal = false;
     absolute_time_t endTime = make_timeout_time_ms(timeout_ms);
-    g_swd.disableErrorLogging();
+    g_swdBus.disableErrorLogging();
     logErrorDisable();
     do
     {
@@ -627,7 +664,7 @@ static bool readDHCSRWithRetry(uint32_t* pValue, uint32_t timeout_ms)
         }
     } while (absolute_time_diff_us(get_absolute_time(), endTime) > 0);
     logErrorEnable();
-    g_swd.enableErrorLogging();
+    g_swdBus.enableErrorLogging();
 
     return returnVal;
 }
@@ -651,8 +688,8 @@ static uint32_t readTargetMemory(uint32_t address, void* pvBuffer, uint32_t buff
         return 0;
     }
 
-    uint32_t bytesRead = g_swd.readTargetMemory(address, pvBuffer, bufferSize, readSize);
-    if (bytesRead == 0 && g_swd.getLastReadWriteError() == SWD::SWD_PROTOCOL)
+    uint32_t bytesRead = g_pSWD->readMemory(address, pvBuffer, bufferSize, readSize);
+    if (bytesRead == 0 && g_pSWD->getLastReadWriteError() == SWD::SWD_PROTOCOL)
     {
         handleUnrecoverableSwdError();
     }
@@ -661,7 +698,7 @@ static uint32_t readTargetMemory(uint32_t address, void* pvBuffer, uint32_t buff
 
 static void handleUnrecoverableSwdError()
 {
-    logErrorF("Encountered unrecoverable read/write error %d.", g_swd.getLastReadWriteError());
+    logErrorF("Encountered unrecoverable read/write error %d.", g_pSWD->getLastReadWriteError());
     g_isSwdConnected = false;
     triggerMriCoreToExit();
 }
@@ -684,8 +721,8 @@ static uint32_t writeTargetMemory(uint32_t address, const void* pvBuffer, uint32
         return 0;
     }
 
-    uint32_t bytesWritten = g_swd.writeTargetMemory(address, pvBuffer, bufferSize, writeSize);
-    if (bytesWritten == 0 && g_swd.getLastReadWriteError() == SWD::SWD_PROTOCOL)
+    uint32_t bytesWritten = g_pSWD->writeMemory(address, pvBuffer, bufferSize, writeSize);
+    if (bytesWritten == 0 && g_pSWD->getLastReadWriteError() == SWD::SWD_PROTOCOL)
     {
         handleUnrecoverableSwdError();
     }
@@ -1037,9 +1074,9 @@ static void checkForDeviceReset()
 
     // See if the Debug Halting Control and Status Register indicates that the CPU has been reset.
     uint32_t DHCSR_Val = 0;
-    g_swd.disableErrorLogging();
+    g_swdBus.disableErrorLogging();
     bool result = readDHCSR(&DHCSR_Val);
-    g_swd.enableErrorLogging();
+    g_swdBus.enableErrorLogging();
     if (!result)
     {
         return;
@@ -2872,7 +2909,7 @@ PlatformTrapReason Platform_GetTrapReason(void)
 void Platform_DisplayFaultCauseToGdbConsole(void)
 {
     // Nothing to do on ARMv6-M devices since they don't have fault status registers.
-    if (g_swd.getCpuType() < SWD::CPU_CORTEX_M3)
+    if (g_pSWD->getCpuType() < SWD::CPU_CORTEX_M3)
     {
         return;
     }
@@ -3299,6 +3336,14 @@ const char* Platform_GetDeviceMemoryMapXml(void)
 // UNDONE: May want to override and do this earlier since the MRI core does it after trying to restart the device.
 void Platform_ResetDevice(void)
 {
+    // Power down the DAP on any other target cores during reset.
+    // The RP2040 had troubles reseting without this change.
+    for (size_t i = 1 ; i < g_swdTargetCount ; i++)
+    {
+        g_swdTargets[i].disconnect();
+    }
+    g_swdTargetCount = 1;
+
     const uint32_t AIRCR_Address = 0xE000ED0C;
     const uint32_t AIRCR_KEY_Shift = 16;
     const uint32_t AIRCR_KEY_Mask = 0xFFFF << AIRCR_KEY_Shift;
@@ -3490,7 +3535,7 @@ static bool dispatchMonitorCommandToDevice(Buffer* pBuffer)
         }
     }
 
-    return g_pDevice->handleMonitorCommand(g_pDeviceObject, &g_swd, &arguments[0], argCount);
+    return g_pDevice->handleMonitorCommand(g_pDeviceObject, g_pSWD, &arguments[0], argCount);
 }
 
 static uint32_t handleMonitorDetachCommand()
@@ -3595,7 +3640,7 @@ static uint32_t  handleFlashEraseCommand(Buffer* pBuffer)
         return HANDLER_RETURN_HANDLED;
     }
     logInfoF("Erasing 0x%X (%u) bytes of FLASH at 0x%08X.", addressLength.length, addressLength.length, addressLength.address);
-    if (!g_pDevice->flashBegin(g_pDeviceObject, &g_swd))
+    if (!g_pDevice->flashBegin(g_pDeviceObject, g_pSWD))
     {
         PrepareStringResponse(MRI_ERROR_INVALID_ARGUMENT);
         return HANDLER_RETURN_HANDLED;
@@ -3605,7 +3650,7 @@ static uint32_t  handleFlashEraseCommand(Buffer* pBuffer)
     sendOkResponseWithNewPacketBuffer();
     g_flashErrorDetected = false;
 
-    if (!g_pDevice->flashErase(g_pDeviceObject, &g_swd, addressLength.address, addressLength.length))
+    if (!g_pDevice->flashErase(g_pDeviceObject, g_pSWD, addressLength.address, addressLength.length))
     {
         // Set flag to return error to GDB on next FLASHing operation.
         g_flashErrorDetected = true;
@@ -3664,7 +3709,7 @@ static uint32_t  handleFlashWriteCommand(Buffer* pBuffer)
 
     uint32_t length = Buffer_BytesLeft(pBuffer);
     logInfoF("Writing 0x%lX (%lu) bytes to FLASH at 0x%08lX.", length, length, address);
-    if (!g_pDevice->flashProgram(g_pDeviceObject, &g_swd, address, pBuffer->pCurrent, length))
+    if (!g_pDevice->flashProgram(g_pDeviceObject, g_pSWD, address, pBuffer->pCurrent, length))
     {
         // Set flag to return error to GDB on next FLASHing operation.
         g_flashErrorDetected = true;
@@ -3693,7 +3738,7 @@ static uint32_t handleFlashDoneCommand(Buffer* pBuffer)
         return HANDLER_RETURN_HANDLED;
     }
 
-    if (!g_pDevice->flashEnd(g_pDeviceObject, &g_swd))
+    if (!g_pDevice->flashEnd(g_pDeviceObject, g_pSWD))
     {
         logError("Failed to end FLASHing operation.");
     }

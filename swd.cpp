@@ -42,7 +42,6 @@ void SWD::enableErrorLogging()
 
 SWD::SWD()
 {
-    memset(m_peripheralComponentIDs, 0, sizeof(m_peripheralComponentIDs));
 }
 
 bool SWD::init(PIO pio, uint32_t frequency, uint32_t swclkPin, uint32_t swdioPin)
@@ -227,6 +226,10 @@ bool SWD::sendJtagToSwdSequence()
     invalidateDpApState();
     disableErrorLogging();
         bool result = sendLineReset();
+        if (result)
+        {
+            m_target = DPv1;
+        }
     enableErrorLogging();
     return result;
 }
@@ -348,10 +351,18 @@ void SWD::switchSwdIntoDormantMode()
 
 bool SWD::selectSwdTarget(DPv2Targets target)
 {
+    assert ( target != UNKNOWN );
+
     // If this target is already selected then just return.
     if (m_target == target)
     {
         return true;
+    }
+
+    // Use sendJtagToSwdSequence() method to switch to DPv1 target instead of using TARGETSEL.
+    if (target == DPv1)
+    {
+        return sendJtagToSwdSequence();
     }
 
     // Send line reset to SWD ports to prepare them to be selected by a TARGETSEL write.
@@ -369,6 +380,7 @@ bool SWD::selectSwdTarget(DPv2Targets target)
         return false;
     }
 
+    // UNDONE: Might want to stop doing this now as I am going to be calling this function more often on the RP2040.
     // Verify that the target info in the TARGETID and the DLPIDR registers matches the desired target selection.
     uint32_t targetId = 0xBAADFEED;
     result = readDP(DP_TARGETID, &targetId);
@@ -483,7 +495,7 @@ SWD::DPv2Targets SWD::nextTargetId()
     return (DPv2Targets)targetId;
 }
 
-bool SWD::initTargetForDebugging()
+bool SWD::initTargetForDebugging(SwdTarget& target)
 {
     bool result = controlPower(true, true);
     if (!result)
@@ -501,6 +513,12 @@ bool SWD::initTargetForDebugging()
     if (!result)
     {
         logError("Failed to call findDebugMemAP()");
+        return false;
+    }
+    result = target.init(this);
+    if (!result)
+    {
+        logError("Failed to call target.init(this)");
         return false;
     }
 
@@ -651,153 +669,7 @@ bool SWD::checkAP(uint32_t ap)
         return false;
     }
 
-    // Read the peripheral and components IDs from the target.
-    uint32_t bytesRead = readTargetMemory(0xE00FFFD0,
-                                          m_peripheralComponentIDs, sizeof(m_peripheralComponentIDs), TRANSFER_32BIT);
-    if (bytesRead < sizeof(m_peripheralComponentIDs))
-    {
-        logError("Failed to call readTargetMemory(0xE00FFFD0, ...)");
-        return false;
-    }
-    logDebug("peripheralComponentIDs[]=");
-    logDebug("{");
-    for (size_t i = 0 ; i < count_of(m_peripheralComponentIDs) ; i++)
-    {
-        logDebugF("    0x%08lX ", m_peripheralComponentIDs[i]);
-    }
-    logDebug("}");
-
-    // Read in the CPUID for the Cortex-M processor as well.
-    bytesRead = readTargetMemory(0xE000ED00, &m_cpuID, sizeof(m_cpuID), TRANSFER_32BIT);
-    if (bytesRead != sizeof(m_cpuID))
-    {
-        logError("Failed to call readTargetMemory(0xE000ED00, &m_cpuID, ...)");
-        return false;
-    }
-    logDebugF("CPUID=0x%08lX", m_cpuID);
-
-    determineCpuType();
-    logDebugF("Detected CPU type = %s", getCpuTypeString(m_cpu));
-
     return true;
-}
-
-void SWD::determineCpuType()
-{
-    // Check component/peripheral ID for known Cortex-M CPUs.
-    const uint32_t armComponentID[4] = { 0x0000000D, 0x00000010, 0x00000005, 0x000000B1 };
-    struct
-    {
-        uint32_t peripheralID[8];
-        CpuTypes type;
-    } const knownPeripheralIDs[] =
-    {
-        {
-            {
-                0x00000004, 0x00000000, 0x00000000, 0x00000000,
-                0x00000071, 0x000000B4, 0x0000000B, 0x00000000
-            },
-            CPU_CORTEX_M0
-        },
-        {
-            {
-                0x00000004, 0x00000000, 0x00000000, 0x00000000,
-                0x000000C0, 0x000000B4, 0x0000000B, 0x00000000
-            },
-            CPU_CORTEX_M0_PLUS
-        },
-        {
-            {
-                0x00000004, 0x00000000, 0x00000000, 0x00000000,
-                0x0000000C, 0x000000B0, 0x0000000B, 0x00000000
-            },
-            CPU_CORTEX_M3
-        },
-        {
-            {
-                0x00000004, 0x00000000, 0x00000000, 0x00000000,
-                0x000000C4, 0x000000B4, 0x0000000B, 0x00000000
-            },
-            CPU_CORTEX_M4
-        },
-        {
-            {
-                0x00000004, 0x00000000, 0x00000000, 0x00000000,
-                0x000000C8, 0x000000B4, 0x0000000B, 0x00000000
-            },
-            CPU_CORTEX_M7
-        }
-    };
-    m_cpu = CPU_UNKNOWN;
-    if (0 == memcmp(&m_peripheralComponentIDs[8], &armComponentID[0], sizeof(armComponentID)))
-    {
-        for (size_t i = 0 ; i < count_of(knownPeripheralIDs) ; i++)
-        {
-            if (0 == memcmp(&m_peripheralComponentIDs[0], &knownPeripheralIDs[i].peripheralID[0], sizeof(knownPeripheralIDs[i].peripheralID)))
-            {
-                m_cpu = knownPeripheralIDs[i].type;
-                return;
-            }
-        }
-    }
-
-    // If peripheral ID isn't recognized then try using the CPU ID instead.
-    struct
-    {
-        uint32_t cpuID;
-        CpuTypes type;
-    } const knownCpuIds[] =
-    {
-        {
-            0x410CC200,
-            CPU_CORTEX_M0
-        },
-        {
-            0x410CC600,
-            CPU_CORTEX_M0_PLUS
-        },
-        {
-            0x412FC230,
-            CPU_CORTEX_M3
-        },
-        {
-            0x410FC240,
-            CPU_CORTEX_M4
-        },
-        {
-            0x410C270,
-            CPU_CORTEX_M7
-        }
-    };
-    const uint32_t CPUID_REVISION_MASK = 0xF;
-    uint32_t cpuID = m_cpuID & ~CPUID_REVISION_MASK;
-    for (size_t i = 0 ; i < count_of(knownCpuIds) ; i++)
-    {
-        if (knownCpuIds[i].cpuID == cpuID)
-        {
-            m_cpu = knownCpuIds[i].type;
-            return;
-        }
-    }
-}
-
-const char* SWD::getCpuTypeString(CpuTypes cpu)
-{
-    switch (cpu)
-    {
-        case CPU_CORTEX_M0:
-            return "Cortex-M0";
-        case CPU_CORTEX_M0_PLUS:
-            return "Cortex-M0+";
-        case CPU_CORTEX_M3:
-            return "Cortex-M3";
-        case CPU_CORTEX_M4:
-            return "Cortex-M4";
-        case CPU_CORTEX_M7:
-            return "Cortex-M7";
-        default:
-            return "Unknown";
-    }
 }
 
 uint32_t SWD::readTargetMemory(uint32_t address, void* pvBuffer, uint32_t bufferSize, TransferSize readSize)
@@ -1302,7 +1174,7 @@ bool SWD::read(SwdApOrDp APnDP, uint32_t address, uint32_t* pData)
                 logDebugF("Failed call to handleTransferResponse(0x%lX, %s, &retryTransfer)",
                           ack, address == DP_DPIDR ? "true" : "false");
             }
-            else
+            else if (m_lastReadWriteError != SWD_PROTOCOL || address != DP_DPIDR)
             {
                 logErrorF("Failed call to handleTransferResponse(0x%lX, %s, &retryTransfer)",
                         ack, address == DP_DPIDR ? "true" : "false");
@@ -1325,7 +1197,7 @@ bool SWD::write(SwdApOrDp APnDP, uint32_t address, uint32_t data)
 
     if (APnDP == AP)
     {
-        // Remember that we just pending an AP write.
+        // Remember that we just pended an AP write.
         m_apWritePending = true;
     }
 
@@ -1363,7 +1235,7 @@ bool SWD::write(SwdApOrDp APnDP, uint32_t address, uint32_t data)
                 logDebugF("Failed to call handleTransferResponse(0x%lX, %s, &retryTransfer)",
                           ack, address == DP_TARGETSEL ? "true" : "false");
             }
-            else
+            else if (m_lastReadWriteError != SWD_PROTOCOL || address != DP_TARGETSEL)
             {
                 logErrorF("Failed to call handleTransferResponse(0x%lX, %s, &retryTransfer)",
                         ack, address == DP_TARGETSEL ? "true" : "false");
@@ -1380,6 +1252,7 @@ bool SWD::write(SwdApOrDp APnDP, uint32_t address, uint32_t data)
 
 bool SWD::handleTransferResponse(uint32_t ack, bool ignoreProtocolError, bool* pRetry)
 {
+    // UNDONE: Why is ACK_PARITY not included in this list?
     if (ack != ACK_OK && ack != ACK_WAIT && ack != ACK_FAIL)
     {
         // Any unrecognized response will be treated as a protocol error.
@@ -1401,10 +1274,10 @@ bool SWD::handleTransferResponse(uint32_t ack, bool ignoreProtocolError, bool* p
     }
     else if (ack == ACK_PROT_ERROR)
     {
-        // Send line reset and retry.
-        logError("Encountered protocol error.");
         if (!ignoreProtocolError)
         {
+            // Send line reset and retry.
+            logError("Encountered protocol error.");
             handleProtocolAndParityErrors();
             m_totalProtocolErrorRetries++;
             *pRetry = true;
@@ -1644,6 +1517,181 @@ void SWD::handleProtocolAndParityErrors()
 {
     // UNDONE: Could drop the SWD clock rate here too.
     m_clearingErrors++;
-        sendLineReset();
+        if (m_target == DPv1 || m_target == UNKNOWN)
+        {
+            // Line reset is enough for DPv1 targets.
+            sendLineReset();
+            m_target = DPv1;
+        }
+        else
+        {
+            // Need to resend TARGETSEL after line reset for DPv2 targets.
+            DPv2Targets origTarget = m_target;
+            m_target = UNKNOWN;
+            selectSwdTarget(origTarget);
+        }
     m_clearingErrors--;
+}
+
+
+
+
+bool SwdTarget::init(SWD* pSWD)
+{
+    m_pSWD = pSWD;
+    m_target = pSWD->getTarget();
+    m_dpidr = pSWD->getDPIDR();
+    return fetchTargetDetails();
+}
+
+
+bool SwdTarget::fetchTargetDetails()
+{
+    // Read the peripheral and components IDs from the target.
+    uint32_t bytesRead = readMemory(0xE00FFFD0,
+                                    m_peripheralComponentIDs, sizeof(m_peripheralComponentIDs), SWD::TRANSFER_32BIT);
+    if (bytesRead < sizeof(m_peripheralComponentIDs))
+    {
+        logError("Failed to call readTargetMemory(0xE00FFFD0, ...)");
+        return false;
+    }
+    logDebug("peripheralComponentIDs[]=");
+    logDebug("{");
+    for (size_t i = 0 ; i < count_of(m_peripheralComponentIDs) ; i++)
+    {
+        logDebugF("    0x%08lX ", m_peripheralComponentIDs[i]);
+    }
+    logDebug("}");
+
+    // Read in the CPUID for the Cortex-M processor as well.
+    bytesRead = readMemory(0xE000ED00, &m_cpuID, sizeof(m_cpuID), SWD::TRANSFER_32BIT);
+    if (bytesRead != sizeof(m_cpuID))
+    {
+        logError("Failed to call readTargetMemory(0xE000ED00, &m_cpuID, ...)");
+        return false;
+    }
+    logDebugF("CPUID=0x%08lX", m_cpuID);
+
+    determineCpuType();
+    logDebugF("Detected CPU type = %s", getCpuTypeString(m_cpu));
+
+    return true;
+}
+
+void SwdTarget::determineCpuType()
+{
+    // Check component/peripheral ID for known Cortex-M CPUs.
+    const uint32_t armComponentID[4] = { 0x0000000D, 0x00000010, 0x00000005, 0x000000B1 };
+    struct
+    {
+        uint32_t      peripheralID[8];
+        SWD::CpuTypes type;
+    } const knownPeripheralIDs[] =
+    {
+        {
+            {
+                0x00000004, 0x00000000, 0x00000000, 0x00000000,
+                0x00000071, 0x000000B4, 0x0000000B, 0x00000000
+            },
+            SWD::CPU_CORTEX_M0
+        },
+        {
+            {
+                0x00000004, 0x00000000, 0x00000000, 0x00000000,
+                0x000000C0, 0x000000B4, 0x0000000B, 0x00000000
+            },
+            SWD::CPU_CORTEX_M0_PLUS
+        },
+        {
+            {
+                0x00000004, 0x00000000, 0x00000000, 0x00000000,
+                0x0000000C, 0x000000B0, 0x0000000B, 0x00000000
+            },
+            SWD::CPU_CORTEX_M3
+        },
+        {
+            {
+                0x00000004, 0x00000000, 0x00000000, 0x00000000,
+                0x000000C4, 0x000000B4, 0x0000000B, 0x00000000
+            },
+            SWD::CPU_CORTEX_M4
+        },
+        {
+            {
+                0x00000004, 0x00000000, 0x00000000, 0x00000000,
+                0x000000C8, 0x000000B4, 0x0000000B, 0x00000000
+            },
+            SWD::CPU_CORTEX_M7
+        }
+    };
+    m_cpu = SWD::CPU_UNKNOWN;
+    if (0 == memcmp(&m_peripheralComponentIDs[8], &armComponentID[0], sizeof(armComponentID)))
+    {
+        for (size_t i = 0 ; i < count_of(knownPeripheralIDs) ; i++)
+        {
+            if (0 == memcmp(&m_peripheralComponentIDs[0], &knownPeripheralIDs[i].peripheralID[0], sizeof(knownPeripheralIDs[i].peripheralID)))
+            {
+                m_cpu = knownPeripheralIDs[i].type;
+                return;
+            }
+        }
+    }
+
+    // If peripheral ID isn't recognized then try using the CPU ID instead.
+    struct
+    {
+        uint32_t      cpuID;
+        SWD::CpuTypes type;
+    } const knownCpuIds[] =
+    {
+        {
+            0x410CC200,
+            SWD::CPU_CORTEX_M0
+        },
+        {
+            0x410CC600,
+            SWD::CPU_CORTEX_M0_PLUS
+        },
+        {
+            0x412FC230,
+            SWD::CPU_CORTEX_M3
+        },
+        {
+            0x410FC240,
+            SWD::CPU_CORTEX_M4
+        },
+        {
+            0x410C270,
+            SWD::CPU_CORTEX_M7
+        }
+    };
+    const uint32_t CPUID_REVISION_MASK = 0xF;
+    uint32_t cpuID = m_cpuID & ~CPUID_REVISION_MASK;
+    for (size_t i = 0 ; i < count_of(knownCpuIds) ; i++)
+    {
+        if (knownCpuIds[i].cpuID == cpuID)
+        {
+            m_cpu = knownCpuIds[i].type;
+            return;
+        }
+    }
+}
+
+const char* SwdTarget::getCpuTypeString(SWD::CpuTypes cpu)
+{
+    switch (cpu)
+    {
+        case SWD::CPU_CORTEX_M0:
+            return "Cortex-M0";
+        case SWD::CPU_CORTEX_M0_PLUS:
+            return "Cortex-M0+";
+        case SWD::CPU_CORTEX_M3:
+            return "Cortex-M3";
+        case SWD::CPU_CORTEX_M4:
+            return "Cortex-M4";
+        case SWD::CPU_CORTEX_M7:
+            return "Cortex-M7";
+        default:
+            return "Unknown";
+    }
 }
