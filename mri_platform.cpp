@@ -64,161 +64,114 @@ static const uint32_t FPSCR = S0 + 32;
 
 
 
-// Expose debug operations on Cortex-M cores. It can handle targets which have more than one core such as the RP2040.
-class CpuCores
+// Expose debug operations on a single Cortex-M core. The CpuCores object can contain multiple of these objects.
+class CpuCore
 {
 public:
-    CpuCores();
+    CpuCore();
 
-    // Call pHandler function if unrecoverable SWD connection errors are detected at runtime. Handler is typically used
-    // to force the MRI core code to exit.
-    void setConnectionFailureCallback(void (*pHandler)(void))
-    {
-        m_connectionFailureHandler = pHandler;
-    }
-
-    // Initialize the CPU core objects after establishing a new SWD connection.
-    bool init(SWD* pSwdBus);
+    // Initialize the CPU core object after establishing a new SWD connection.
+    // This object will call the pHandler function if unrecoverable SWD connection errors are detected at runtime.
+    // This handler is typically used to set a flag noting the connection error and force the MRI core code to exit.
+    bool init(SWD* pSwdBus, SwdTarget* pSWD, void (*pHandler)(void), uint32_t coreId);
 
     // Cleanup the CPU core object after disconnecting the SWD bus. Call init() again later once the SWD
     // connection comes back up.
     void uninit();
 
-    // Power down the SWD Debug Access Ports of all the CPU cores. This reduces power usage on the target
-    // device. Similar to uninit() but you aren't really expected to call init() again after calling this method since
+    // Power down the SWD Debug Access Ports of all this CPU core. This reduces power usage on the target device.
+    // Similar to uninit() but you aren't really expected to call init() again after calling this method since
     // that would mean the DAP would be powered up again.
     void disconnect();
 
-
-    // UNDONE: I probably need to perform this for each core in a dual core system.
-    // Enables the CPU cores for debugging. This enables vector catch along with the Data Watchpoint
-    // and Flash Breakpoint functionality.
+    // Enables this core for debugging. This enables vector catch along with the Data Watchpoint and Flash Breakpoint
+    // functionality.
     void initForDebugging();
 
-    // Attempt to enable halting debug mode on the CPU cores.
+    // Attempt to enable halting debug mode on this core.
     bool enableHaltDebugging(uint32_t timeout_ms);
 
-    // UNDONE: Take the index of a core to skip, the one which is already halted.
-    // Request the CPU cores to halt.
-    bool requestCpuToHalt();
+    // Read and cache the most recent state of the CPU core.
+    // Call isResetting() or isHalted() after to determine which of these state, if any, are
+    // currently being experienced by the core.
+    bool refreshCoreState(uint32_t timeout_ms)
+    {
+        uint32_t dhcsr = 0;
+        bool result = readDHCSRWithRetry(&dhcsr, timeout_ms);
 
-    // Does the device have a FPU?
-    enum FpuDiscoveryStates
-    {
-        // We know for sure that the device doesn't have a FPU.
-        FPU_NONE = 0,
-        // Cortex-M4 or higher MIGHT have a FPU. Will need to query CPACR on first halt to know for sure.
-        FPU_MAYBE,
-        // We now know for sure that the device has a FPU.
-        FPU_AVAILABLE,
-        // We later determined the device doesn't have a FPU but target XML indicates that it does.
-        FPU_NOT_AVAILABLE
-    };
-    FpuDiscoveryStates hasFPU()
-    {
-        return m_fpu;
+        // The m_currentDHCSR field should be set inside the above call to readDHCSRWithRetry().
+        assert ( dhcsr == m_currentDHCSR );
+        return result;
     }
-
-    // UNDONE: Which core?
-    //         Maybe take an array, one for each core. The isDeviceResetting/isCpuHalted could then take this array and
-    //         return the lowest index found to match the requested state and -1 if none match.
-    // Retrieve the state of the CPU core.
-    // Call isDeviceResetting() or isCpuHalted() on the *pState value to determine which of these state, if any, are
-    // currently being experienced by the CPU.
-    typedef uint32_t CpuState;
-    bool getCpuState(CpuState* pState, uint32_t timeout_ms)
-    {
-        return readDHCSRWithRetry(pState, timeout_ms);
-    }
-    bool isDeviceResetting(CpuState state)
+    bool isResetting()
     {
         const uint32_t S_RESET_ST_Bit = 1 << 25;
 
-        return !!(state & S_RESET_ST_Bit);
+        return !!(m_currentDHCSR & S_RESET_ST_Bit);
     }
-    bool isCpuHalted(CpuState state)
+    bool isHalted()
     {
         const uint32_t DHCSR_S_HALT_Bit = 1 << 17;
-        return !!(state & DHCSR_S_HALT_Bit);
+        return !!(m_currentDHCSR & DHCSR_S_HALT_Bit);
     }
 
-    // Retrieve a string pointer and the length for the XML describing of the memory layout of this device.
-    const char* getMemoryLayoutXML()
+    // Request the core to halt.
+    bool requestHalt();
+
+    // Track what the debugger knows about the FPU status of the cores so far.
+    enum FpuDiscoveryStates
     {
-        return m_pMemoryLayoutXML;
-    }
-    size_t getMemoryLayoutXMLSize()
+        // Knows for sure that the device doesn't have a FPU.
+        FPU_NONE = 0,
+        // Cortex-M4 or higher MIGHT have a FPU. Will need to query CPACR on first halt to know for sure.
+        FPU_MAYBE,
+        // Knows for sure that the device has a FPU.
+        FPU_AVAILABLE,
+        // Later determined the device doesn't have a FPU but target XML indicates that it does.
+        FPU_NOT_AVAILABLE
+    };
+
+    // Once default core is halted, this method can be called to update *pFpuState if it is still FPU_MAYBE.
+    void checkForFpu(FpuDiscoveryStates* pFpuState);
+
+    // Reads the core's registers to place them in MriContext structure which is then returned from this method.
+    MriContext* getContext(FpuDiscoveryStates fpu)
     {
-        return m_memoryLayoutSize;
+        readContext(fpu);
+        return &m_context;
     }
 
+    // Writes the register context back out to the core, if it was previously loaded with getContext(). Is a NOP if
+    // getContext() hasn't been called since the last writeContext() call.
+    void writeContext(FpuDiscoveryStates fpu);
 
-    // UNDONE: Probably need a method to mark one of the cores as halted unless we want isCpuHalted() to do it for us.
-    //         Probably makes the most sense to pass it directly into this method.
-    // Enter the MRI core by calling mriDebugException() after grabbing the required register context of the halted
-    // core.
-    void enterMriCore();
-
-    // Typically called from Platform_EnteringDebugger() to let this object know that the MRI core was just entered.
-    // It caches the reason (interrupt from GDB, breakpoint, watchpoint, etc) for the halting core and makes sure that
-    // reset vector catch is disabled for all of the core.
-    void enteringDebugger();
-
-    // Typically called from Platform_LeavingDebugger() to let this object know that the MRI core is about to exit and
-    // allow execution to be resumed. It makes sure that the Debug Fault Status Register (DFSR) is cleared since we no
-    // longer need to know about the cause of the last halt.
-    void leavingDebugger();
-
-    // Ask execution to resume on all of the cores. It also takes care of restoring any modified register context before
-    // resuming.
-    void resume();
-
-    // Ask the cores to reset.
-    void reset();
+    // Determine the reason this core halted: breakpoint, watchpoint, other.
+    PlatformTrapReason determineTrapReason();
 
     // Ask the cores to halt immediately after coming out of reset. Should be called before reset() if this is the
     // desired behaviour.
     void enableResetVectorCatch();
 
-    // Should be called as soon as the main loop determines that a reset has occurred so that the object can
-    // re-initialize the information it has about all of the cores after their reset.
-    void resetCompleted()
-    {
-        checkForMultipleCores();
-    }
+    // Disable halting on device reset for this core.
+    void disableResetVectorCatch();
+
+    // Clears the Debug Fault Status Register on this core. Typically done after debugging a halted core.
+    void clearDFSR();
+
+    // Resumes execution of this core.
+    bool resume();
+
+    // Ask the core to reset.
+    void reset();
 
 
-    // UNDONE: Will want to add a class to wrap the context object to track when each core's context is stale and needs
-    //         to be read, and when it is dirty and needs to be saved back to CPU.
-    // Read the requested register on the halted core.
-    uintmri_t readRegisterOnHaltedCore(size_t index)
-    {
-        return Context_Get(&m_context, index);
-    }
+    // Read from the requested memory range on this core. Can be used for reading memory mapped registers as those
+    // reads often need to be directed at a specific core.
+    uint32_t readMemory(uint32_t address, void* pvBuffer, uint32_t bufferSize, SWD::TransferSize readSize);
 
-    // Write a new value to the requested register on the halted core.
-    void writeRegisterOnHaltedCore(size_t index, uintmri_t newValue)
-    {
-        Context_Set(&m_context, index, newValue);
-    }
-
-    // Read from the requested memory range in FLASH, ROM, or RAM. Not to be used for reading memory mapped registers as
-    // those reads need to be directed at a specific core.
-    uint32_t readMemory(uint32_t address, void* pvBuffer, uint32_t bufferSize, SWD::TransferSize readSize)
-    {
-        // Make sure that we don't try to read registers with this method.
-        assert ( address < 0xA0000000 );
-        return readTargetMemory(address, pvBuffer, bufferSize, readSize);
-    }
-
-    // Write to the requested memory range in FLASH, ROM, or RAM. Not to be used for writing memory mapped registers as
-    // those writes need to be directed at a specific core.
-    uint32_t writeMemory(uint32_t address, const void* pvBuffer, uint32_t bufferSize, SWD::TransferSize writeSize)
-    {
-        // Make sure that we don't try to write registers with this method.
-        assert ( address < 0xA0000000 );
-        return writeTargetMemory(address, pvBuffer, bufferSize, writeSize);
-    }
+    // Write to the requested memory range on this core. Can be used for writing memory mapped registers as those
+    // writes often need to be directed at a specific core.
+    uint32_t writeMemory(uint32_t address, const void* pvBuffer, uint32_t bufferSize, SWD::TransferSize writeSize);
 
 
     // UNDONE: Might just ignore this for multithread and use thread state instead.
@@ -242,6 +195,7 @@ public:
         return !!(DHCSR_Val & DHCSR_C_STEP_Bit);
     }
 
+
     // Set a breakpoint at the requested address (16 or 32-bit instruction). Returns the 32-bit address of the
     // comparator register used for this breakpoint, 0 if no free ones were found. If the requested breakpoint is
     // already set then the address of the already set comparator register will be returned.
@@ -251,9 +205,10 @@ public:
     // comparator register just cleared for this breakpoint, 0 if no matching breakpoint for the address was found.
     uint32_t clearBreakpoint(uint32_t breakpointAddress, bool is32BitInstruction);
 
+
     // Set a watchpoint (read and/or write) at the specified memory range.
     // Can throw invalidArgumentException if the address, size, or type aren't supported for Cortex-M devices.
-    // Can throw exceededHardwareResourcesException if all of the watchpoint comparators are already used up.
+    // Can throw exceededHardwareResourcesException if all of the watchpoint comparators are already in use.
     // These exceptions will be caught and handled by the MRI core.
     __throws void setWatchpoint(uintmri_t address, uintmri_t size,  PlatformWatchpointType type);
 
@@ -263,40 +218,14 @@ public:
     __throws void clearWatchpoint(uintmri_t address, uintmri_t size,  PlatformWatchpointType type);
 
 
-    // Returns the signal value (SIGINT, SIGTRAP, etc) most appropriate for the reason that the CPU was halted. This is
-    // returned to GDB and displayed to the user.
-    //  wasStopFromGDB parameter indicates whether the target was interrupted by request of GDB.
+    // Returns the signal value (SIGINT, SIGTRAP, etc) most appropriate for the reason that this core was halted. This
+    // is returned to GDB and displayed to the user.
+    //  wasStopFromGDB parameter indicates whether the target was interrupted by GDB.
     uint8_t determineCauseOfException(bool wasStopFromGDB);
-
-    // Returns whether the CPU was halted because of a breakpoint, watchpoint, or some other reason. This is returned to
-    // GDB and used to display which breakpoint or watchpoint, if any, caused the halt to occur. This returned reason
-    // was actually determined earlier when enteringDebugger() was called because watchpoint hit state can only be
-    // queried once.
-    PlatformTrapReason getTrapReason();
 
     // If an ARMv7M microcontroller hits a fault while running under the debugger, this method can be called to display
     // information about the type of fault encountered to the GDB console before halting.
     void displayFaultCauseToGdbConsole();
-
-    // Called when user enters "monitor ..." commands in GDB. They are passed into the device specific driver, if one
-    // exists, to let it have first shot at handling the requested command. Returns true if handled by the device
-    // specific driver and false otherwise.
-    bool dispatchMonitorCommandToDevice(const char** ppArgs, size_t argCount);
-
-
-    // Returns true if there is a device specific driver that knows how to program the FLASH on the currently connected
-    // target and false otherwise.
-    bool supportsFlashProgramming()
-    {
-        return m_pDevice != NULL;
-    }
-
-    // The following flash*() methods are redirected to the device specific driver to handle programming of the FLASH on
-    // the currently connected target.
-    bool flashBegin();
-    bool flashErase(uint32_t addressStart, uint32_t length);
-    bool flashProgram(uint32_t addressStart, const void* pBuffer, size_t bufferSize);
-    bool flashEnd();
 
 
     // Temporarily sets the registers on the default core to the specified values and then resumes execution on that
@@ -313,30 +242,14 @@ public:
     // This combines calls to startCodeOnDevice() and waitForCodeToWait() in one call.
     bool runCodeOnDevice(CortexM_Registers* pRegistersInOut, uint32_t timeout_ms);
 
+
+
 protected:
-    bool initSWD(SWD* pSwdBus);
-    void searchSupportedDevicesList();
-    void determineFpuAvailability();
-    void updateSwdFrequencyForDevice();
-    void constructMemoryLayoutXML();
-    void checkForMultipleCores();
-    void cleanupDeviceObject();
-    void checkForFpu();
-    uint32_t readTargetMemory(uint32_t address, void* pvBuffer, uint32_t bufferSize, SWD::TransferSize readSize);
-    void handleUnrecoverableSwdError();
-    uint32_t writeTargetMemory(uint32_t address, const void* pvBuffer, uint32_t bufferSize, SWD::TransferSize writeSize);
-    void saveContext();
-    bool readCpuRegister(uint32_t registerIndex, uint32_t* pValue);
-    void waitForRegisterTransferToComplete();
-    void restoreContext();
-    bool writeCpuRegister(uint32_t registerIndex, uint32_t value);
-    bool readDHCSR(uint32_t* pValue);
-    static bool hasRegisterTransferCompleted(uint32_t DHCSR_Value);
-    bool readDHCSRWithRetry(uint32_t* pValue, uint32_t timeout_ms);
-    bool writeDHCSR(uint32_t DHCSR_Value);
-    bool requestCpuToResume();
+    bool initSWD(SWD* pSwdBus, SwdTarget* pSWD);
+
     void enableDWTandVectorCatches();
     bool setOrClearBitsInDEMCR(uint32_t bitMask, bool set);
+    void handleUnrecoverableSwdError();
     void initDWT();
     uint32_t clearDWTComparators();
     uint32_t getDWTComparatorCount();
@@ -349,14 +262,26 @@ protected:
     void clearFPBComparator(uint32_t comparatorAddress);
     void enableFPB();
     void writeFPControlRegister(uint32_t FP_CTRL_Value);
-    PlatformTrapReason cacheTrapReason();
+
+    bool readDHCSRWithRetry(uint32_t* pValue, uint32_t timeout_ms);
+    bool readDHCSR(uint32_t* pValue);
+    bool writeDHCSR(uint32_t DHCSR_Value);
+
+    void readContext(FpuDiscoveryStates fpu);
+    bool readCpuRegister(uint32_t registerIndex, uint32_t* pValue);
+    void waitForRegisterTransferToComplete();
+    static bool hasRegisterTransferCompleted(uint32_t DHCSR_Value);
+
+    bool writeCpuRegister(uint32_t registerIndex, uint32_t value);
+
     bool readDFSR(uint32_t* pDFSR);
     PlatformTrapReason findMatchedWatchpoint(void);
     PlatformTrapReason getReasonFromMatchComparator(uint32_t comparatorAddress, uint32_t function);
-    void disableResetVectorCatch();
-    void clearDFSR();
+
     bool writeDFSR(uint32_t dfsr);
+
     void configureSingleSteppingBitsInDHCSR(bool enableSingleStepping);
+
     uint32_t findFPBBreakpointComparator(uint32_t breakpointAddress, bool is32BitInstruction);
     uint32_t calculateFPBComparatorValue(uint32_t breakpointAddress, bool is32BitInstruction);
     bool isBreakpointAddressInvalid(uint32_t breakpointAddress);
@@ -372,6 +297,7 @@ protected:
     bool isFPBComparatorEnabled(uint32_t comparator);
     static bool isFPBComparatorEnabledRevision1(uint32_t comparator);
     static bool isFPBComparatorEnabledRevision2(uint32_t comparator);
+
     static uint32_t convertWatchpointTypeToCortexMType(PlatformWatchpointType type);
     static bool isValidDWTComparatorSetting(uint32_t watchpointAddress,
                                             uint32_t watchpointSize,
@@ -406,12 +332,15 @@ protected:
     uint32_t disableDWTWatchpoint(uint32_t watchpointAddress,
                                   uint32_t watchpointSize,
                                   uint32_t watchpointType);
+
     uint32_t getExceptionNumber();
+
     void displayHardFaultCauseToGdbConsole();
     void displayMemFaultCauseToGdbConsole();
     void displayBusFaultCauseToGdbConsole();
     void displayUsageFaultCauseToGdbConsole();
     bool disableSingleStepAndInterrupts();
+
     bool reenableInterrupts();
 
 
@@ -523,29 +452,2168 @@ protected:
 
 
 
-    // UNDONE: Need one of these for each core. Also need to track down whether it is valid and maybe whether it is
-    //         dirty or not.
+    // Pointer to lower level SWD bus object used to communicate with all target/cores on the device.
+    SWD*           m_pSwdBus = NULL;
+    // Pointer to  higher level SWD target object which is configured to communicate with this core.
+    SwdTarget*     m_pSWD = NULL;
+
+    // Callback to call when SWD connection errors are detected.
+    void (*m_connectionFailureHandler)(void) = NULL;
+
     // CPU register context information is stored here.
     uintmri_t      m_contextRegisters[registerCountFPU];
-    ContextSection m_contextEntriesNoFPU = { .pValues = &m_contextRegisters[0], .count = registerCountNoFPU };
-    ContextSection m_contextEntriesFPU = { .pValues = &m_contextRegisters[0], .count = registerCountFPU };
+    ContextSection m_contextEntries = { .pValues = &m_contextRegisters[0], .count = 0 };
     MriContext     m_context;
 
-    // UNDONE: Call target count, coreCount;
+    // Most recent value of the Debug Halting Control & Status Register value read out by a call to the
+    // readDHCSR() method.
+    uint32_t       m_currentDHCSR = 0;
+
+    // The index of CPU core to display when logging messages from this core.
+    uint32_t        m_coreId = -1;
+
+    // Set to true if any read/writeMemory() call fails because of a SWD protocol error which means that the
+    // target has stopped responding.
+    bool           m_hasDetectedSwdDisconnect = false;
+};
+
+
+
+CpuCore::CpuCore()
+{
+}
+
+bool CpuCore::init(SWD* pSwdBus, SwdTarget* pSWD, void (*pHandler)(void), uint32_t coreId)
+{
+    m_coreId = coreId;
+
+    assert ( m_pSWD == NULL && m_pSwdBus == NULL && m_contextEntries.count == 0 && m_currentDHCSR == 0 );
+    if (!initSWD(pSwdBus, pSWD))
+    {
+        return false;
+    }
+    m_connectionFailureHandler = pHandler;
+    m_hasDetectedSwdDisconnect = false;
+
+    return true;
+}
+
+bool CpuCore::initSWD(SWD* pSwdBus, SwdTarget* pSWD)
+{
+// UNDONE: Hopefully pull it back when I can call this method from Device code.
+#ifdef UNDONE
+    logInfo("Initializing target's debug components...");
+    bool result = pSwdBus->initTargetForDebugging(*pSWD);
+    if (!result)
+    {
+        logError("Failed to initialize target's debug components.");
+        return false;
+    }
+#endif // UNDONE
+    m_pSWD = pSWD;
+    m_pSwdBus = pSwdBus;
+    return true;
+}
+
+void CpuCore::uninit()
+{
+    m_pSWD->uninit();
+    m_pSWD = NULL;
+    m_pSWD = NULL;
+    m_contextEntries.count = 0;
+    m_currentDHCSR = 0;
+}
+
+void CpuCore::disconnect()
+{
+    m_pSWD->disconnect();
+    m_pSWD->uninit();
+    m_pSWD = NULL;
+    m_pSwdBus = NULL;
+    m_contextEntries.count = 0;
+    m_currentDHCSR = 0;
+}
+
+void CpuCore::initForDebugging()
+{
+    enableDWTandVectorCatches();
+    initDWT();
+    initFPB();
+}
+
+void CpuCore::enableDWTandVectorCatches()
+{
+    // DEMCR_DWTENA is the name on ARMv6M and it is called TRCENA on ARMv7M.
+    const uint32_t DEMCR_DWTENA_Bit = 1 << 24;
+    // Enable Halting debug trap on a HardFault exception.
+    const uint32_t DEMCR_VC_HARDERR_Bit = 1 << 10;
+    // Enable Halting debug trap on a fault occurring during exception entry or exception return.
+    const uint32_t DEMCR_VC_INTERR_Bit = 1 << 9;
+    // Enable Halting debug trap on a BusFault exception.
+    const uint32_t DEMCR_VC_BUSERR_Bit = 1 << 8;
+    // Enable Halting debug trap on a UsageFault exception caused by a state information error, for example an
+    // Undefined Instruction exception.
+    const uint32_t DEMCR_VC_STATERR_Bit = 1 << 7;
+    // Enable Halting debug trap on a UsageFault exception caused by a checking error, for example an alignment
+    // check error.
+    const uint32_t DEMCR_VC_CHKERR_Bit = 1 << 6;
+    // Enable Halting debug trap on a UsageFault caused by an access to a coprocessor.
+    const uint32_t DEMCR_VC_NOCPERR_Bit = 1 << 5;
+    // Enable Halting debug trap on a MemManage exception.
+    const uint32_t DEMCR_VC_MMERR_Bit = 1 << 4;
+    // Catch all of the vectors.
+    const uint32_t allVectorCatchBits = DEMCR_VC_HARDERR_Bit | DEMCR_VC_INTERR_Bit | DEMCR_VC_BUSERR_Bit |
+                                        DEMCR_VC_STATERR_Bit | DEMCR_VC_CHKERR_Bit | DEMCR_VC_NOCPERR_Bit |
+                                        DEMCR_VC_MMERR_Bit;
+
+    if (!setOrClearBitsInDEMCR(DEMCR_DWTENA_Bit | allVectorCatchBits, true))
+    {
+        logErrorF("Core%lu: Failed to set DWTENA/TRCENA and vector catch bits in DEMCR register.", m_coreId);
+        return;
+    }
+}
+
+bool CpuCore::setOrClearBitsInDEMCR(uint32_t bitMask, bool set)
+{
+    // Debug Exception and Monitor Control Register, DEMCR
+    const uint32_t DEMCR_Address = 0xE000EDFC;
+
+    uint32_t DEMCR_Value = 0;
+    if (readMemory(DEMCR_Address, &DEMCR_Value, sizeof(DEMCR_Value), SWD::TRANSFER_32BIT) != sizeof(DEMCR_Value))
+    {
+        logErrorF("Core%lu: Failed to read DEMCR register.", m_coreId);
+        return false;
+    }
+
+    // Set or clear the requested bits.
+    if (set)
+    {
+        DEMCR_Value |= bitMask;
+    }
+    else
+    {
+        DEMCR_Value &= ~bitMask;
+    }
+
+    if (writeMemory(DEMCR_Address, &DEMCR_Value, sizeof(DEMCR_Value), SWD::TRANSFER_32BIT) != sizeof(DEMCR_Value))
+    {
+        logErrorF("Core%lu: Failed to write DEMCR register.", m_coreId);
+        return false;
+    }
+    return true;
+}
+
+uint32_t CpuCore::readMemory(uint32_t address, void* pvBuffer, uint32_t bufferSize, SWD::TransferSize readSize)
+{
+    if (m_hasDetectedSwdDisconnect || bufferSize == 0)
+    {
+        return 0;
+    }
+
+    assert ( m_pSWD != NULL );
+    uint32_t bytesRead = m_pSWD->readMemory(address, pvBuffer, bufferSize, readSize);
+    if (bytesRead == 0 && m_pSWD->getLastReadWriteError() == SWD::SWD_PROTOCOL)
+    {
+        handleUnrecoverableSwdError();
+    }
+    return bytesRead;
+}
+
+void CpuCore::handleUnrecoverableSwdError()
+{
+    logErrorF("Encountered unrecoverable read/write error %d.", m_pSWD->getLastReadWriteError());
+    m_hasDetectedSwdDisconnect = true;
+    if (m_connectionFailureHandler)
+    {
+        m_connectionFailureHandler();
+    }
+}
+
+uint32_t CpuCore::writeMemory(uint32_t address, const void* pvBuffer, uint32_t bufferSize, SWD::TransferSize writeSize)
+{
+    if (m_hasDetectedSwdDisconnect || bufferSize == 0)
+    {
+        return 0;
+    }
+
+    assert ( m_pSWD != NULL );
+    uint32_t bytesWritten = m_pSWD->writeMemory(address, pvBuffer, bufferSize, writeSize);
+    if (bytesWritten == 0 && m_pSWD->getLastReadWriteError() == SWD::SWD_PROTOCOL)
+    {
+        handleUnrecoverableSwdError();
+    }
+    return bytesWritten;
+}
+
+void CpuCore::initDWT()
+{
+    uint32_t watchpointCount = clearDWTComparators();
+    logInfoF("Core%lu supports %lu hardware watchpoints.", m_coreId, watchpointCount);
+}
+
+uint32_t CpuCore::clearDWTComparators()
+{
+    uint32_t DWT_COMP_Address = 0xE0001020;
+    uint32_t comparatorCount = getDWTComparatorCount();
+    for (uint32_t i = 0 ; i < comparatorCount ; i++)
+    {
+        clearDWTComparator(DWT_COMP_Address);
+        DWT_COMP_Address += sizeof(DWT_COMP_Type);
+    }
+    return comparatorCount;
+}
+
+uint32_t CpuCore::getDWTComparatorCount()
+{
+    uint32_t DWT_CTRL_Address = 0xE0001000;
+    uint32_t DWT_CTRL_Value = 0;
+
+    if (readMemory(DWT_CTRL_Address, &DWT_CTRL_Value, sizeof(DWT_CTRL_Value), SWD::TRANSFER_32BIT) != sizeof(DWT_CTRL_Value))
+    {
+        logErrorF("Core%lu: Failed to read DWT_CTRL register.", m_coreId);
+        return 0;
+    }
+    return (DWT_CTRL_Value >> 28) & 0xF;
+}
+
+void CpuCore::clearDWTComparator(uint32_t comparatorAddress)
+{
+    //  Matched.  Read-only.  Set to 1 to indicate that this comparator has been matched.  Cleared on read.
+    const uint32_t DWT_COMP_FUNCTION_DATAVMATCH_Bit = 1 << 8;
+    //  Cycle Count Match.  Set to 1 for enabling cycle count match and 0 otherwise.  Only valid on comparator 0.
+    const uint32_t DWT_COMP_FUNCTION_CYCMATCH_Bit = 1 << 7;
+    //  Enable Data Trace Address offset packets.  0 to disable.
+    const uint32_t DWT_COMP_FUNCTION_EMITRANGE_Bit = 1 << 5;
+    DWT_COMP_Type dwtComp;
+
+    if (readMemory(comparatorAddress, &dwtComp, 3*sizeof(uint32_t), SWD::TRANSFER_32BIT) != 3*sizeof(uint32_t))
+    {
+        logErrorF("Core%lu: Failed to read DWT_COMP/DWT_MASK/DWT_FUNCTION registers for clearing.", m_coreId);
+    }
+
+    dwtComp.comp = 0;
+    dwtComp.mask = 0;
+    dwtComp.function &= ~(DWT_COMP_FUNCTION_DATAVMATCH_Bit |
+                          DWT_COMP_FUNCTION_CYCMATCH_Bit |
+                          DWT_COMP_FUNCTION_EMITRANGE_Bit |
+                          DWT_COMP_FUNCTION_FUNCTION_Mask);
+
+    if (writeMemory(comparatorAddress, &dwtComp, 3*sizeof(uint32_t), SWD::TRANSFER_32BIT) != 3*sizeof(uint32_t))
+    {
+        logErrorF("Core%lu: Failed to write DWT_COMP/DWT_MASK/DWT_FUNCTION registers for clearing.", m_coreId);
+    }
+}
+
+void CpuCore::initFPB()
+{
+    uint32_t breakpointCount = clearFPBComparators();
+    logInfoF("Core%lu supports %lu hardware breakpoints.", m_coreId, breakpointCount);
+    enableFPB();
+}
+
+uint32_t CpuCore::clearFPBComparators()
+{
+    uint32_t currentComparatorAddress = 0xE0002008;
+    uint32_t codeComparatorCount = getFPBCodeComparatorCount();
+    uint32_t literalComparatorCount = getFPBLiteralComparatorCount();
+    uint32_t totalComparatorCount = codeComparatorCount + literalComparatorCount;
+    for (uint32_t i = 0 ; i < totalComparatorCount ; i++)
+    {
+        clearFPBComparator(currentComparatorAddress);
+        currentComparatorAddress += sizeof(uint32_t);
+    }
+    return codeComparatorCount;
+}
+
+uint32_t CpuCore::getFPBCodeComparatorCount()
+{
+    // Most significant bits of number of instruction address comparators.  Read-only
+    const uint32_t FP_CTRL_NUM_CODE_MSB_Shift = 12;
+    const uint32_t FP_CTRL_NUM_CODE_MSB_Mask = 0x7 << FP_CTRL_NUM_CODE_MSB_Shift;
+    //  Least significant bits of number of instruction address comparators.  Read-only
+    const uint32_t FP_CTRL_NUM_CODE_LSB_Shift = 4;
+    const uint32_t FP_CTRL_NUM_CODE_LSB_Mask = 0xF << FP_CTRL_NUM_CODE_LSB_Shift;
+    uint32_t FP_CTRL_Value = readFPControlRegister();
+
+    return (((FP_CTRL_Value & FP_CTRL_NUM_CODE_MSB_Mask) >> (FP_CTRL_NUM_CODE_MSB_Shift - 4)) |
+            ((FP_CTRL_Value & FP_CTRL_NUM_CODE_LSB_Mask) >> FP_CTRL_NUM_CODE_LSB_Shift));
+}
+
+uint32_t CpuCore::readFPControlRegister()
+{
+    uint32_t FP_CTRL_Value = 0;
+    if (readMemory(FP_CTRL_Address, &FP_CTRL_Value, sizeof(FP_CTRL_Value), SWD::TRANSFER_32BIT) != sizeof(FP_CTRL_Value))
+    {
+        logErrorF("Core%lu: Failed to read FP_CTRL register.", m_coreId);
+        return 0;
+    }
+    return FP_CTRL_Value;
+}
+
+uint32_t CpuCore::getFPBLiteralComparatorCount()
+{
+    //  Number of instruction literal address comparators.  Read only
+    const uint32_t FP_CTRL_NUM_LIT_Shift = 8;
+    const uint32_t FP_CTRL_NUM_LIT_Mask = 0xF << FP_CTRL_NUM_LIT_Shift;
+    uint32_t FP_CTRL_Value = readFPControlRegister();
+
+    return ((FP_CTRL_Value & FP_CTRL_NUM_LIT_Mask) >> FP_CTRL_NUM_LIT_Shift);
+}
+
+void CpuCore::clearFPBComparator(uint32_t comparatorAddress)
+{
+    uint32_t comparatorValue = 0;
+    if (writeMemory(comparatorAddress, &comparatorValue, sizeof(comparatorValue), SWD::TRANSFER_32BIT) != sizeof(comparatorValue))
+    {
+        logErrorF("Core%lu: Failed to write to FP comparator register.", m_coreId);
+    }
+}
+
+void CpuCore::enableFPB()
+{
+    //  This Key field must be set to 1 when writing or the write will be ignored.
+    const uint32_t FP_CTRL_KEY = 1 << 1;
+    //  Enable bit for the FPB.  Set to 1 to enable FPB.
+    const uint32_t FP_CTRL_ENABLE = 1;
+
+    uint32_t FP_CTRL_Value = readFPControlRegister();
+    FP_CTRL_Value |= (FP_CTRL_KEY | FP_CTRL_ENABLE);
+    writeFPControlRegister(FP_CTRL_Value);
+}
+
+void CpuCore::writeFPControlRegister(uint32_t FP_CTRL_Value)
+{
+    if (writeMemory(FP_CTRL_Address, &FP_CTRL_Value, sizeof(FP_CTRL_Value), SWD::TRANSFER_32BIT) != sizeof(FP_CTRL_Value))
+    {
+        logErrorF("Core%lu: Failed to write FP_CTRL register.", m_coreId);
+    }
+}
+
+bool CpuCore::enableHaltDebugging(uint32_t timeout_ms)
+{
+    uint32_t DHCSR_Val = 0;
+    if (!readDHCSRWithRetry(&DHCSR_Val, timeout_ms))
+    {
+        return false;
+    }
+
+    // The values of the current DHCSR_C_* bits will be overwritten with just what is needed to enable SWD debugging
+    // and maintain the target's current halted state.
+    if (isHalted())
+    {
+        // If the CPU is currently halted then we don't want to set DHCSR with DHCSR_C_HALT_Bit cleared as that will
+        // start the target running again.
+        logInfoF("Core%lu was already halted at debugger init.", m_coreId);
+        DHCSR_Val = DHCSR_C_HALT_Bit;
+    }
+    else
+    {
+        DHCSR_Val = 0;
+    }
+
+    //  Enable halt mode debug.  Set to 1 to enable halt mode debugging.
+    const uint32_t DHCSR_C_DEBUGEN_Bit = 1 << 0;
+    DHCSR_Val |= DHCSR_C_DEBUGEN_Bit;
+    if (!writeDHCSR(DHCSR_Val))
+    {
+        logErrorF("Core%lu: Failed to set C_DEBUGEN bit in DHCSR.", m_coreId);
+        return false;
+    }
+
+    return true;
+}
+
+bool CpuCore::readDHCSRWithRetry(uint32_t* pValue, uint32_t timeout_ms)
+{
+    bool returnVal = false;
+    absolute_time_t endTime = make_timeout_time_ms(timeout_ms);
+    m_pSwdBus->disableErrorLogging();
+    if (timeout_ms > 0)
+    {
+        logErrorDisable();
+    }
+    do
+    {
+        if (readDHCSR(pValue))
+        {
+            returnVal = true;
+            break;
+        }
+    } while (absolute_time_diff_us(get_absolute_time(), endTime) > 0);
+    if (timeout_ms > 0)
+    {
+        logErrorEnable();
+    }
+    m_pSwdBus->enableErrorLogging();
+
+    return returnVal;
+}
+
+bool CpuCore::readDHCSR(uint32_t* pValue)
+{
+    if (readMemory(DHCSR_Address, pValue, sizeof(*pValue), SWD::TRANSFER_32BIT) != sizeof(*pValue))
+    {
+        logErrorF("Core%lu: Failed to read DHCSR register.", m_coreId);
+        return false;
+    }
+    m_currentDHCSR = *pValue;
+    return true;
+}
+
+bool CpuCore::writeDHCSR(uint32_t DHCSR_Value)
+{
+    // Upper 16-bits must contain DBGKEY for CPU to accept this write.
+    const uint32_t DHCSR_DBGKEY_Shift = 16;
+    const uint32_t DHCSR_DBGKEY_Mask = 0xFFFF << DHCSR_DBGKEY_Shift;
+    const uint32_t DHCSR_DBGKEY = 0xA05F << DHCSR_DBGKEY_Shift;
+    DHCSR_Value = (DHCSR_Value & ~DHCSR_DBGKEY_Mask) | DHCSR_DBGKEY;
+
+    return writeMemory(DHCSR_Address, &DHCSR_Value, sizeof(DHCSR_Value), SWD::TRANSFER_32BIT) == sizeof(DHCSR_Value);
+}
+
+bool CpuCore::requestHalt()
+{
+    // Shouldn't have valid context around when core was running.
+    assert ( m_contextEntries.count == 0 );
+
+    uint32_t DHCSR_Val = 0;
+    readDHCSR(&DHCSR_Val);
+    // Ignore read errors.
+
+    DHCSR_Val |= DHCSR_C_HALT_Bit;
+
+    if (!writeDHCSR(DHCSR_Val))
+    {
+        logErrorF("Core%lu: Failed to set C_HALT bit in DHCSR.", m_coreId);
+        return false;
+    }
+    return true;
+}
+
+
+void CpuCore::checkForFpu(FpuDiscoveryStates* pFpuState)
+{
+    if (*pFpuState != FPU_MAYBE)
+    {
+        // We already know for sure whether there is a FPU on this device or not so just return.
+        return;
+    }
+
+    const uint32_t CPACR_Address = 0xE000ED88;
+    const uint32_t CPACR_CP10_Shift = 20;
+    const uint32_t CPACR_CP10_Mask = 0xF << CPACR_CP10_Shift;
+    const uint32_t CPACR_CP11_Shift = 22;
+    const uint32_t CPACR_CP11_Mask = 0xF << CPACR_CP11_Shift;
+
+    uint32_t CPACR_OrigValue = 0;
+    if (readMemory(CPACR_Address, &CPACR_OrigValue, sizeof(CPACR_OrigValue), SWD::TRANSFER_32BIT) != sizeof(CPACR_OrigValue))
+    {
+        logErrorF("Core%lu: Failed to read CPACR register.", m_coreId);
+        // On error, assume that FPU doesn't exist.
+        *pFpuState = FPU_NOT_AVAILABLE;
+        return;
+    }
+    if ((CPACR_OrigValue & CPACR_CP10_Mask) && (CPACR_OrigValue & CPACR_CP11_Mask))
+    {
+        // FPU exists and is enabled.
+        logInfoF("Core%lu has FPU.", m_coreId);
+        *pFpuState = FPU_AVAILABLE;
+        return;
+    }
+
+    // Try enabling the FPU.
+    uint32_t CPACR_TestValue = CPACR_CP10_Mask | CPACR_CP11_Mask | CPACR_OrigValue;
+    if (writeMemory(CPACR_Address, &CPACR_TestValue, sizeof(CPACR_TestValue), SWD::TRANSFER_32BIT) != sizeof(CPACR_TestValue))
+    {
+        logErrorF("Core%lu: Failed to test CPACR register.", m_coreId);
+        // On error, assume that FPU doesn't exist.
+        *pFpuState = FPU_NOT_AVAILABLE;
+        return;
+    }
+
+    // See if the FPU enable took. If so then the FPU exists.
+    uint32_t CPACR_UpdatedValue = ~CPACR_TestValue;
+    if (readMemory(CPACR_Address, &CPACR_UpdatedValue, sizeof(CPACR_UpdatedValue), SWD::TRANSFER_32BIT) != sizeof(CPACR_UpdatedValue))
+    {
+        logErrorF("Core%lu: Failed to verify CPACR register.", m_coreId);
+        // On error, assume that FPU doesn't exist.
+        *pFpuState = FPU_NOT_AVAILABLE;
+    }
+    if (CPACR_UpdatedValue == CPACR_TestValue)
+    {
+        logInfoF("Core%lu has FPU.", m_coreId);
+        *pFpuState = FPU_AVAILABLE;
+    }
+
+    // Restore CPACR Value.
+    if (writeMemory(CPACR_Address, &CPACR_OrigValue, sizeof(CPACR_OrigValue), SWD::TRANSFER_32BIT) != sizeof(CPACR_OrigValue))
+    {
+        logErrorF("Core%lu: Failed to restore CPACR register.", m_coreId);
+    }
+}
+
+void CpuCore::readContext(FpuDiscoveryStates fpu)
+{
+    if (m_contextEntries.count != 0)
+    {
+        // Have already called readContext since the last write.
+        return;
+    }
+
+    bool encounteredError = false;
+    bool contextHasFpu = fpu >= FPU_MAYBE;
+    if (contextHasFpu)
+    {
+        m_contextEntries.count = registerCountFPU;
+    }
+    else
+    {
+        m_contextEntries.count = registerCountNoFPU;
+    }
+    Context_Init(&m_context, &m_contextEntries, 1);
+
+    // Transfer R0 - PSP first.
+    for (uint32_t i = R0 ; i <= PSP ; i++)
+    {
+        uint32_t regValue = 0;
+        if (!readCpuRegister(i, &regValue))
+        {
+            encounteredError = true;
+        }
+        Context_Set(&m_context, i, regValue);
+    }
+
+    // Transfer CONTROL, FAULTMASK, BASEPRI, PRIMASK next. They are all accessed in the CPU via a single 32-bit entry.
+    uint32_t specialRegs = 0;
+    if (!readCpuRegister(dcrsrSpecialRegisterIndex, &specialRegs))
+    {
+        encounteredError = true;
+    }
+    for (uint32_t i = 0 ; i < 4 ; i++)
+    {
+        Context_Set(&m_context, PRIMASK+i, (specialRegs >> (8 * i)) & 0xFF);
+    }
+
+    // Transfer FPU registers if we returned target XML that indicates they might/do exist.
+    if (contextHasFpu)
+    {
+        // Transfer S0-S31 floating point registers.
+        for (uint32_t i = 0 ; i < 32 ; i++)
+        {
+            uint32_t regValue = 0xBAADFEED;
+            if (fpu == FPU_AVAILABLE)
+            {
+                if (!readCpuRegister(dcrsrS0Index+i, &regValue))
+                {
+                    encounteredError = true;
+                }
+            }
+            Context_Set(&m_context, S0+i, regValue);
+        }
+
+        // Transfer FPSCR register.
+        if (fpu == FPU_AVAILABLE)
+        {
+            uint32_t regValue = 0xBAADFEED;
+            if (fpu == FPU_AVAILABLE)
+            {
+                if (!readCpuRegister(dcrsrFpscrIndex, &regValue))
+                {
+                    encounteredError = true;
+                }
+            }
+            Context_Set(&m_context, FPSCR, regValue);
+        }
+    }
+
+    if (encounteredError)
+    {
+        logErrorF("Core%lu: Failed to read CPU register(s).", m_coreId);
+    }
+}
+
+bool CpuCore::readCpuRegister(uint32_t registerIndex, uint32_t* pValue)
+{
+    uint32_t DCRSR_Value = registerIndex & DCRSR_REGSEL_Mask;
+    if (writeMemory(DCRSR_Address, &DCRSR_Value, sizeof(DCRSR_Value), SWD::TRANSFER_32BIT) != sizeof(DCRSR_Value))
+    {
+        return false;
+    }
+
+    waitForRegisterTransferToComplete();
+
+    return readMemory(DCRDR_Address, pValue, sizeof(*pValue), SWD::TRANSFER_32BIT) == sizeof(*pValue);
+}
+
+void CpuCore::waitForRegisterTransferToComplete()
+{
+    uint32_t DHCSR_Value = 0;
+    do
+    {
+        if (!readDHCSR(&DHCSR_Value))
+        {
+            return;
+        }
+    } while (!hasRegisterTransferCompleted(DHCSR_Value));
+}
+
+bool CpuCore::hasRegisterTransferCompleted(uint32_t DHCSR_Value)
+{
+    const uint32_t DHCSR_S_REGRDY_Bit = 1 << 16;
+    return (DHCSR_Value & DHCSR_S_REGRDY_Bit) == DHCSR_S_REGRDY_Bit;
+}
+
+void CpuCore::writeContext(FpuDiscoveryStates fpu)
+{
+    if (m_contextEntries.count == 0)
+    {
+        // readContext() hasn't been called since last writeContext() so just return.
+        return;
+    }
+
+    bool encounteredError = false;
+
+    // Transfer R0 - PSP first.
+    for (uint32_t i = R0 ; i <= PSP ; i++)
+    {
+        if (!writeCpuRegister(i, Context_Get(&m_context, i)))
+        {
+            encounteredError = true;
+        }
+    }
+
+    // Transfer CONTROL, FAULTMASK, BASEPRI, PRIMASK next. They are all accessed in the CPU via a single 32-bit entry.
+    uint32_t specialRegs = 0;
+    for (uint32_t i = 0 ; i < 4 ; i++)
+    {
+        specialRegs |= (Context_Get(&m_context, PRIMASK+i) & 0xFF) << (8 * i);
+    }
+    if (!writeCpuRegister(dcrsrSpecialRegisterIndex, specialRegs))
+    {
+        encounteredError = true;
+    }
+
+    // Transfer FPU registers back to CPU if we have detected that the FPU exists for sure.
+    if (fpu == FPU_AVAILABLE)
+    {
+        // Transfer S0-S31 floating point registers.
+        for (uint32_t i = 0 ; i < 32 ; i++)
+        {
+            if (!writeCpuRegister(dcrsrS0Index+i, Context_Get(&m_context, S0+i)))
+            {
+                encounteredError = true;
+            }
+        }
+
+        // Transfer FPSCR register.
+        if (!writeCpuRegister(dcrsrFpscrIndex, Context_Get(&m_context, FPSCR)))
+        {
+            encounteredError = true;
+        }
+    }
+
+    if (encounteredError)
+    {
+        logErrorF("Core%lu: Failed to write CPU register(s).", m_coreId);
+    }
+
+    // This context is no longer valid so mark it as such.
+    m_contextEntries.count = 0;
+}
+
+bool CpuCore::writeCpuRegister(uint32_t registerIndex, uint32_t value)
+{
+    if (writeMemory(DCRDR_Address, &value, sizeof(value), SWD::TRANSFER_32BIT) != sizeof(value))
+    {
+        return false;
+    }
+
+    uint32_t DCRSR_Value = DCRSR_REGWnR_Bit | (registerIndex & DCRSR_REGSEL_Mask);
+    if (writeMemory(DCRSR_Address, &DCRSR_Value, sizeof(DCRSR_Value), SWD::TRANSFER_32BIT) != sizeof(DCRSR_Value))
+    {
+        return false;
+    }
+
+    waitForRegisterTransferToComplete();
+
+    return true;
+}
+
+PlatformTrapReason CpuCore::determineTrapReason()
+{
+    PlatformTrapReason reason = { MRI_PLATFORM_TRAP_TYPE_UNKNOWN, 0x00000000 };
+    uint32_t debugFaultStatus = 0;
+    if (!readDFSR(&debugFaultStatus))
+    {
+        return reason;
+    }
+
+    if (debugFaultStatus & DFSR_BKPT_Bit)
+    {
+        // Was caused by hardware or software breakpoint. If PC points to BKPT then report as software breakpoint.
+        if (Platform_TypeOfCurrentInstruction() == MRI_PLATFORM_INSTRUCTION_HARDCODED_BREAKPOINT)
+        {
+            reason.type = MRI_PLATFORM_TRAP_TYPE_SWBREAK;
+        }
+        else
+        {
+            reason.type = MRI_PLATFORM_TRAP_TYPE_HWBREAK;
+        }
+    }
+    else if (debugFaultStatus & DFSR_DWTTRAP_Bit)
+    {
+        reason = findMatchedWatchpoint();
+    }
+    return reason;
+}
+
+bool CpuCore::readDFSR(uint32_t* pDFSR)
+{
+    if (readMemory(DFSR_Address, pDFSR, sizeof(*pDFSR), SWD::TRANSFER_32BIT) != sizeof(*pDFSR))
+    {
+        logErrorF("Core%lu: Failed to read DFSR.", m_coreId);
+        return false;
+    }
+    return true;
+}
+
+PlatformTrapReason CpuCore::findMatchedWatchpoint(void)
+{
+    PlatformTrapReason reason = { MRI_PLATFORM_TRAP_TYPE_UNKNOWN, 0x00000000 };
+    uint32_t currentComparatorAddress = DWT_COMP_ARRAY_Address;
+    uint32_t comparatorCount = getDWTComparatorCount();
+    for (uint32_t i = 0 ; i < comparatorCount ; i++)
+    {
+        uint32_t function = 0;
+        if (readMemory(currentComparatorAddress + offsetof(DWT_COMP_Type, function), &function, sizeof(function), SWD::TRANSFER_32BIT) != sizeof(function))
+        {
+            logErrorF("Core%lu: Failed to read DWT function register.", m_coreId);
+            return reason;
+        }
+        if (function & DWT_COMP_FUNCTION_MATCHED)
+        {
+            reason = getReasonFromMatchComparator(currentComparatorAddress, function);
+        }
+        currentComparatorAddress += sizeof(DWT_COMP_Type);
+    }
+    return reason;
+}
+
+PlatformTrapReason CpuCore::getReasonFromMatchComparator(uint32_t comparatorAddress, uint32_t function)
+{
+    PlatformTrapReason reason = { MRI_PLATFORM_TRAP_TYPE_UNKNOWN, 0x00000000 };
+    switch (function & DWT_COMP_FUNCTION_FUNCTION_Mask)
+    {
+    case DWT_COMP_FUNCTION_FUNCTION_DATA_READ:
+        reason.type = MRI_PLATFORM_TRAP_TYPE_RWATCH;
+        break;
+    case DWT_COMP_FUNCTION_FUNCTION_DATA_WRITE:
+        reason.type = MRI_PLATFORM_TRAP_TYPE_WATCH;
+        break;
+    case DWT_COMP_FUNCTION_FUNCTION_DATA_READWRITE:
+        reason.type = MRI_PLATFORM_TRAP_TYPE_AWATCH;
+        break;
+    default:
+        reason.type = MRI_PLATFORM_TRAP_TYPE_UNKNOWN;
+        break;
+    }
+
+    uint32_t compValue = 0;
+    if (readMemory(comparatorAddress + offsetof(DWT_COMP_Type, comp), &compValue, sizeof(compValue), SWD::TRANSFER_32BIT) != sizeof(compValue))
+    {
+        logErrorF("Core%lu: Failed to read DWT comp register.", m_coreId);
+        return reason;
+    }
+    reason.address = compValue;
+
+    return reason;
+}
+
+void CpuCore::enableResetVectorCatch()
+{
+    if (!setOrClearBitsInDEMCR(DEMCR_VC_CORERESET_Bit, true))
+    {
+        logErrorF("Core%lu: Failed to set reset vector catch bit in DEMCR register.", m_coreId);
+        return;
+    }
+}
+
+void CpuCore::disableResetVectorCatch()
+{
+    if (!setOrClearBitsInDEMCR(DEMCR_VC_CORERESET_Bit, false))
+    {
+        logErrorF("Core%lu: Failed to clear reset vector catch bits in DEMCR register.", m_coreId);
+        return;
+    }
+}
+
+void CpuCore::clearDFSR()
+{
+    uint32_t dfsr = 0;
+    if (!readDFSR(&dfsr))
+    {
+        logErrorF("Core%lu: Failed to read DFSR to clear it.", m_coreId);
+        return;
+    }
+    if (!writeDFSR(dfsr))
+    {
+        logErrorF("Core%lu: Failed to write DFSR to clear it.", m_coreId);
+        return;
+    }
+}
+
+bool CpuCore::writeDFSR(uint32_t dfsr)
+{
+    if (writeMemory(DFSR_Address, &dfsr, sizeof(dfsr), SWD::TRANSFER_32BIT) != sizeof(dfsr))
+    {
+        logErrorF("Core%lu: Failed to write to DFSR.", m_coreId);
+        return false;
+    }
+    return true;
+}
+
+bool CpuCore::resume()
+{
+    uint32_t DHCSR_Val = 0;
+    readDHCSR(&DHCSR_Val);
+    DHCSR_Val &= ~DHCSR_C_HALT_Bit;
+    if (!writeDHCSR(DHCSR_Val))
+    {
+        logErrorF("Core%lu: Failed to clear C_HALT bit in DHCSR.", m_coreId);
+        return false;
+    }
+    return true;
+}
+
+void CpuCore::reset()
+{
+    // Mark any loaded register context as stale before proceeding with reset.
+    m_contextEntries.count = 0;
+
+    const uint32_t AIRCR_Address = 0xE000ED0C;
+    const uint32_t AIRCR_KEY_Shift = 16;
+    const uint32_t AIRCR_KEY_Mask = 0xFFFF << AIRCR_KEY_Shift;
+    const uint32_t AIRCR_KEY_VALUE = 0x05FA << AIRCR_KEY_Shift;
+    const uint32_t AIRCR_SYSRESETREQ_Bit = 1 << 2;
+    uint32_t AIRCR_Value = 0;
+    if (readMemory(AIRCR_Address, &AIRCR_Value, sizeof(AIRCR_Value), SWD::TRANSFER_32BIT) != sizeof(AIRCR_Value))
+    {
+        logErrorF("Core%lu: Failed to read AIRCR register for device reset.", m_coreId);
+    }
+
+    // Clear out the existing key value and use the special ones to enable writes.
+    // Then set the SYSRESETREQ bit to request a device reset.
+    AIRCR_Value = (AIRCR_Value & ~AIRCR_KEY_Mask) | AIRCR_KEY_VALUE | AIRCR_SYSRESETREQ_Bit;
+
+    if (writeMemory(AIRCR_Address, &AIRCR_Value, sizeof(AIRCR_Value), SWD::TRANSFER_32BIT) != sizeof(AIRCR_Value))
+    {
+        logErrorF("Core%lu: Failed to write AIRCR register for device reset.", m_coreId);
+    }
+}
+
+void CpuCore::configureSingleSteppingBitsInDHCSR(bool enableSingleStepping)
+{
+    const uint32_t bitsToEnableSingleStepWithInterruptsDisabled = DHCSR_C_STEP_Bit | DHCSR_C_MASKINTS_Bit;
+    uint32_t DHCSR_Val = 0;
+
+    readDHCSR(&DHCSR_Val);
+    if (enableSingleStepping)
+    {
+        DHCSR_Val |= bitsToEnableSingleStepWithInterruptsDisabled;
+    }
+    else
+    {
+        DHCSR_Val &= ~bitsToEnableSingleStepWithInterruptsDisabled;
+    }
+
+    if (!writeDHCSR(DHCSR_Val))
+    {
+        logErrorF("Core%lu: Failed to update C_STEP & C_MASKINTS bits in DHCSR to %s single stepping.",
+                  m_coreId, enableSingleStepping ? "enable" : "disable");
+    }
+}
+
+uint32_t CpuCore::setBreakpoint(uint32_t breakpointAddress, bool is32BitInstruction)
+{
+    uint32_t existingFPBBreakpoint = findFPBBreakpointComparator(breakpointAddress, is32BitInstruction);
+    if (existingFPBBreakpoint != 0)
+    {
+        // This breakpoint is already set so just return pointer to existing comparator.
+        return existingFPBBreakpoint;
+    }
+
+    uint32_t freeFPBBreakpointComparator = findFreeFPBBreakpointComparator();
+    if (freeFPBBreakpointComparator == 0)
+    {
+        // All FPB breakpoint comparator slots are used so return NULL as error indicator.
+        logInfoF("Core%lu: No free hardware breakpoints for setting breakpoint at address 0x%08lX.",
+                 m_coreId, breakpointAddress);
+        return 0;
+    }
+
+    uint32_t comparatorValue = calculateFPBComparatorValue(breakpointAddress, is32BitInstruction);
+    if (writeMemory(freeFPBBreakpointComparator, &comparatorValue, sizeof(comparatorValue), SWD::TRANSFER_32BIT) != sizeof(comparatorValue))
+    {
+        logErrorF("Core%lu: Failed to set breakpoint at address 0x%08lX.", m_coreId, breakpointAddress);
+        return 0;
+    }
+    return freeFPBBreakpointComparator;
+}
+
+uint32_t CpuCore::findFPBBreakpointComparator(uint32_t breakpointAddress, bool is32BitInstruction)
+{
+    uint32_t comparatorValueForThisBreakpoint = calculateFPBComparatorValue(breakpointAddress, is32BitInstruction);
+    uint32_t codeComparatorCount = getFPBCodeComparatorCount();
+    uint32_t currentComparatorAddress = FPB_COMP_ARRAY_Address;
+    for (uint32_t i = 0 ; i < codeComparatorCount ; i++)
+    {
+        uint32_t currentComparatorValue = 0;
+        if (readMemory(currentComparatorAddress, &currentComparatorValue, sizeof(currentComparatorValue), SWD::TRANSFER_32BIT) != sizeof(currentComparatorValue))
+        {
+            logErrorF("Core%lu: Failed to read from FPB comparator at address 0x%08lX.",
+                      m_coreId, currentComparatorAddress);
+            return 0;
+        }
+        uint32_t maskOffReservedBits = maskOffFPBComparatorReservedBits(currentComparatorValue);
+        if (comparatorValueForThisBreakpoint == maskOffReservedBits)
+        {
+            return currentComparatorAddress;
+        }
+
+        currentComparatorAddress += sizeof(uint32_t);
+    }
+
+    // Return NULL if no FPB comparator is already enabled for this breakpoint.
+    return 0;
+}
+
+uint32_t CpuCore::calculateFPBComparatorValue(uint32_t breakpointAddress, bool is32BitInstruction)
+{
+    if (isBreakpointAddressInvalid(breakpointAddress))
+    {
+        return (uint32_t)~0U;
+    }
+    if (getFPBRevision() == FP_CTRL_REVISION2)
+    {
+        return calculateFPBComparatorValueRevision2(breakpointAddress);
+    }
+    else
+    {
+        return calculateFPBComparatorValueRevision1(breakpointAddress, is32BitInstruction);
+    }
+}
+
+bool CpuCore::isBreakpointAddressInvalid(uint32_t breakpointAddress)
+{
+    if (getFPBRevision() == FP_CTRL_REVISION2)
+    {
+        // On revision 2, can set breakpoint at any address in the 4GB range, except for at an odd addresses.
+        return isAddressOdd(breakpointAddress);
+    }
+    else
+    {
+        // On revision 1, can only set a breakpoint on addresses where the upper 3-bits are all 0 (upper 3.5GB is off
+        // limits) and the address is half-word aligned.
+        return isAddressAboveLowestHalfGig(breakpointAddress) || isAddressOdd(breakpointAddress);
+    }
+}
+
+uint32_t CpuCore::getFPBRevision()
+{
+    // Flash Patch breakpoint architecture revision. 0 for revision 1 and 1 for revision 2.
+    uint32_t FP_CTRL_REV_Shift = 28;
+    uint32_t FP_CTRL_REV_Mask = (0xF << FP_CTRL_REV_Shift);
+
+    uint32_t controlValue = readFPControlRegister();
+    return ((controlValue & FP_CTRL_REV_Mask) >> FP_CTRL_REV_Shift);
+}
+
+bool CpuCore::isAddressOdd(uint32_t address)
+{
+    return !!(address & 0x1);
+}
+
+bool CpuCore::isAddressAboveLowestHalfGig(uint32_t address)
+{
+    return !!(address & 0xE0000000);
+}
+
+uint32_t CpuCore::calculateFPBComparatorValueRevision1(uint32_t breakpointAddress, bool is32BitInstruction)
+{
+    uint32_t    comparatorValue;
+    comparatorValue = (breakpointAddress & FP_COMP_COMP_Mask);
+    comparatorValue |= FP_COMP_ENABLE_Bit;
+    comparatorValue |= calculateFPBComparatorReplaceValue(breakpointAddress, is32BitInstruction);
+
+    return comparatorValue;
+}
+
+uint32_t CpuCore::calculateFPBComparatorReplaceValue(uint32_t breakpointAddress, bool is32BitInstruction)
+{
+    //  Defines the behaviour for code address comparators.
+    uint32_t FP_COMP_REPLACE_Shift = 30;
+    // Breakpoint on lower halfword.
+    uint32_t FP_COMP_REPLACE_BREAK_LOWER = 0x1U << FP_COMP_REPLACE_Shift;
+    // Breakpoint on upper halfword.
+    uint32_t FP_COMP_REPLACE_BREAK_UPPER = 0x2U << FP_COMP_REPLACE_Shift;
+    // Breakpoint on word.
+    uint32_t FP_COMP_REPLACE_BREAK = 0x3U << FP_COMP_REPLACE_Shift;
+
+    if (is32BitInstruction)
+    {
+        return FP_COMP_REPLACE_BREAK;
+    }
+    else if (isAddressInUpperHalfword(breakpointAddress))
+    {
+        return FP_COMP_REPLACE_BREAK_UPPER;
+    }
+    else
+    {
+        return FP_COMP_REPLACE_BREAK_LOWER;
+    }
+}
+
+bool CpuCore::isAddressInUpperHalfword(uint32_t address)
+{
+    return !!(address & 0x2);
+}
+
+uint32_t CpuCore::calculateFPBComparatorValueRevision2(uint32_t breakpointAddress)
+{
+    return breakpointAddress | FP_COMP_BE_Bit;
+}
+
+uint32_t CpuCore::maskOffFPBComparatorReservedBits(uint32_t comparatorValue)
+{
+    //  Defines the behaviour for code address comparators.
+    uint32_t FP_COMP_REPLACE_Shift = 30;
+    uint32_t FP_COMP_REPLACE_Mask = 0x3U << FP_COMP_REPLACE_Shift;
+
+    if (getFPBRevision() == FP_CTRL_REVISION2)
+    {
+        return comparatorValue;
+    }
+    else
+    {
+        return (comparatorValue & (FP_COMP_REPLACE_Mask | FP_COMP_COMP_Mask | FP_COMP_ENABLE_Bit));
+    }
+}
+
+uint32_t CpuCore::findFreeFPBBreakpointComparator()
+{
+    uint32_t currentComparatorAddress = FPB_COMP_ARRAY_Address;
+    uint32_t codeComparatorCount = getFPBCodeComparatorCount();
+    for (uint32_t i = 0 ; i < codeComparatorCount ; i++)
+    {
+        uint32_t currentComparatorValue = 0;
+        if (readMemory(currentComparatorAddress, &currentComparatorValue, sizeof(currentComparatorValue), SWD::TRANSFER_32BIT) != sizeof(currentComparatorValue))
+        {
+            logErrorF("Core%lu: Failed to read from FPB comparator at address 0x%08lX.",
+                      m_coreId, currentComparatorAddress);
+            return 0;
+        }
+        if (!isFPBComparatorEnabled(currentComparatorValue))
+        {
+            return currentComparatorAddress;
+        }
+
+        currentComparatorAddress += sizeof(uint32_t);
+    }
+
+    // Return 0 if no FPB breakpoint comparators are free.
+    return 0;
+}
+
+bool CpuCore::isFPBComparatorEnabled(uint32_t comparator)
+{
+    if (getFPBRevision() == FP_CTRL_REVISION2)
+    {
+        return isFPBComparatorEnabledRevision2(comparator);
+    }
+    else
+    {
+        return isFPBComparatorEnabledRevision1(comparator);
+    }
+}
+
+bool CpuCore::isFPBComparatorEnabledRevision1(uint32_t comparator)
+{
+    return !!(comparator & FP_COMP_ENABLE_Bit);
+}
+
+bool CpuCore::isFPBComparatorEnabledRevision2(uint32_t comparator)
+{
+    return !!((comparator & FP_COMP_BE_Bit) || (comparator & FP_COMP_FE_Bit));
+}
+
+uint32_t CpuCore::clearBreakpoint(uint32_t breakpointAddress, bool is32BitInstruction)
+{
+    uint32_t existingFPBBreakpoint = findFPBBreakpointComparator(breakpointAddress, is32BitInstruction);
+    if (existingFPBBreakpoint != 0)
+    {
+        clearFPBComparator(existingFPBBreakpoint);
+        logInfoF("Core%lu: Hardware breakpoint cleared at address 0x%08lX.", m_coreId, breakpointAddress);
+    }
+
+    return existingFPBBreakpoint;
+}
+
+void CpuCore::setWatchpoint(uintmri_t address, uintmri_t size,  PlatformWatchpointType type)
+{
+    uint32_t nativeType = convertWatchpointTypeToCortexMType(type);
+    if (!isValidDWTComparatorSetting(address, size, nativeType))
+    {
+        __throw(invalidArgumentException);
+    }
+
+    uint32_t comparatorAddress = enableDWTWatchpoint(address, size, nativeType);
+    if (comparatorAddress == 0)
+    {
+        __throw(exceededHardwareResourcesException);
+    }
+    logInfoF("Core%lu: Hardware watchpoint set at address 0x%08X.", m_coreId, address);
+}
+
+uint32_t CpuCore::convertWatchpointTypeToCortexMType(PlatformWatchpointType type)
+{
+    switch (type)
+    {
+    case MRI_PLATFORM_WRITE_WATCHPOINT:
+        return DWT_COMP_FUNCTION_FUNCTION_DATA_WRITE;
+    case MRI_PLATFORM_READ_WATCHPOINT:
+        return DWT_COMP_FUNCTION_FUNCTION_DATA_READ;
+    case MRI_PLATFORM_READWRITE_WATCHPOINT:
+        return DWT_COMP_FUNCTION_FUNCTION_DATA_READWRITE;
+    default:
+        return 0;
+    }
+}
+
+bool CpuCore::isValidDWTComparatorSetting(uint32_t watchpointAddress,
+                                           uint32_t watchpointSize,
+                                           uint32_t watchpointType)
+{
+    return isValidDWTComparatorSize(watchpointSize) &&
+           isValidDWTComparatorAddress(watchpointAddress, watchpointSize) &&
+           isValidDWTComparatorType(watchpointType);
+}
+
+bool CpuCore::isValidDWTComparatorSize(uint32_t watchpointSize)
+{
+    return isPowerOf2(watchpointSize);
+}
+
+bool CpuCore::isPowerOf2(uint32_t value)
+{
+    return (value & (value - 1)) == 0;
+}
+
+bool CpuCore::isValidDWTComparatorAddress(uint32_t watchpointAddress, uint32_t watchpointSize)
+{
+    return isAddressAlignedToSize(watchpointAddress, watchpointSize);
+}
+
+bool CpuCore::isAddressAlignedToSize(uint32_t address, uint32_t size)
+{
+    uint32_t addressMask = ~(size - 1);
+    return address == (address & addressMask);
+}
+
+bool CpuCore::isValidDWTComparatorType(uint32_t watchpointType)
+{
+    return (watchpointType == DWT_COMP_FUNCTION_FUNCTION_DATA_READ) ||
+           (watchpointType == DWT_COMP_FUNCTION_FUNCTION_DATA_WRITE) ||
+           (watchpointType == DWT_COMP_FUNCTION_FUNCTION_DATA_READWRITE);
+}
+
+uint32_t CpuCore::enableDWTWatchpoint(uint32_t watchpointAddress,
+                                       uint32_t watchpointSize,
+                                       uint32_t watchpointType)
+{
+    uint32_t comparatorAddress = findDWTComparator(watchpointAddress, watchpointSize, watchpointType);
+    if (comparatorAddress != 0)
+    {
+        // This watchpoint has already been set so return a pointer to it.
+        return comparatorAddress;
+    }
+
+    comparatorAddress = findFreeDWTComparator();
+    if (comparatorAddress == 0)
+    {
+        // There are no free comparators left.
+        logInfoF("Core%lu: No free hardware watchpoints for setting watchpoint at address 0x%08lX.",
+                 m_coreId, watchpointAddress);
+        return 0;
+    }
+
+    if (!attemptToSetDWTComparator(comparatorAddress, watchpointAddress, watchpointSize, watchpointType))
+    {
+        // Failed set due to the size being larger than supported by CPU.
+        logInfoF("Core%lu: Failed to set watchpoint at address 0x%08lX of size %lu bytes.",
+                 m_coreId, watchpointAddress, watchpointSize);
+        return 0;
+    }
+
+    // Successfully configured a free comparator for this watchpoint.
+    return comparatorAddress;
+}
+
+uint32_t CpuCore::findDWTComparator(uint32_t watchpointAddress,
+                                  uint32_t watchpointSize,
+                                  uint32_t watchpointType)
+{
+    uint32_t currentComparatorAddress = DWT_COMP_ARRAY_Address;
+    uint32_t comparatorCount = getDWTComparatorCount();
+    for (uint32_t i = 0 ; i < comparatorCount ; i++)
+    {
+        if (doesDWTComparatorMatch(currentComparatorAddress, watchpointAddress, watchpointSize, watchpointType))
+        {
+            return currentComparatorAddress;
+        }
+
+        currentComparatorAddress += sizeof(DWT_COMP_Type);
+    }
+
+    // Return NULL if no DWT comparator is already enabled for this watchpoint.
+    return 0;
+}
+
+bool CpuCore::doesDWTComparatorMatch(uint32_t comparatorAddress,
+                                      uint32_t address,
+                                      uint32_t size,
+                                      uint32_t function)
+{
+    return doesDWTComparatorFunctionMatch(comparatorAddress, function) &&
+           doesDWTComparatorAddressMatch(comparatorAddress, address) &&
+           doesDWTComparatorMaskMatch(comparatorAddress, size);
+}
+
+bool CpuCore::doesDWTComparatorFunctionMatch(uint32_t comparatorAddress, uint32_t function)
+{
+    uint32_t functionValue = 0;
+    if (readMemory(comparatorAddress + offsetof(DWT_COMP_Type, function), &functionValue, sizeof(functionValue), SWD::TRANSFER_32BIT) != sizeof(functionValue))
+    {
+        logErrorF("Core%lu: Failed to read DWT function register.", m_coreId);
+        return false;
+    }
+    uint32_t importantFunctionBits = maskOffDWTFunctionBits(functionValue);
+
+    return importantFunctionBits == function;
+}
+
+uint32_t CpuCore::maskOffDWTFunctionBits(uint32_t functionValue)
+{
+    // Data Watchpoint and Trace Comparator Function Bits.
+    //  Data Address Linked Index 1.
+    const uint32_t DWT_COMP_FUNCTION_DATAVADDR1_Bit = 0xF << 16;
+    //  Data Address Linked Index 0.
+    const uint32_t DWT_COMP_FUNCTION_DATAVADDR0_Bit = 0xF << 12;
+    //  Selects size for data value matches.
+    const uint32_t DWT_COMP_FUNCTION_DATAVSIZE_Mask = 3 << 10;
+    //  Data Value Match.  Set to 0 for address compare and 1 for data value compare.
+    const uint32_t DWT_COMP_FUNCTION_DATAVMATCH_Bit = 1 << 8;
+    //  Cycle Count Match.  Set to 1 for enabling cycle count match and 0 otherwise.  Only valid on comparator 0.
+    const uint32_t DWT_COMP_FUNCTION_CYCMATCH_Bit = 1 << 7;
+    //  Enable Data Trace Address offset packets.  0 to disable.
+    const uint32_t DWT_COMP_FUNCTION_EMITRANGE_Bit = 1 << 5;
+
+    return functionValue & (DWT_COMP_FUNCTION_DATAVADDR1_Bit |
+                            DWT_COMP_FUNCTION_DATAVADDR0_Bit |
+                            DWT_COMP_FUNCTION_DATAVSIZE_Mask |
+                            DWT_COMP_FUNCTION_DATAVMATCH_Bit |
+                            DWT_COMP_FUNCTION_CYCMATCH_Bit |
+                            DWT_COMP_FUNCTION_EMITRANGE_Bit |
+                            DWT_COMP_FUNCTION_FUNCTION_Mask);
+
+}
+
+bool CpuCore::doesDWTComparatorAddressMatch(uint32_t comparatorAddress, uint32_t address)
+{
+    uint32_t compValue = 0;
+    if (readMemory(comparatorAddress + offsetof(DWT_COMP_Type, comp), &compValue, sizeof(compValue), SWD::TRANSFER_32BIT) != sizeof(compValue))
+    {
+        logErrorF("Core%lu: Failed to read DWT comparator register.", m_coreId);
+        return false;
+    }
+    return compValue == address;
+}
+
+bool CpuCore::doesDWTComparatorMaskMatch(uint32_t comparatorAddress, uint32_t size)
+{
+    uint32_t maskValue = 0;
+    if (readMemory(comparatorAddress + offsetof(DWT_COMP_Type, mask), &maskValue, sizeof(maskValue), SWD::TRANSFER_32BIT) != sizeof(maskValue))
+    {
+        logErrorF("Core%lu: Failed to read DWT mask register.", m_coreId);
+        return false;
+    }
+    return maskValue == calculateLog2(size);
+}
+
+uint32_t CpuCore::calculateLog2(uint32_t value)
+{
+    uint32_t log2 = 0;
+
+    while (value > 1)
+    {
+        value >>= 1;
+        log2++;
+    }
+
+    return log2;
+}
+
+uint32_t CpuCore::findFreeDWTComparator()
+{
+    uint32_t currentComparatorAddress = DWT_COMP_ARRAY_Address;
+    uint32_t comparatorCount = getDWTComparatorCount();
+    for (uint32_t i = 0 ; i < comparatorCount ; i++)
+    {
+        if (isDWTComparatorFree(currentComparatorAddress))
+        {
+            return currentComparatorAddress;
+        }
+        currentComparatorAddress += sizeof(DWT_COMP_Type);
+    }
+
+    // Return NULL if there are no free DWT comparators.
+    return 0;
+}
+
+bool CpuCore::isDWTComparatorFree(uint32_t comparatorAddress)
+{
+    //  Selects action to be taken on match.
+    //      Disabled
+    const uint32_t DWT_COMP_FUNCTION_FUNCTION_DISABLED = 0x0;
+
+    uint32_t functionValue = 0;
+    if (readMemory(comparatorAddress + offsetof(DWT_COMP_Type, function), &functionValue, sizeof(functionValue), SWD::TRANSFER_32BIT) != sizeof(functionValue))
+    {
+        logErrorF("Core%lu: Failed to read DWT function register.", m_coreId);
+        return false;
+    }
+    return (functionValue & DWT_COMP_FUNCTION_FUNCTION_Mask) == DWT_COMP_FUNCTION_FUNCTION_DISABLED;
+}
+
+bool CpuCore::attemptToSetDWTComparator(uint32_t comparatorAddress,
+                                         uint32_t watchpointAddress,
+                                         uint32_t watchpointSize,
+                                         uint32_t watchpointType)
+{
+    if (!attemptToSetDWTComparatorMask(comparatorAddress, watchpointSize))
+    {
+        logErrorF("Core%lu: Failed to set DWT mask register to a size of %lu bytes.", m_coreId, watchpointSize);
+        return false;
+    }
+    if (writeMemory(comparatorAddress + offsetof(DWT_COMP_Type, comp), &watchpointAddress, sizeof(watchpointAddress), SWD::TRANSFER_32BIT) != sizeof(watchpointAddress))
+    {
+        logErrorF("Core%lu: Failed to write DWT comparator register.", m_coreId);
+        return false;
+    }
+    if (writeMemory(comparatorAddress + offsetof(DWT_COMP_Type, function), &watchpointType, sizeof(watchpointType), SWD::TRANSFER_32BIT) != sizeof(watchpointType))
+    {
+        logErrorF("Core%lu: Failed to write DWT function register.", m_coreId);
+        return false;
+    }
+    return true;
+}
+
+bool CpuCore::attemptToSetDWTComparatorMask(uint32_t comparatorAddress, uint32_t watchpointSize)
+{
+    uint32_t maskBitCount;
+
+    maskBitCount = calculateLog2(watchpointSize);
+    if (writeMemory(comparatorAddress + offsetof(DWT_COMP_Type, mask), &maskBitCount, sizeof(maskBitCount), SWD::TRANSFER_32BIT) != sizeof(maskBitCount))
+    {
+        logErrorF("Core%lu: Failed to write DWT mask register.", m_coreId);
+        return false;
+    }
+
+    // Processor may limit number of bits to be masked off so check.
+    uint32_t maskValue = 0;
+    if (readMemory(comparatorAddress + offsetof(DWT_COMP_Type, mask), &maskValue, sizeof(maskValue), SWD::TRANSFER_32BIT) != sizeof(maskValue))
+    {
+        logErrorF("Core%lu: Failed to read DWT mask register.", m_coreId);
+        return false;
+    }
+    return maskValue == maskBitCount;
+}
+
+void CpuCore::clearWatchpoint(uintmri_t address, uintmri_t size,  PlatformWatchpointType type)
+{
+    uint32_t nativeType = convertWatchpointTypeToCortexMType(type);
+
+    if (!isValidDWTComparatorSetting(address, size, nativeType))
+    {
+        __throw(invalidArgumentException);
+    }
+
+    disableDWTWatchpoint(address, size, nativeType);
+}
+
+uint32_t CpuCore::disableDWTWatchpoint(uint32_t watchpointAddress,
+                                        uint32_t watchpointSize,
+                                        uint32_t watchpointType)
+{
+    uint32_t comparatorAddress = findDWTComparator(watchpointAddress, watchpointSize, watchpointType);
+    if (comparatorAddress == 0)
+    {
+        // This watchpoint not set so return NULL.
+        return 0;
+    }
+
+    logInfoF("Core%lu: Hardware watchpoint cleared at address 0x%08lX.", m_coreId, watchpointAddress);
+    clearDWTComparator(comparatorAddress);
+    return comparatorAddress;
+}
+
+uint8_t CpuCore::determineCauseOfException(bool wasStopFromGDB)
+{
+    uint32_t DFSR_Value = 0;
+    if (readMemory(DFSR_Address, &DFSR_Value, sizeof(DFSR_Value), SWD::TRANSFER_32BIT) != sizeof(DFSR_Value))
+    {
+        logErrorF("Core%lu: Failed to read DFSR register.", m_coreId);
+        // NOTE: Catch all signal will be SIGSTOP.
+        return SIGSTOP;
+    }
+
+    // If VCATCH bit is set then look at CPSR to determine which exception handler was caught.
+    if (DFSR_Value & DFSR_VCATCH_Bit)
+    {
+        switch(getExceptionNumber())
+        {
+        case 2:
+            // NMI
+            logInfo("Exception caught: NMI.");
+            return SIGINT;
+        case 3:
+            // HardFault
+            logInfo("Exception caught: Hard Fault.");
+            return SIGSEGV;
+        case 4:
+            // MemManage
+            logInfo("Exception caught: Mem Manage.");
+            return SIGSEGV;
+        case 5:
+            // BusFault
+            logInfo("Exception caught: Bus Fault.");
+            return SIGBUS;
+        case 6:
+            // UsageFault
+            logInfo("Exception caught: Usage Fault.");
+            return SIGILL;
+        default:
+            // NOTE: Catch all signal for a vector/interrupt catch will be SIGINT.
+            logInfo("Exception caught: Unknown.");
+            return SIGINT;
+        }
+    }
+
+    // Check the other bits in the DFSR if VCATCH didn't occur.
+    if (DFSR_Value & DFSR_EXTERNAL_Bit)
+    {
+        logInfo("Debug event caught: External.");
+        return SIGSTOP;
+    }
+    else if (DFSR_Value & DFSR_DWTTRAP_Bit)
+    {
+        logInfo("Debug event caught: Watchpoint.");
+        return SIGTRAP;
+    }
+    else if (DFSR_Value & DFSR_BKPT_Bit)
+    {
+        logInfo("Debug event caught: Breakpoint.");
+        return SIGTRAP;
+    }
+    else if (DFSR_Value & DFSR_HALTED_Bit)
+    {
+        uint32_t DHCSR_Value = 0;
+        readDHCSR(&DHCSR_Value);
+        if ((DHCSR_Value & DHCSR_C_STEP_Bit) && !wasStopFromGDB)
+        {
+            logInfo("Debug event caught: Single Step.");
+            return SIGTRAP;
+        }
+        logInfo("Debug event caught: Halted.");
+        return SIGINT;
+    }
+
+    // NOTE: Default catch all signal is SIGSTOP.
+    logInfo("Debug event caught: Unknown.");
+    return SIGSTOP;
+}
+
+uint32_t CpuCore::getExceptionNumber()
+{
+    assert ( m_contextEntries.count != 0 );
+    return Context_Get(&m_context, CPSR) & IPSR_Mask;
+}
+
+void CpuCore::displayFaultCauseToGdbConsole()
+{
+    // Nothing to do on ARMv6-M devices since they don't have fault status registers.
+    if (m_pSWD->getCpuType() < SWD::CPU_CORTEX_M3)
+    {
+        return;
+    }
+
+    switch (getExceptionNumber())
+    {
+    case 3:
+        /* HardFault */
+        displayHardFaultCauseToGdbConsole();
+        break;
+    case 4:
+        /* MemManage */
+        displayMemFaultCauseToGdbConsole();
+        break;
+    case 5:
+        /* BusFault */
+        displayBusFaultCauseToGdbConsole();
+        break;
+    case 6:
+        /* UsageFault */
+        displayUsageFaultCauseToGdbConsole();
+        break;
+    default:
+        return;
+    }
+    WriteStringToGdbConsole("\n");
+}
+
+void CpuCore::displayHardFaultCauseToGdbConsole()
+{
+    const uint32_t HFSR_Address = 0xE000ED2C;
+    const uint32_t debugEventBit = 1 << 31;
+    const uint32_t forcedBit = 1 << 30;
+    const uint32_t vectorTableReadBit = 1 << 1;
+    uint32_t       hardFaultStatusRegister = 0xBAADFEED;
+
+    if (readMemory(HFSR_Address, &hardFaultStatusRegister, sizeof(hardFaultStatusRegister), SWD::TRANSFER_32BIT) != sizeof(hardFaultStatusRegister))
+    {
+        logErrorF("Core%lu: Failed to read the HFSR register.", m_coreId);
+        return;
+    }
+
+    WriteStringToGdbConsole("\n**Hard Fault**");
+    WriteStringToGdbConsole("\n  Status Register: ");
+    WriteHexValueToGdbConsole(hardFaultStatusRegister);
+
+    if (hardFaultStatusRegister & debugEventBit)
+    {
+        WriteStringToGdbConsole("\n    Debug Event");
+    }
+
+    if (hardFaultStatusRegister & vectorTableReadBit)
+    {
+        WriteStringToGdbConsole("\n    Vector Table Read");
+    }
+
+    if (hardFaultStatusRegister & forcedBit)
+    {
+        WriteStringToGdbConsole("\n    Forced");
+        displayMemFaultCauseToGdbConsole();
+        displayBusFaultCauseToGdbConsole();
+        displayUsageFaultCauseToGdbConsole();
+    }
+}
+
+void CpuCore::displayMemFaultCauseToGdbConsole()
+{
+    const uint32_t MMARValidBit = 1 << 7;
+    const uint32_t FPLazyStatePreservationBit = 1 << 5;
+    const uint32_t stackingErrorBit = 1 << 4;
+    const uint32_t unstackingErrorBit = 1 << 3;
+    const uint32_t dataAccess = 1 << 1;
+    const uint32_t instructionFetch = 1;
+    uint32_t       CFSR_Value = 0xBAADFEED;
+
+    if (readMemory(CFSR_Address, &CFSR_Value, sizeof(CFSR_Value), SWD::TRANSFER_32BIT) != sizeof(CFSR_Value))
+    {
+        logErrorF("Core%lu: Failed to read the CFSR register.", m_coreId);
+        return;
+    }
+    uint8_t memManageFaultStatusRegister = CFSR_Value;
+
+    /* Check to make sure that there is a memory fault to display. */
+    if (memManageFaultStatusRegister == 0)
+    {
+        return;
+    }
+
+    WriteStringToGdbConsole("\n**MPU Fault**");
+    WriteStringToGdbConsole("\n  Status Register: ");
+    WriteHexValueToGdbConsole(memManageFaultStatusRegister);
+
+    if (memManageFaultStatusRegister & MMARValidBit)
+    {
+        const uint32_t MMFAR_Address = 0xE000ED34;
+        uint32_t       MMFAR_Value;
+        if (readMemory(MMFAR_Address, &MMFAR_Value, sizeof(MMFAR_Value), SWD::TRANSFER_32BIT) != sizeof(MMFAR_Value))
+        {
+            logErrorF("Core%lu: Failed to read the MMFAR register.", m_coreId);
+            return;
+        }
+
+        WriteStringToGdbConsole("\n    Fault Address: ");
+        WriteHexValueToGdbConsole(MMFAR_Value);
+    }
+    if (memManageFaultStatusRegister & FPLazyStatePreservationBit)
+        WriteStringToGdbConsole("\n    FP Lazy Preservation");
+
+    if (memManageFaultStatusRegister & stackingErrorBit)
+    {
+        WriteStringToGdbConsole("\n    Stacking Error w/ SP = ");
+        WriteHexValueToGdbConsole(Context_Get(&m_context, SP));
+    }
+    if (memManageFaultStatusRegister & unstackingErrorBit)
+    {
+        WriteStringToGdbConsole("\n    Unstacking Error w/ SP = ");
+        WriteHexValueToGdbConsole(Context_Get(&m_context, SP));
+    }
+    if (memManageFaultStatusRegister & dataAccess)
+    {
+        WriteStringToGdbConsole("\n    Data Access");
+    }
+
+    if (memManageFaultStatusRegister & instructionFetch)
+    {
+        WriteStringToGdbConsole("\n    Instruction Fetch");
+    }
+}
+
+void CpuCore::displayBusFaultCauseToGdbConsole()
+{
+    const uint32_t BFARValidBit = 1 << 7;
+    const uint32_t FPLazyStatePreservationBit = 1 << 5;
+    const uint32_t stackingErrorBit = 1 << 4;
+    const uint32_t unstackingErrorBit = 1 << 3;
+    const uint32_t impreciseDataAccessBit = 1 << 2;
+    const uint32_t preciseDataAccessBit = 1 << 1;
+    const uint32_t instructionPrefetch = 1;
+    uint32_t       CFSR_Value = 0xBAADFEED;
+
+    if (readMemory(CFSR_Address, &CFSR_Value, sizeof(CFSR_Value), SWD::TRANSFER_32BIT) != sizeof(CFSR_Value))
+    {
+        logErrorF("Core%lu: Failed to read the CFSR register.", m_coreId);
+        return;
+    }
+    uint8_t busFaultStatusRegister = CFSR_Value >> 8;
+
+    /* Check to make sure that there is a bus fault to display. */
+    if (busFaultStatusRegister == 0)
+    {
+        return;
+    }
+
+    WriteStringToGdbConsole("\n**Bus Fault**");
+    WriteStringToGdbConsole("\n  Status Register: ");
+    WriteHexValueToGdbConsole(busFaultStatusRegister);
+
+    if (busFaultStatusRegister & BFARValidBit)
+    {
+        const uint32_t BFAR_Address = 0xE000ED38;
+        uint32_t       BFAR_Value;
+        if (readMemory(BFAR_Address, &BFAR_Value, sizeof(BFAR_Value), SWD::TRANSFER_32BIT) != sizeof(BFAR_Value))
+        {
+            logErrorF("Core%lu: Failed to read the BFAR register.", m_coreId);
+            return;
+        }
+        WriteStringToGdbConsole("\n    Fault Address: ");
+        WriteHexValueToGdbConsole(BFAR_Value);
+    }
+    if (busFaultStatusRegister & FPLazyStatePreservationBit)
+    {
+        WriteStringToGdbConsole("\n    FP Lazy Preservation");
+    }
+
+    if (busFaultStatusRegister & stackingErrorBit)
+    {
+        WriteStringToGdbConsole("\n    Stacking Error w/ SP = ");
+        WriteHexValueToGdbConsole(Context_Get(&m_context, SP));
+    }
+    if (busFaultStatusRegister & unstackingErrorBit)
+    {
+        WriteStringToGdbConsole("\n    Unstacking Error w/ SP = ");
+        WriteHexValueToGdbConsole(Context_Get(&m_context, SP));
+    }
+    if (busFaultStatusRegister & impreciseDataAccessBit)
+    {
+        WriteStringToGdbConsole("\n    Imprecise Data Access");
+    }
+
+    if (busFaultStatusRegister & preciseDataAccessBit)
+    {
+        WriteStringToGdbConsole("\n    Precise Data Access");
+    }
+
+    if (busFaultStatusRegister & instructionPrefetch)
+    {
+        WriteStringToGdbConsole("\n    Instruction Prefetch");
+    }
+}
+
+void CpuCore::displayUsageFaultCauseToGdbConsole()
+{
+    const uint32_t divideByZeroBit = 1 << 9;
+    const uint32_t unalignedBit = 1 << 8;
+    const uint32_t coProcessorAccessBit = 1 << 3;
+    const uint32_t invalidPCBit = 1 << 2;
+    const uint32_t invalidStateBit = 1 << 1;
+    const uint32_t undefinedInstructionBit = 1;
+    uint32_t       CFSR_Value = 0xBAADFEED;
+
+    if (readMemory(CFSR_Address, &CFSR_Value, sizeof(CFSR_Value), SWD::TRANSFER_32BIT) != sizeof(CFSR_Value))
+    {
+        logErrorF("Core%lu: Failed to read the CFSR register.", m_coreId);
+        return;
+    }
+    uint8_t usageFaultStatusRegister = CFSR_Value >> 16;
+
+    /* Make sure that there is a usage fault to display. */
+    if (usageFaultStatusRegister == 0)
+    {
+        return;
+    }
+
+    WriteStringToGdbConsole("\n**Usage Fault**");
+    WriteStringToGdbConsole("\n  Status Register: ");
+    WriteHexValueToGdbConsole(usageFaultStatusRegister);
+
+    if (usageFaultStatusRegister & divideByZeroBit)
+    {
+        WriteStringToGdbConsole("\n    Divide by Zero");
+    }
+
+    if (usageFaultStatusRegister & unalignedBit)
+    {
+        WriteStringToGdbConsole("\n    Unaligned Access");
+    }
+
+    if (usageFaultStatusRegister & coProcessorAccessBit)
+    {
+        WriteStringToGdbConsole("\n    Coprocessor Access");
+    }
+
+    if (usageFaultStatusRegister & invalidPCBit)
+    {
+        WriteStringToGdbConsole("\n    Invalid Exception Return State");
+    }
+
+    if (usageFaultStatusRegister & invalidStateBit)
+    {
+        WriteStringToGdbConsole("\n    Invalid State");
+    }
+
+    if (usageFaultStatusRegister & undefinedInstructionBit)
+    {
+        WriteStringToGdbConsole("\n    Undefined Instruction");
+    }
+}
+
+bool CpuCore::startCodeOnDevice(const CortexM_Registers* pRegistersIn)
+{
+    // Could lose original register values if context hasn't been loaded.
+    assert ( m_contextEntries.count != 0 );
+
+    // UNDONE: Should take a bitmask of which register to write and read as it does all 16 now and this takes time.
+    // Set the CPU registers required for executing code on device.
+    bool result = true;
+    for (uint32_t i = 0 ; i < count_of(pRegistersIn->registers) ; i++)
+    {
+        result &= writeCpuRegister(i, pRegistersIn->registers[i]);
+    }
+    if (!result)
+    {
+        logError("Failed to set registers for executing code on device.");
+        return false;
+    }
+
+    // Want to keep interrupts masked while running this code and make sure that single stepping is disabled.
+    if (!disableSingleStepAndInterrupts())
+    {
+        logError("Failed to disable single step and interrupts.");
+        return false;
+    }
+
+    // Start the target CPU executing.
+    if (!resume())
+    {
+        logError("Failed to start executing debugger code on target device.");
+        reenableInterrupts();
+        return false;
+    }
+
+    return true;
+}
+
+bool CpuCore::disableSingleStepAndInterrupts()
+{
+    uint32_t DHCSR_Val = 0;
+    if (!readDHCSR(&DHCSR_Val))
+    {
+        return false;
+    }
+
+    DHCSR_Val = (DHCSR_Val & ~DHCSR_C_STEP_Bit) | DHCSR_C_MASKINTS_Bit;
+    if (!writeDHCSR(DHCSR_Val))
+    {
+        return false;
+    }
+    return true;
+}
+
+bool CpuCore::reenableInterrupts()
+{
+    uint32_t DHCSR_Val = 0;
+    if (!readDHCSR(&DHCSR_Val))
+    {
+        return false;
+    }
+
+    DHCSR_Val &= ~DHCSR_C_MASKINTS_Bit;
+    if (!writeDHCSR(DHCSR_Val))
+    {
+        return false;
+    }
+    return true;
+}
+
+bool CpuCore::waitForCodeToHalt(CortexM_Registers* pRegistersOut, uint32_t timeout_ms)
+{
+    // Wait for executing code to complete.
+    absolute_time_t endTime = make_timeout_time_ms(timeout_ms);
+    uint32_t DHCSR_Val = 0;
+    do
+    {
+        if (!readDHCSR(&DHCSR_Val))
+        {
+            break;
+        }
+    } while (!isHalted() && absolute_time_diff_us(get_absolute_time(), endTime) > 0);
+    reenableInterrupts();
+    if (!isHalted())
+    {
+        logError("Timeout out waiting for code execution on device to complete.");
+        return false;
+    }
+
+    // Retrieve the register contents after the code has completed execution so that the caller can see their contents.
+    bool result = true;
+    for (uint32_t i = 0 ; i < count_of(pRegistersOut->registers) ; i++)
+    {
+        result &= readCpuRegister(i, &pRegistersOut->registers[i]);
+    }
+    if (!result)
+    {
+        logError("Failed to fetch registers after executing code on device.");
+        return false;
+    }
+
+    return true;
+}
+
+bool CpuCore::runCodeOnDevice(CortexM_Registers* pRegistersInOut, uint32_t timeout_ms)
+{
+    if (!startCodeOnDevice(pRegistersInOut))
+    {
+        return false;
+    }
+    if (!waitForCodeToHalt(pRegistersInOut, timeout_ms))
+    {
+        return false;
+    }
+    return true;
+}
+
+
+
+
+
+// Expose debug operations on Cortex-M cores. It can handle targets which have more than one core such as the RP2040.
+class CpuCores
+{
+public:
+    CpuCores();
+
+
+    // Initialize the CPU core objects after establishing a new SWD connection.
+    // The pHandler callback function is stored and will be called later if any unrecoverable SWD connection errors are
+    // detected at runtime. Handler is typically used to force the MRI core code to exit.
+    bool init(SWD* pSwdBus, void (*pHandler)(void));
+
+    // Cleanup the CPU core objects after disconnecting the SWD bus. Call init() again later once the SWD
+    // connection comes back up.
+    void uninit();
+
+    // Power down the SWD Debug Access Ports of all the CPU cores. This reduces power usage on the target
+    // device. Similar to uninit() but you aren't really expected to call init() again after calling this method since
+    // that would mean the DAP would be powered up again.
+    void disconnect();
+
+    // Enables the CPU cores for debugging. This enables vector catch along with the Data Watchpoint
+    // and Flash Breakpoint functionality.
+    void initForDebugging();
+
+    // Attempt to enable halting debug mode on the CPU cores.
+    bool enableHaltDebugging(uint32_t timeout_ms);
+
+    // Read the current state of each core on the device and store it away for subsequent indexOf*Core() calls.
+    bool refreshCoreStates(uint32_t timeout_ms);
+
+    // Special core index that indicates that no core matched requested state.
+    static const int CORE_NONE = -1;
+
+    // Returns the lowest index of a resetting core, CORE_NONE if none are resetting.
+    int indexOfResettingCore();
+
+    // Returns the loweset index of a halted core, CORE_NONE if none are halting.
+    int indexOfHaltedCore();
+
+    // Has the halted core been externally reset while halted in debugger?
+    bool isHaltedCoreResetting()
+    {
+        assert ( m_pHaltedCore != NULL );
+        if (!m_pHaltedCore->refreshCoreState(0))
+        {
+            return false;
+        }
+        return m_pHaltedCore->isResetting();
+    }
+
+    // Request the CPU cores to halt, skipping the alreadyHaltedCore.
+    // Set alreadyHaltedCore to CORE_NONE to halt ALL cores.
+    bool requestCoresToHalt(int alreadyHaltedCore);
+
+
+    // Enter MRI by calling mriDebugException() after grabbing the required register context of the specified halted
+    // core.
+    void enterMriCore(int haltedCore);
+
+    // Typically called from Platform_EnteringDebugger() to let this object know that the MRI core was just entered.
+    // It caches the reason (interrupt from GDB, breakpoint, watchpoint, etc) for the halting core and makes sure that
+    // reset vector catch is disabled for all of the cores.
+    void enteringDebugger();
+
+    // Typically called from Platform_LeavingDebugger() to let this object know that the MRI core is about to exit and
+    // allow execution to be resumed. It makes sure that the Debug Fault Status Register (DFSR) is cleared since we no
+    // longer need to know about the cause of the last halt.
+    void leavingDebugger();
+
+    // Ask execution to resume on all of the cores. It also takes care of restoring any modified register context before
+    // resuming.
+    void resume();
+
+    // Ask the cores to halt immediately after coming out of reset. Should be called before reset() if this is the
+    // desired behaviour.
+    void enableResetVectorCatch();
+
+    // Ask the cores to reset.
+    void reset();
+
+    // Should be called as soon as the main loop determines that a reset has occurred so that the object can
+    // re-initialize the information it has about all of the cores after their reset.
+    void resetCompleted()
+    {
+        assert ( m_connectionFailureHandler != NULL );
+        checkForMultipleCores(m_connectionFailureHandler);
+    }
+
+
+    // Read the requested register on the halted core.
+    uintmri_t readRegisterOnHaltedCore(size_t index)
+    {
+        assert ( m_pHaltedCore != NULL );
+        return Context_Get(m_pHaltedCore->getContext(m_fpu), index);
+    }
+
+    // Write a new value to the requested register on the halted core.
+    void writeRegisterOnHaltedCore(size_t index, uintmri_t newValue)
+    {
+        assert ( m_pHaltedCore != NULL );
+        Context_Set(m_pHaltedCore->getContext(m_fpu), index, newValue);
+    }
+
+    // Read from the requested memory range in FLASH, ROM, or RAM. Not to be used for reading memory mapped registers as
+    // those reads need to be directed at a specific core.
+    uint32_t readMemory(uint32_t address, void* pvBuffer, uint32_t bufferSize, SWD::TransferSize readSize)
+    {
+        // Make sure that we don't try to read registers with this method.
+        assert ( address < 0xA0000000 );
+        assert ( m_pDefaultCore != NULL );
+        return m_pDefaultCore->readMemory(address, pvBuffer, bufferSize, readSize);
+    }
+
+    // Write to the requested memory range in FLASH, ROM, or RAM. Not to be used for writing memory mapped registers as
+    // those writes need to be directed at a specific core.
+    uint32_t writeMemory(uint32_t address, const void* pvBuffer, uint32_t bufferSize, SWD::TransferSize writeSize)
+    {
+        // Make sure that we don't try to write registers with this method.
+        assert ( address < 0xA0000000 );
+        assert ( m_pDefaultCore != NULL );
+        return m_pDefaultCore->writeMemory(address, pvBuffer, bufferSize, writeSize);
+    }
+
+
+    // UNDONE: Might just ignore this for multithread and use thread state instead.
+    // Enable single stepping.
+    void enableSingleStep()
+    {
+        assert ( m_pDefaultCore != NULL );
+        m_pDefaultCore->enableSingleStep();
+    }
+
+    // Disable single stepping.
+    void disableSingleStep()
+    {
+        assert ( m_pDefaultCore != NULL );
+        m_pDefaultCore->disableSingleStep();
+    }
+
+    // Is single stepping enabled?
+    bool isSingleStepping()
+    {
+        assert ( m_pDefaultCore != NULL );
+        return m_pDefaultCore->isSingleStepping();
+    }
+
+
+    // Set a breakpoint at the requested address (16 or 32-bit instruction). Returns the 32-bit address of the
+    // comparator register used for this breakpoint, 0 if no free ones were found. If the requested breakpoint is
+    // already set then the address of the already set comparator register will be returned.
+    uint32_t setBreakpoint(uint32_t breakpointAddress, bool is32BitInstruction);
+
+    // Clear a breakpoint at the requested address (16 or 32-bit instruction). Returns the 32-bit address of the
+    // comparator register just cleared for this breakpoint, 0 if no matching breakpoint for the address was found.
+    uint32_t clearBreakpoint(uint32_t breakpointAddress, bool is32BitInstruction);
+
+
+    // Set a watchpoint (read and/or write) at the specified memory range.
+    // Can throw invalidArgumentException if the address, size, or type aren't supported for Cortex-M devices.
+    // Can throw exceededHardwareResourcesException if all of the watchpoint comparators are already used up.
+    // These exceptions will be caught and handled by the MRI core.
+    __throws void setWatchpoint(uintmri_t address, uintmri_t size,  PlatformWatchpointType type);
+
+    // Clear a watchpoint (read and/or write) at the specified memory range.
+    // Can throw invalidArgumentException if the address, size, or type aren't supported for Cortex-M devices.
+    // These exceptions will be caught and handled by the MRI core.
+    __throws void clearWatchpoint(uintmri_t address, uintmri_t size,  PlatformWatchpointType type);
+
+
+    // Returns the signal value (SIGINT, SIGTRAP, etc) most appropriate for the reason that the CPU was halted. This is
+    // returned to GDB and displayed to the user.
+    //  wasStopFromGDB parameter indicates whether the target was interrupted by request of GDB.
+    uint8_t determineCauseOfException(bool wasStopFromGDB)
+    {
+        assert ( m_pHaltedCore != NULL );
+        return m_pHaltedCore->determineCauseOfException(wasStopFromGDB);
+    }
+
+    // Returns whether the CPU was halted because of a breakpoint, watchpoint, or some other reason. This is returned to
+    // GDB and used to display which breakpoint or watchpoint, if any, caused the halt to occur. This returned reason
+    // was actually determined earlier when enteringDebugger() was called because watchpoint hit state can only be
+    // queried once.
+    PlatformTrapReason getTrapReason()
+    {
+        return m_trapReason;
+    }
+
+    // If an ARMv7M microcontroller hits a fault while running under the debugger, this method can be called to display
+    // information about the type of fault encountered to the GDB console before halting.
+    void displayFaultCauseToGdbConsole()
+    {
+        assert ( m_pHaltedCore != NULL );
+        return m_pHaltedCore->displayFaultCauseToGdbConsole();
+    }
+
+
+    // Called when user enters "monitor ..." commands in GDB. They are passed into the device specific driver, if one
+    // exists, to let it have first shot at handling the requested command. Returns true if handled by the device
+    // specific driver and false otherwise.
+    bool dispatchMonitorCommandToDevice(const char** ppArgs, size_t argCount);
+
+
+    // Returns true if there is a device specific driver that knows how to program the FLASH on the currently connected
+    // target and false otherwise.
+    bool supportsFlashProgramming()
+    {
+        return m_pDevice != NULL;
+    }
+
+    // The following flash*() methods are redirected to the device specific driver to handle programming of the FLASH on
+    // the currently connected target.
+    bool flashBegin();
+    bool flashErase(uint32_t addressStart, uint32_t length);
+    bool flashProgram(uint32_t addressStart, const void* pBuffer, size_t bufferSize);
+    bool flashEnd();
+
+
+    // Temporarily sets the registers on the default core to the specified values and then resumes execution on that
+    // core. This can be used to set the PC, SP, LR (and any other required registers) to execute arbitrary code that
+    // already exists in the ROM of the device or was previously loaded into RAM using writeMemory() calls. Can call
+    // waitForCodeToHalt() to know when it has completed.
+    bool startCodeOnDevice(const CortexM_Registers* pRegistersIn)
+    {
+        assert ( m_pDefaultCore != NULL );
+        // Make sure that original register context has been saved away for the default core before modifying its
+        // registers to start new code on it.
+        m_pDefaultCore->getContext(m_fpu);
+        return m_pDefaultCore->startCodeOnDevice(pRegistersIn);
+    }
+
+    // Waits for code previously started by startCodeOnDevice() to complete. The code should signal its completion by
+    // executing a hardcoded BKPT instruction. The values of the registers at the time of the BKPT can be found in the
+    // pRegistersOut structure.
+    bool waitForCodeToHalt(CortexM_Registers* pRegistersOut, uint32_t timeout_ms)
+    {
+        assert ( m_pDefaultCore != NULL );
+        return m_pDefaultCore->waitForCodeToHalt(pRegistersOut, timeout_ms);
+    }
+
+    // This combines calls to startCodeOnDevice() and waitForCodeToWait() in one call.
+    bool runCodeOnDevice(CortexM_Registers* pRegistersInOut, uint32_t timeout_ms)
+    {
+        assert ( m_pDefaultCore != NULL );
+        return m_pDefaultCore->runCodeOnDevice(pRegistersInOut, timeout_ms);
+    }
+
+
+    // Does the device have a FPU?
+    CpuCore::FpuDiscoveryStates hasFPU()
+    {
+        return m_fpu;
+    }
+
+    // Retrieve a string pointer and the length for the XML describing the memory layout of this device.
+    const char* getMemoryLayoutXML()
+    {
+        return m_pMemoryLayoutXML;
+    }
+    size_t getMemoryLayoutXMLSize()
+    {
+        return m_memoryLayoutSize;
+    }
+
+protected:
+    void searchSupportedDevicesList();
+    void determineFpuAvailability();
+    void updateSwdFrequencyForDevice();
+    void constructMemoryLayoutXML();
+    void checkForMultipleCores(void (*pHandler)(void));
+    void cleanupDeviceObject();
+    void disableResetVectorCatch();
+
+
+
+    // Callback to call when SWD connection errors are detected.
+    void (*m_connectionFailureHandler)(void);
+    // Pointer to lower level SWD bus object used to communicate with all target/cores on the device.
     SWD*       m_pSwdBus = NULL;
-    SwdTarget  m_swdTargets[MAX_DPV2_TARGETS];
-    size_t     m_swdTargetCount = 0;
-
-    // UNDONE: Track indices instead for halting core, default core, and current core (not sure I need this last one).
-    SwdTarget* m_pSWD;
-
-    bool       m_hasDetectedSwdDisconnect = false;
-
-    // Cache the reason if breakpoint or watchpoint caused core to halt from the enteringDebugger() method. It is cached
-    // because the bit read to determine which watchpoint was hit, if any, is cleared on read.
-    PlatformTrapReason m_trapReason;
-
-    FpuDiscoveryStates m_fpu = FPU_NONE;
+    // Pointer to the core which cause the current halt situation.
+    CpuCore*   m_pHaltedCore = NULL;
+    // Pointers to the default core (usually core 0) and its SWD target used for things like reading/writing/programming
+    // RAM/FLASH.
+    CpuCore*   m_pDefaultCore = NULL;
+    SwdTarget* m_pDefaultTarget = NULL;
 
     // When mri-swd has support (including FLASH programming) for the attached device, then these globals will store
     // pointers to its function table and object data.
@@ -557,61 +2625,81 @@ protected:
     int32_t m_memoryLayoutAllocSize = 0;
     int32_t m_memoryLayoutSize = 0;
 
-    // Callback to call when SWD connection errors are detected.
-    void (*m_connectionFailureHandler)(void);
+    // Cache the reason if breakpoint or watchpoint caused core to halt from the enteringDebugger() method. It is cached
+    // because the bit read to determine which watchpoint was hit, if any, is cleared on read.
+    PlatformTrapReason m_trapReason;
+
+    // Does this CPU contain a FPU or not?
+    CpuCore::FpuDiscoveryStates m_fpu = CpuCore::FPU_NONE;
+
+    // The actual list of CpuCore objects and their related SWD targets.
+    SwdTarget  m_swdTargets[MAX_DPV2_TARGETS];
+    CpuCore    m_cores[MAX_DPV2_TARGETS];
+    // The number of elements used in the above arrays for the currently attached CPU.
+    size_t     m_coreCount = 0;
+
+    // Has a SWD protocol error been detected that should cause a disconnect to be triggered.
+    bool       m_hasDetectedSwdDisconnect = false;
 };
+
+
 
 CpuCores::CpuCores()
 {
 }
 
-bool CpuCores::init(SWD* pSwdBus)
+bool CpuCores::init(SWD* pSwdBus, void (*pHandler)(void))
 {
     // Don't call init() again without first calling uninit() to cleanup from the previous SWD connection.
-    assert ( m_swdTargetCount == 0 );
+    assert ( m_coreCount == 0 );
 
-    if (!initSWD(pSwdBus))
+    // Initialize the first/default core.
+    SwdTarget* pDefaultTarget = &m_swdTargets[0];
+    CpuCore* pDefaultCore = &m_cores[0];
+
+    // UNDONE: Push down into CpuCore::init() later.
+    bool result = pSwdBus->initTargetForDebugging(*pDefaultTarget);
+    if (!result)
+    {
+        logError("Failed to initialize core 0's debug components.");
+        return false;
+    }
+
+    if (!pDefaultCore->init(pSwdBus, pDefaultTarget, pHandler, 0))
     {
         return false;
     }
+    m_pDefaultCore = pDefaultCore;
+    m_pDefaultTarget = pDefaultTarget;
+    m_coreCount = 1;
     m_pSwdBus = pSwdBus;
+    m_pHaltedCore = NULL;
+    m_hasDetectedSwdDisconnect = false;
+    m_connectionFailureHandler =  pHandler;
+
     searchSupportedDevicesList();
     determineFpuAvailability();
     updateSwdFrequencyForDevice();
     constructMemoryLayoutXML();
-    checkForMultipleCores();
-    m_hasDetectedSwdDisconnect = false;
-    assert ( m_swdTargetCount > 0 );
+    checkForMultipleCores(pHandler);
+    assert ( m_coreCount > 0 );
 
     return true;
 }
 
-bool CpuCores::initSWD(SWD* pSwdBus)
-{
-    logInfo("Initializing target's debug components...");
-    bool result = pSwdBus->initTargetForDebugging(m_swdTargets[0]);
-    if (!result)
-    {
-        logError("Failed to initialize target's debug components.");
-        return false;
-    }
-    m_pSWD = &m_swdTargets[0];
-    m_swdTargetCount = 1;
-    return true;
-}
-
+// UNDONE: Device code should take CpuCore object and not SwdTarget. SwdTarget can be contained within CpuCore.
 void CpuCores::searchSupportedDevicesList()
 {
     assert ( m_pDevice == NULL && m_pDeviceObject == NULL );
     for (size_t i = 0; i < g_supportedDevicesLength ; i++)
     {
         DeviceFunctionTable* pDevice = g_supportedDevices[i];
-        DeviceObject* pObject = pDevice->detect(m_pSWD);
+        DeviceObject* pObject = pDevice->detect(m_pDefaultTarget);
         if (pObject)
         {
             m_pDevice = pDevice;
             m_pDeviceObject = pObject;
-            logInfoF("Found device of type %s.", pDevice->getName(m_pDeviceObject, m_pSWD));
+            logInfoF("Found device of type %s.", pDevice->getName(m_pDeviceObject, m_pDefaultTarget));
             break;
         }
     }
@@ -625,29 +2713,29 @@ void CpuCores::determineFpuAvailability()
 {
     if (m_pDevice)
     {
-        // Device driver will tell us explicitly if this device support FPU of not.
-        if (m_pDevice->hasFpu(m_pDeviceObject, m_pSWD))
+        // Device driver will tell us explicitly if this device supports FPU or not.
+        if (m_pDevice->hasFpu(m_pDeviceObject, m_pDefaultTarget))
         {
             logInfo("Device has FPU.");
-            m_fpu = FPU_AVAILABLE;
+            m_fpu = CpuCore::FPU_AVAILABLE;
         }
         else
         {
-            m_fpu = FPU_NONE;
+            m_fpu = CpuCore::FPU_NONE;
         }
     }
     else
     {
         // Don't know for sure if the device has FPU at init time so will have to determine on the fly.
-        if (m_pSWD->getCpuType() >= SWD::CPU_CORTEX_M4)
+        if (m_pDefaultTarget->getCpuType() >= SWD::CPU_CORTEX_M4)
         {
             // Device might have FPU. Check on first halt.
-            m_fpu = FPU_MAYBE;
+            m_fpu = CpuCore::FPU_MAYBE;
         }
         else
         {
             // Cortex-M3 and lower never have a FPU.
-            m_fpu = FPU_NONE;
+            m_fpu = CpuCore::FPU_NONE;
         }
     }
 }
@@ -661,8 +2749,8 @@ void CpuCores::updateSwdFrequencyForDevice()
     }
 
     // Use the supported device object to determine the maximum SWD frequency supported by this device.
-    uint32_t swdFrequency = m_pDevice->getMaximumSWDClockFrequency(m_pDeviceObject, m_pSWD);
-    if (!m_pSWD->setFrequency(swdFrequency))
+    uint32_t swdFrequency = m_pDevice->getMaximumSWDClockFrequency(m_pDeviceObject, m_pDefaultTarget);
+    if (!m_pDefaultTarget->setFrequency(swdFrequency))
     {
         logErrorF("Failed to re-initialize the SWD port to a frequency of %lu.", swdFrequency);
         return;
@@ -677,14 +2765,14 @@ void CpuCores::constructMemoryLayoutXML()
     if (m_pDevice)
     {
         // Devices on the supported list can report their memory layout.
-        pLayout = m_pDevice->getMemoryLayout(m_pDeviceObject, m_pSWD);
+        pLayout = m_pDevice->getMemoryLayout(m_pDeviceObject, m_pDefaultTarget);
     }
     else
     {
         // Fall back to the default memory layout used by all Cortex-M devices. It will report regions that are larger
         // than those actually found on the device but it does know which regions are read-only and which are
         // read/write.
-        pLayout = deviceDefaultMemoryLayout(NULL, m_pSWD);
+        pLayout = deviceDefaultMemoryLayout(NULL, m_pDefaultTarget);
     }
     assert ( pLayout );
 
@@ -758,7 +2846,7 @@ void CpuCores::constructMemoryLayoutXML()
     m_memoryLayoutSize = m_memoryLayoutAllocSize - bytesLeft;
 }
 
-void CpuCores::checkForMultipleCores()
+void CpuCores::checkForMultipleCores(void (*pHandler)(void))
 {
     if (!m_pDevice)
     {
@@ -766,14 +2854,19 @@ void CpuCores::checkForMultipleCores()
     }
 
     size_t targetCount = 0;
-    if (!m_pDevice->getAdditionalTargets(m_pDeviceObject, m_pSWD, &m_swdTargets[1], count_of(m_swdTargets)-1, &targetCount))
+    if (!m_pDevice->getAdditionalTargets(m_pDeviceObject, m_pDefaultTarget, &m_swdTargets[1], count_of(m_swdTargets)-1, &targetCount))
     {
         logError("Failed calling m_pDevice->getAdditionalTargets()");
         return;
     }
     assert ( targetCount <= count_of(m_swdTargets)-1 );
-    m_swdTargetCount = targetCount + 1;
-    logInfoF("Device has %u core(s).", m_swdTargetCount);
+    m_coreCount = targetCount + 1;
+    // UNDONE: Don't need this once Device::getAdditionalTargets() takes CpuCore objects.
+    for (size_t i = 1 ; i < m_coreCount ; i++)
+    {
+        m_cores[i].init(m_pSwdBus, &m_swdTargets[i], pHandler, i);
+    }
+    logInfoF("Device has %u core(s).", m_coreCount);
 }
 
 void CpuCores::uninit()
@@ -785,12 +2878,14 @@ void CpuCores::uninit()
         m_pSwdBus->sendLineReset();
         m_pSwdBus = NULL;
     }
-    for (size_t i = 0 ; i < m_swdTargetCount ; i++)
+    for (size_t i = 0 ; i < m_coreCount ; i++)
     {
-        m_swdTargets[i].uninit();
+        m_cores[i].uninit();
     }
-    m_swdTargetCount = 0;
-    m_pSWD = NULL;
+    m_coreCount = 0;
+    m_pDefaultCore = NULL;
+    m_pDefaultTarget = NULL;
+    m_pHaltedCore = NULL;
 }
 
 void CpuCores::cleanupDeviceObject()
@@ -800,7 +2895,7 @@ void CpuCores::cleanupDeviceObject()
         return;
     }
 
-    m_pDevice->free(m_pDeviceObject, m_pSWD);
+    m_pDevice->free(m_pDeviceObject, m_pDefaultTarget);
     m_pDeviceObject = NULL;
     m_pDevice = NULL;
 }
@@ -808,1691 +2903,221 @@ void CpuCores::cleanupDeviceObject()
 void CpuCores::disconnect()
 {
     cleanupDeviceObject();
-    for (size_t i = 0 ; i < m_swdTargetCount ; i++)
+    for (size_t i = 0 ; i < m_coreCount ; i++)
     {
-        m_swdTargets[i].disconnect();
-        m_swdTargets[i].uninit();
+        m_cores[i].disconnect();
     }
-    m_swdTargetCount = 0;
-    m_pSWD = NULL;
-    m_pSwdBus = NULL;
-}
-
-void CpuCores::enterMriCore()
-{
-    checkForFpu();
-    saveContext();
-    mriDebugException(&m_context);
-}
-
-void CpuCores::resume()
-{
-    restoreContext();
-    requestCpuToResume();
-}
-
-void CpuCores::checkForFpu()
-{
-    if (m_fpu != FPU_MAYBE)
-    {
-        // We already know for sure whether there is a FPU on this device or not so just return.
-        return;
-    }
-
-    const uint32_t CPACR_Address = 0xE000ED88;
-    const uint32_t CPACR_CP10_Shift = 20;
-    const uint32_t CPACR_CP10_Mask = 0xF << CPACR_CP10_Shift;
-    const uint32_t CPACR_CP11_Shift = 22;
-    const uint32_t CPACR_CP11_Mask = 0xF << CPACR_CP11_Shift;
-
-    uint32_t CPACR_OrigValue = 0;
-    if (readTargetMemory(CPACR_Address, &CPACR_OrigValue, sizeof(CPACR_OrigValue), SWD::TRANSFER_32BIT) != sizeof(CPACR_OrigValue))
-    {
-        logError("Failed to read CPACR register.");
-        // On error, assume that FPU doesn't exist.
-        m_fpu = FPU_NOT_AVAILABLE;
-        return;
-    }
-    if ((CPACR_OrigValue & CPACR_CP10_Mask) && (CPACR_OrigValue & CPACR_CP11_Mask))
-    {
-        // FPU exists and is enabled.
-        logInfo("Device has FPU.");
-        m_fpu = FPU_AVAILABLE;
-        return;
-    }
-
-    // Try enabling the FPU.
-    uint32_t CPACR_TestValue = CPACR_CP10_Mask | CPACR_CP11_Mask | CPACR_OrigValue;
-    if (writeTargetMemory(CPACR_Address, &CPACR_TestValue, sizeof(CPACR_TestValue), SWD::TRANSFER_32BIT) != sizeof(CPACR_TestValue))
-    {
-        logError("Failed to test CPACR register.");
-        // On error, assume that FPU doesn't exist.
-        m_fpu = FPU_NOT_AVAILABLE;
-        return;
-    }
-
-    // See if the FPU enable took. If so then the FPU exists.
-    uint32_t CPACR_UpdatedValue = ~CPACR_TestValue;
-    if (readTargetMemory(CPACR_Address, &CPACR_UpdatedValue, sizeof(CPACR_UpdatedValue), SWD::TRANSFER_32BIT) != sizeof(CPACR_UpdatedValue))
-    {
-        logError("Failed to verify CPACR register.");
-        // On error, assume that FPU doesn't exist.
-        m_fpu = FPU_NOT_AVAILABLE;
-    }
-    if (CPACR_UpdatedValue == CPACR_TestValue)
-    {
-        logInfo("Device has FPU.");
-        m_fpu = FPU_AVAILABLE;
-    }
-
-    // Restore CPACR Value.
-    if (writeTargetMemory(CPACR_Address, &CPACR_OrigValue, sizeof(CPACR_OrigValue), SWD::TRANSFER_32BIT) != sizeof(CPACR_OrigValue))
-    {
-        logError("Failed to restore CPACR register.");
-    }
-}
-
-uint32_t CpuCores::readTargetMemory(uint32_t address, void* pvBuffer, uint32_t bufferSize, SWD::TransferSize readSize)
-{
-    if (m_hasDetectedSwdDisconnect || bufferSize == 0)
-    {
-        return 0;
-    }
-
-    uint32_t bytesRead = m_pSWD->readMemory(address, pvBuffer, bufferSize, readSize);
-    if (bytesRead == 0 && m_pSWD->getLastReadWriteError() == SWD::SWD_PROTOCOL)
-    {
-        handleUnrecoverableSwdError();
-    }
-    return bytesRead;
-}
-
-void CpuCores::handleUnrecoverableSwdError()
-{
-    logErrorF("Encountered unrecoverable read/write error %d.", m_pSWD->getLastReadWriteError());
-    m_hasDetectedSwdDisconnect = true;
-    if (m_connectionFailureHandler)
-    {
-        m_connectionFailureHandler();
-    }
-}
-
-uint32_t CpuCores::writeTargetMemory(uint32_t address,
-                                     const void* pvBuffer,
-                                     uint32_t bufferSize,
-                                     SWD::TransferSize writeSize)
-{
-    if (m_hasDetectedSwdDisconnect || bufferSize == 0)
-    {
-        return 0;
-    }
-
-    uint32_t bytesWritten = m_pSWD->writeMemory(address, pvBuffer, bufferSize, writeSize);
-    if (bytesWritten == 0 && m_pSWD->getLastReadWriteError() == SWD::SWD_PROTOCOL)
-    {
-        handleUnrecoverableSwdError();
-    }
-    return bytesWritten;
-}
-
-void CpuCores::saveContext()
-{
-    bool encounteredError = false;
-
-    bool contextHasFpu = m_fpu >= FPU_MAYBE;
-    if (contextHasFpu)
-    {
-        Context_Init(&m_context, &m_contextEntriesFPU, 1);
-    }
-    else
-    {
-        Context_Init(&m_context, &m_contextEntriesNoFPU, 1);
-    }
-
-    // Transfer R0 - PSP first.
-    for (uint32_t i = R0 ; i <= PSP ; i++)
-    {
-        uint32_t regValue = 0;
-        if (!readCpuRegister(i, &regValue))
-        {
-            encounteredError = true;
-        }
-        Context_Set(&m_context, i, regValue);
-    }
-
-    // Transfer CONTROL, FAULTMASK, BASEPRI, PRIMASK next. They are all accessed in the CPU via a single 32-bit entry.
-    uint32_t specialRegs = 0;
-    if (!readCpuRegister(dcrsrSpecialRegisterIndex, &specialRegs))
-    {
-        encounteredError = true;
-    }
-    for (uint32_t i = 0 ; i < 4 ; i++)
-    {
-        Context_Set(&m_context, PRIMASK+i, (specialRegs >> (8 * i)) & 0xFF);
-    }
-
-    // Transfer FPU registers if we returned target XML that indicates they might/do exist.
-    if (contextHasFpu)
-    {
-        // Transfer S0-S31 floating point registers.
-        for (uint32_t i = 0 ; i < 32 ; i++)
-        {
-            uint32_t regValue = 0xBAADFEED;
-            if (m_fpu == FPU_AVAILABLE)
-            {
-                if (!readCpuRegister(dcrsrS0Index+i, &regValue))
-                {
-                    encounteredError = true;
-                }
-            }
-            Context_Set(&m_context, S0+i, regValue);
-        }
-
-        // Transfer FPSCR register.
-        if (m_fpu == FPU_AVAILABLE)
-        {
-            uint32_t regValue = 0xBAADFEED;
-            if (m_fpu == FPU_AVAILABLE)
-            {
-                if (!readCpuRegister(dcrsrFpscrIndex, &regValue))
-                {
-                    encounteredError = true;
-                }
-            }
-            Context_Set(&m_context, FPSCR, regValue);
-        }
-    }
-
-    if (encounteredError)
-    {
-        logError("Failed to read CPU register(s).");
-    }
-}
-
-bool CpuCores::readCpuRegister(uint32_t registerIndex, uint32_t* pValue)
-{
-    uint32_t DCRSR_Value = registerIndex & DCRSR_REGSEL_Mask;
-    if (writeTargetMemory(DCRSR_Address, &DCRSR_Value, sizeof(DCRSR_Value), SWD::TRANSFER_32BIT) != sizeof(DCRSR_Value))
-    {
-        return false;
-    }
-
-    waitForRegisterTransferToComplete();
-
-    return readTargetMemory(DCRDR_Address, pValue, sizeof(*pValue), SWD::TRANSFER_32BIT) == sizeof(*pValue);
-}
-
-void CpuCores::waitForRegisterTransferToComplete()
-{
-    uint32_t DHCSR_Value = 0;
-    do
-    {
-        if (!readDHCSR(&DHCSR_Value))
-        {
-            return;
-        }
-    } while (!hasRegisterTransferCompleted(DHCSR_Value));
-}
-
-bool CpuCores::hasRegisterTransferCompleted(uint32_t DHCSR_Value)
-{
-    const uint32_t DHCSR_S_REGRDY_Bit = 1 << 16;
-    return (DHCSR_Value & DHCSR_S_REGRDY_Bit) == DHCSR_S_REGRDY_Bit;
-}
-
-void CpuCores::restoreContext()
-{
-    bool encounteredError = false;
-
-    // Transfer R0 - PSP first.
-    for (uint32_t i = R0 ; i <= PSP ; i++)
-    {
-        if (!writeCpuRegister(i, Context_Get(&m_context, i)))
-        {
-            encounteredError = true;
-        }
-    }
-
-    // Transfer CONTROL, FAULTMASK, BASEPRI, PRIMASK next. They are all accessed in the CPU via a single 32-bit entry.
-    uint32_t specialRegs = 0;
-    for (uint32_t i = 0 ; i < 4 ; i++)
-    {
-        specialRegs |= (Context_Get(&m_context, PRIMASK+i) & 0xFF) << (8 * i);
-    }
-    if (!writeCpuRegister(dcrsrSpecialRegisterIndex, specialRegs))
-    {
-        encounteredError = true;
-    }
-
-    // Transfer FPU registers back to CPU if we have detected that the FPU exists for sure.
-    if (m_fpu == FPU_AVAILABLE)
-    {
-        // Transfer S0-S31 floating point registers.
-        for (uint32_t i = 0 ; i < 32 ; i++)
-        {
-            if (!writeCpuRegister(dcrsrS0Index+i, Context_Get(&m_context, S0+i)))
-            {
-                encounteredError = true;
-            }
-        }
-
-        // Transfer FPSCR register.
-        if (!writeCpuRegister(dcrsrFpscrIndex, Context_Get(&m_context, FPSCR)))
-        {
-            encounteredError = true;
-        }
-    }
-
-    if (encounteredError)
-    {
-        logError("Failed to write CPU register(s).");
-    }
-}
-
-bool CpuCores::writeCpuRegister(uint32_t registerIndex, uint32_t value)
-{
-    if (writeTargetMemory(DCRDR_Address, &value, sizeof(value), SWD::TRANSFER_32BIT) != sizeof(value))
-    {
-        return false;
-    }
-
-    uint32_t DCRSR_Value = DCRSR_REGWnR_Bit | (registerIndex & DCRSR_REGSEL_Mask);
-    if (writeTargetMemory(DCRSR_Address, &DCRSR_Value, sizeof(DCRSR_Value), SWD::TRANSFER_32BIT) != sizeof(DCRSR_Value))
-    {
-        return false;
-    }
-
-    waitForRegisterTransferToComplete();
-
-    return true;
-}
-
-bool CpuCores::requestCpuToHalt()
-{
-    uint32_t DHCSR_Val = 0;
-
-    readDHCSR(&DHCSR_Val);
-    // Ignore read errors.
-
-    DHCSR_Val |= DHCSR_C_HALT_Bit;
-
-    if (!writeDHCSR(DHCSR_Val))
-    {
-        logError("Failed to set C_HALT bit in DHCSR.");
-        return false;
-    }
-    return true;
-}
-
-bool CpuCores::requestCpuToResume()
-{
-    uint32_t DHCSR_Val = 0;
-
-    readDHCSR(&DHCSR_Val);
-    DHCSR_Val &= ~DHCSR_C_HALT_Bit;
-    if (!writeDHCSR(DHCSR_Val))
-    {
-        logError("Failed to clear C_HALT bit in DHCSR.");
-        return false;
-    }
-    return true;
-}
-
-bool CpuCores::enableHaltDebugging(uint32_t timeout_ms)
-{
-    uint32_t DHCSR_Val = 0;
-    if (!readDHCSRWithRetry(&DHCSR_Val, timeout_ms))
-    {
-        return false;
-    }
-
-    // The values of the current DHCSR_C_* bits will be overwritten with just what is needed to enable SWD debugging
-    // and maintain the target's current halted state.
-    if (isCpuHalted(DHCSR_Val))
-    {
-        // If the CPU is currently halted then we don't want to set DHCSR with DHCSR_C_HALT_Bit cleared as that will
-        // start the target running again.
-        logInfo("CPU was already halted at debugger init.");
-        DHCSR_Val = DHCSR_C_HALT_Bit;
-    }
-    else
-    {
-        DHCSR_Val = 0;
-    }
-
-    //  Enable halt mode debug.  Set to 1 to enable halt mode debugging.
-    const uint32_t DHCSR_C_DEBUGEN_Bit = 1 << 0;
-    DHCSR_Val |= DHCSR_C_DEBUGEN_Bit;
-    if (!writeDHCSR(DHCSR_Val))
-    {
-        logError("Failed to set C_DEBUGEN bit in DHCSR.");
-        return false;
-    }
-
-    return true;
-}
-
-bool CpuCores::readDHCSRWithRetry(uint32_t* pValue, uint32_t timeout_ms)
-{
-    bool returnVal = false;
-    absolute_time_t endTime = make_timeout_time_ms(timeout_ms);
-    m_pSwdBus->disableErrorLogging();
-    if (timeout_ms > 0)
-    {
-        logErrorDisable();
-    }
-    do
-    {
-        if (readDHCSR(pValue))
-        {
-            returnVal = true;
-            break;
-        }
-    } while (absolute_time_diff_us(get_absolute_time(), endTime) > 0);
-    if (timeout_ms > 0)
-    {
-        logErrorEnable();
-    }
-    m_pSwdBus->enableErrorLogging();
-
-    return returnVal;
-}
-
-bool CpuCores::readDHCSR(uint32_t* pValue)
-{
-    if (readTargetMemory(DHCSR_Address, pValue, sizeof(*pValue), SWD::TRANSFER_32BIT) != sizeof(*pValue))
-    {
-        logError("Failed to read DHCSR register.");
-        return false;
-    }
-    return true;
-}
-
-bool CpuCores::writeDHCSR(uint32_t DHCSR_Value)
-{
-    // Upper 16-bits must contain DBGKEY for CPU to accept this write.
-    const uint32_t DHCSR_DBGKEY_Shift = 16;
-    const uint32_t DHCSR_DBGKEY_Mask = 0xFFFF << DHCSR_DBGKEY_Shift;
-    const uint32_t DHCSR_DBGKEY = 0xA05F << DHCSR_DBGKEY_Shift;
-    DHCSR_Value = (DHCSR_Value & ~DHCSR_DBGKEY_Mask) | DHCSR_DBGKEY;
-
-    return writeTargetMemory(DHCSR_Address, &DHCSR_Value, sizeof(DHCSR_Value), SWD::TRANSFER_32BIT) == sizeof(DHCSR_Value);
+    m_coreCount = 0;
+    m_pDefaultCore = NULL;
+    m_pDefaultTarget = NULL;
+    m_pHaltedCore = NULL;
 }
 
 void CpuCores::initForDebugging()
 {
-    enableDWTandVectorCatches();
-    initDWT();
-    initFPB();
-}
-
-void CpuCores::enableDWTandVectorCatches()
-{
-    // DEMCR_DWTENA is the name on ARMv6M and it is called TRCENA on ARMv7M.
-    const uint32_t DEMCR_DWTENA_Bit = 1 << 24;
-    // Enable Halting debug trap on a HardFault exception.
-    const uint32_t DEMCR_VC_HARDERR_Bit = 1 << 10;
-    // Enable Halting debug trap on a fault occurring during exception entry or exception return.
-    const uint32_t DEMCR_VC_INTERR_Bit = 1 << 9;
-    // Enable Halting debug trap on a BusFault exception.
-    const uint32_t DEMCR_VC_BUSERR_Bit = 1 << 8;
-    // Enable Halting debug trap on a UsageFault exception caused by a state information error, for example an
-    // Undefined Instruction exception.
-    const uint32_t DEMCR_VC_STATERR_Bit = 1 << 7;
-    // Enable Halting debug trap on a UsageFault exception caused by a checking error, for example an alignment
-    // check error.
-    const uint32_t DEMCR_VC_CHKERR_Bit = 1 << 6;
-    // Enable Halting debug trap on a UsageFault caused by an access to a coprocessor.
-    const uint32_t DEMCR_VC_NOCPERR_Bit = 1 << 5;
-    // Enable Halting debug trap on a MemManage exception.
-    const uint32_t DEMCR_VC_MMERR_Bit = 1 << 4;
-    // Catch all of the vectors.
-    const uint32_t allVectorCatchBits = DEMCR_VC_HARDERR_Bit | DEMCR_VC_INTERR_Bit | DEMCR_VC_BUSERR_Bit |
-                                        DEMCR_VC_STATERR_Bit | DEMCR_VC_CHKERR_Bit | DEMCR_VC_NOCPERR_Bit |
-                                        DEMCR_VC_MMERR_Bit;
-
-    if (!setOrClearBitsInDEMCR(DEMCR_DWTENA_Bit | allVectorCatchBits, true))
+    assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
+    for (size_t i = 0 ; i < m_coreCount ; i++)
     {
-        logError("Failed to set DWTENA/TRCENA and vector catch bits in DEMCR register.");
-        return;
+        m_cores[i].initForDebugging();
     }
 }
 
-bool CpuCores::setOrClearBitsInDEMCR(uint32_t bitMask, bool set)
+bool CpuCores::enableHaltDebugging(uint32_t timeout_ms)
 {
-    // Debug Exception and Monitor Control Register, DEMCR
-    const uint32_t DEMCR_Address = 0xE000EDFC;
-
-    uint32_t DEMCR_Value = 0;
-    if (readTargetMemory(DEMCR_Address, &DEMCR_Value, sizeof(DEMCR_Value), SWD::TRANSFER_32BIT) != sizeof(DEMCR_Value))
+    assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
+    bool result = true;
+    for (size_t i = 0 ; i < m_coreCount ; i++)
     {
-        logError("Failed to read DEMCR register.");
-        return false;
+        result &= m_cores[i].enableHaltDebugging(timeout_ms);
     }
-
-    // Set or clear the requested bits.
-    if (set)
-    {
-        DEMCR_Value |= bitMask;
-    }
-    else
-    {
-        DEMCR_Value &= ~bitMask;
-    }
-
-    if (writeTargetMemory(DEMCR_Address, &DEMCR_Value, sizeof(DEMCR_Value), SWD::TRANSFER_32BIT) != sizeof(DEMCR_Value))
-    {
-        logError("Failed to write DEMCR register.");
-        return false;
-    }
-    return true;
+    return result;
 }
 
-void CpuCores::initDWT()
+bool CpuCores::refreshCoreStates(uint32_t timeout_ms)
 {
-    uint32_t watchpointCount = clearDWTComparators();
-    logInfoF("CPU supports %lu hardware watchpoints.", watchpointCount);
-}
-
-uint32_t CpuCores::clearDWTComparators()
-{
-    uint32_t DWT_COMP_Address = 0xE0001020;
-    uint32_t comparatorCount = getDWTComparatorCount();
-    for (uint32_t i = 0 ; i < comparatorCount ; i++)
+    assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
+    bool result = true;
+    for (size_t i = 0 ; i < m_coreCount ; i++)
     {
-        clearDWTComparator(DWT_COMP_Address);
-        DWT_COMP_Address += sizeof(DWT_COMP_Type);
+        result &= m_cores[i].refreshCoreState(timeout_ms);
     }
-    return comparatorCount;
+    return result;
 }
 
-uint32_t CpuCores::getDWTComparatorCount()
+int CpuCores::indexOfResettingCore()
 {
-    uint32_t DWT_CTRL_Address = 0xE0001000;
-    uint32_t DWT_CTRL_Value = 0;
-
-    if (readTargetMemory(DWT_CTRL_Address, &DWT_CTRL_Value, sizeof(DWT_CTRL_Value), SWD::TRANSFER_32BIT) != sizeof(DWT_CTRL_Value))
+    assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
+    for (size_t i = 0 ; i < m_coreCount ; i++)
     {
-        logError("Failed to read DWT_CTRL register.");
-        return 0;
+        if (m_cores[i].isResetting())
+        {
+            return i;
+        }
     }
-    return (DWT_CTRL_Value >> 28) & 0xF;
+    return -1;
 }
 
-void CpuCores::clearDWTComparator(uint32_t comparatorAddress)
+int CpuCores::indexOfHaltedCore()
 {
-    //  Matched.  Read-only.  Set to 1 to indicate that this comparator has been matched.  Cleared on read.
-    const uint32_t DWT_COMP_FUNCTION_DATAVMATCH_Bit = 1 << 8;
-    //  Cycle Count Match.  Set to 1 for enabling cycle count match and 0 otherwise.  Only valid on comparator 0.
-    const uint32_t DWT_COMP_FUNCTION_CYCMATCH_Bit = 1 << 7;
-    //  Enable Data Trace Address offset packets.  0 to disable.
-    const uint32_t DWT_COMP_FUNCTION_EMITRANGE_Bit = 1 << 5;
-    DWT_COMP_Type dwtComp;
-
-    if (readTargetMemory(comparatorAddress, &dwtComp, 3*sizeof(uint32_t), SWD::TRANSFER_32BIT) != 3*sizeof(uint32_t))
+    assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
+    for (size_t i = 0 ; i < m_coreCount ; i++)
     {
-        logError("Failed to read DWT_COMP/DWT_MASK/DWT_FUNCTION registers for clearing.");
+        if (m_cores[i].isHalted())
+        {
+            return i;
+        }
     }
+    return -1;
+}
 
-    dwtComp.comp = 0;
-    dwtComp.mask = 0;
-    dwtComp.function &= ~(DWT_COMP_FUNCTION_DATAVMATCH_Bit |
-                          DWT_COMP_FUNCTION_CYCMATCH_Bit |
-                          DWT_COMP_FUNCTION_EMITRANGE_Bit |
-                          DWT_COMP_FUNCTION_FUNCTION_Mask);
-
-    if (writeTargetMemory(comparatorAddress, &dwtComp, 3*sizeof(uint32_t), SWD::TRANSFER_32BIT) != 3*sizeof(uint32_t))
+bool CpuCores::requestCoresToHalt(int alreadyHaltedCore)
+{
+    assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
+    bool result = true;
+    for (int i = 0 ; i < (int)m_coreCount ; i++)
     {
-        logError("Failed to write DWT_COMP/DWT_MASK/DWT_FUNCTION registers for clearing.");
+        if (i != alreadyHaltedCore)
+        {
+            result &= m_cores[i].requestHalt();
+        }
     }
+    return result;
 }
 
-void CpuCores::initFPB()
+void CpuCores::enterMriCore(int haltedCore)
 {
-    uint32_t breakpointCount = clearFPBComparators();
-    logInfoF("CPU supports %lu hardware breakpoints.", breakpointCount);
-    enableFPB();
-}
+    assert ( haltedCore >= 0 && haltedCore < (int)count_of(m_cores) );
+    m_pHaltedCore = &m_cores[haltedCore];
 
-uint32_t CpuCores::clearFPBComparators()
-{
-    uint32_t currentComparatorAddress = 0xE0002008;
-    uint32_t codeComparatorCount = getFPBCodeComparatorCount();
-    uint32_t literalComparatorCount = getFPBLiteralComparatorCount();
-    uint32_t totalComparatorCount = codeComparatorCount + literalComparatorCount;
-    for (uint32_t i = 0 ; i < totalComparatorCount ; i++)
-    {
-        clearFPBComparator(currentComparatorAddress);
-        currentComparatorAddress += sizeof(uint32_t);
-    }
-    return codeComparatorCount;
-}
-
-uint32_t CpuCores::getFPBCodeComparatorCount()
-{
-    // Most significant bits of number of instruction address comparators.  Read-only
-    const uint32_t FP_CTRL_NUM_CODE_MSB_Shift = 12;
-    const uint32_t FP_CTRL_NUM_CODE_MSB_Mask = 0x7 << FP_CTRL_NUM_CODE_MSB_Shift;
-    //  Least significant bits of number of instruction address comparators.  Read-only
-    const uint32_t FP_CTRL_NUM_CODE_LSB_Shift = 4;
-    const uint32_t FP_CTRL_NUM_CODE_LSB_Mask = 0xF << FP_CTRL_NUM_CODE_LSB_Shift;
-    uint32_t FP_CTRL_Value = readFPControlRegister();
-
-    return (((FP_CTRL_Value & FP_CTRL_NUM_CODE_MSB_Mask) >> (FP_CTRL_NUM_CODE_MSB_Shift - 4)) |
-            ((FP_CTRL_Value & FP_CTRL_NUM_CODE_LSB_Mask) >> FP_CTRL_NUM_CODE_LSB_Shift));
-}
-
-uint32_t CpuCores::readFPControlRegister()
-{
-    uint32_t FP_CTRL_Value = 0;
-    if (readTargetMemory(FP_CTRL_Address, &FP_CTRL_Value, sizeof(FP_CTRL_Value), SWD::TRANSFER_32BIT) != sizeof(FP_CTRL_Value))
-    {
-        logError("Failed to read FP_CTRL register.");
-        return 0;
-    }
-    return FP_CTRL_Value;
-}
-
-uint32_t CpuCores::getFPBLiteralComparatorCount()
-{
-    //  Number of instruction literal address comparators.  Read only
-    const uint32_t FP_CTRL_NUM_LIT_Shift = 8;
-    const uint32_t FP_CTRL_NUM_LIT_Mask = 0xF << FP_CTRL_NUM_LIT_Shift;
-    uint32_t FP_CTRL_Value = readFPControlRegister();
-
-    return ((FP_CTRL_Value & FP_CTRL_NUM_LIT_Mask) >> FP_CTRL_NUM_LIT_Shift);
-}
-
-void CpuCores::clearFPBComparator(uint32_t comparatorAddress)
-{
-    uint32_t comparatorValue = 0;
-    if (writeTargetMemory(comparatorAddress, &comparatorValue, sizeof(comparatorValue), SWD::TRANSFER_32BIT) != sizeof(comparatorValue))
-    {
-        logError("Failed to write to FP comparator register.");
-    }
-}
-
-void CpuCores::enableFPB()
-{
-    //  This Key field must be set to 1 when writing or the write will be ignored.
-    const uint32_t FP_CTRL_KEY = 1 << 1;
-    //  Enable bit for the FPB.  Set to 1 to enable FPB.
-    const uint32_t FP_CTRL_ENABLE = 1;
-
-    uint32_t FP_CTRL_Value = readFPControlRegister();
-    FP_CTRL_Value |= (FP_CTRL_KEY | FP_CTRL_ENABLE);
-    writeFPControlRegister(FP_CTRL_Value);
-}
-
-void CpuCores::writeFPControlRegister(uint32_t FP_CTRL_Value)
-{
-    if (writeTargetMemory(FP_CTRL_Address, &FP_CTRL_Value, sizeof(FP_CTRL_Value), SWD::TRANSFER_32BIT) != sizeof(FP_CTRL_Value))
-    {
-        logError("Failed to write FP_CTRL register.");
-    }
+    m_pDefaultCore->checkForFpu(&m_fpu);
+    mriDebugException(m_pHaltedCore->getContext(m_fpu));
 }
 
 void CpuCores::enteringDebugger()
 {
-    m_trapReason = cacheTrapReason();
+    assert ( m_pHaltedCore != NULL );
+
+    m_trapReason = m_pHaltedCore->determineTrapReason();
     disableResetVectorCatch();
-}
-
-PlatformTrapReason CpuCores::cacheTrapReason()
-{
-    PlatformTrapReason reason = { MRI_PLATFORM_TRAP_TYPE_UNKNOWN, 0x00000000 };
-    uint32_t debugFaultStatus = 0;
-    if (!readDFSR(&debugFaultStatus))
-    {
-        return reason;
-    }
-
-    if (debugFaultStatus & DFSR_BKPT_Bit)
-    {
-        // Was caused by hardware or software breakpoint. If PC points to BKPT then report as software breakpoint.
-        if (Platform_TypeOfCurrentInstruction() == MRI_PLATFORM_INSTRUCTION_HARDCODED_BREAKPOINT)
-        {
-            reason.type = MRI_PLATFORM_TRAP_TYPE_SWBREAK;
-        }
-        else
-        {
-            reason.type = MRI_PLATFORM_TRAP_TYPE_HWBREAK;
-        }
-    }
-    else if (debugFaultStatus & DFSR_DWTTRAP_Bit)
-    {
-        reason = findMatchedWatchpoint();
-    }
-    return reason;
-}
-
-bool CpuCores::readDFSR(uint32_t* pDFSR)
-{
-    if (readTargetMemory(DFSR_Address, pDFSR, sizeof(*pDFSR), SWD::TRANSFER_32BIT) != sizeof(*pDFSR))
-    {
-        logError("Failed to read DFSR.");
-        return false;
-    }
-    return true;
-}
-
-PlatformTrapReason CpuCores::findMatchedWatchpoint(void)
-{
-    PlatformTrapReason reason = { MRI_PLATFORM_TRAP_TYPE_UNKNOWN, 0x00000000 };
-    uint32_t currentComparatorAddress = DWT_COMP_ARRAY_Address;
-    uint32_t comparatorCount = getDWTComparatorCount();
-    for (uint32_t i = 0 ; i < comparatorCount ; i++)
-    {
-        uint32_t function = 0;
-        if (readTargetMemory(currentComparatorAddress + offsetof(DWT_COMP_Type, function), &function, sizeof(function), SWD::TRANSFER_32BIT) != sizeof(function))
-        {
-            logError("Failed to read DWT function register.");
-            return reason;
-        }
-        if (function & DWT_COMP_FUNCTION_MATCHED)
-        {
-            reason = getReasonFromMatchComparator(currentComparatorAddress, function);
-        }
-        currentComparatorAddress += sizeof(DWT_COMP_Type);
-    }
-    return reason;
-}
-
-PlatformTrapReason CpuCores::getReasonFromMatchComparator(uint32_t comparatorAddress, uint32_t function)
-{
-    PlatformTrapReason reason = { MRI_PLATFORM_TRAP_TYPE_UNKNOWN, 0x00000000 };
-    switch (function & DWT_COMP_FUNCTION_FUNCTION_Mask)
-    {
-    case DWT_COMP_FUNCTION_FUNCTION_DATA_READ:
-        reason.type = MRI_PLATFORM_TRAP_TYPE_RWATCH;
-        break;
-    case DWT_COMP_FUNCTION_FUNCTION_DATA_WRITE:
-        reason.type = MRI_PLATFORM_TRAP_TYPE_WATCH;
-        break;
-    case DWT_COMP_FUNCTION_FUNCTION_DATA_READWRITE:
-        reason.type = MRI_PLATFORM_TRAP_TYPE_AWATCH;
-        break;
-    default:
-        reason.type = MRI_PLATFORM_TRAP_TYPE_UNKNOWN;
-        break;
-    }
-
-    uint32_t compValue = 0;
-    if (readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, comp), &compValue, sizeof(compValue), SWD::TRANSFER_32BIT) != sizeof(compValue))
-    {
-        logError("Failed to read DWT comp register.");
-        return reason;
-    }
-    reason.address = compValue;
-
-    return reason;
 }
 
 void CpuCores::disableResetVectorCatch()
 {
-    if (!setOrClearBitsInDEMCR(DEMCR_VC_CORERESET_Bit, false))
+    assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
+    for (size_t i = 0 ; i < m_coreCount ; i++)
     {
-        logError("Failed to clear reset vector catch bits in DEMCR register.");
-        return;
+        m_cores[i].disableResetVectorCatch();
     }
 }
 
 void CpuCores::leavingDebugger()
 {
-    clearDFSR();
+    // UNDONE: Do I need to clear the DFSR on all cores incase more than 1 actually halted?
+    assert ( m_pHaltedCore != NULL );
+    m_pHaltedCore->clearDFSR();
 }
 
-void CpuCores::clearDFSR()
+void CpuCores::resume()
 {
-    uint32_t dfsr = 0;
-    if (!readDFSR(&dfsr))
+    assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
+    for (size_t i = 0 ; i < m_coreCount ; i++)
     {
-        logError("Failed to read DFSR to clear it.");
-        return;
+        m_cores[i].writeContext(m_fpu);
+        m_cores[i].resume();
     }
-    if (!writeDFSR(dfsr))
-    {
-        logError("Failed to write DFSR to clear it.");
-        return;
-    }
-}
-
-bool CpuCores::writeDFSR(uint32_t dfsr)
-{
-    if (writeTargetMemory(DFSR_Address, &dfsr, sizeof(dfsr), SWD::TRANSFER_32BIT) != sizeof(dfsr))
-    {
-        logError("Failed to write to DFSR.");
-        return false;
-    }
-    return true;
-}
-
-void CpuCores::configureSingleSteppingBitsInDHCSR(bool enableSingleStepping)
-{
-    const uint32_t bitsToEnableSingleStepWithInterruptsDisabled = DHCSR_C_STEP_Bit | DHCSR_C_MASKINTS_Bit;
-    uint32_t DHCSR_Val = 0;
-
-    readDHCSR(&DHCSR_Val);
-    if (enableSingleStepping)
-    {
-        DHCSR_Val |= bitsToEnableSingleStepWithInterruptsDisabled;
-    }
-    else
-    {
-        DHCSR_Val &= ~bitsToEnableSingleStepWithInterruptsDisabled;
-    }
-
-    if (!writeDHCSR(DHCSR_Val))
-    {
-        logErrorF("Failed to update C_STEP & C_MASKINTS bits in DHCSR to %s single stepping.",
-                     enableSingleStepping ? "enable" : "disable");
-    }
-}
-
-uint32_t CpuCores::setBreakpoint(uint32_t breakpointAddress, bool is32BitInstruction)
-{
-    uint32_t existingFPBBreakpoint = findFPBBreakpointComparator(breakpointAddress, is32BitInstruction);
-    if (existingFPBBreakpoint != 0)
-    {
-        // This breakpoint is already set so just return pointer to existing comparator.
-        return existingFPBBreakpoint;
-    }
-
-    uint32_t freeFPBBreakpointComparator = findFreeFPBBreakpointComparator();
-    if (freeFPBBreakpointComparator == 0)
-    {
-        // All FPB breakpoint comparator slots are used so return NULL as error indicator.
-        logInfoF("No free hardware breakpoints for setting breakpoint at address 0x%08lX.", breakpointAddress);
-        return 0;
-    }
-
-    uint32_t comparatorValue = calculateFPBComparatorValue(breakpointAddress, is32BitInstruction);
-    if (writeTargetMemory(freeFPBBreakpointComparator, &comparatorValue, sizeof(comparatorValue), SWD::TRANSFER_32BIT) != sizeof(comparatorValue))
-    {
-        logErrorF("Failed to set breakpoint at address 0x%08lX.", breakpointAddress);
-        return 0;
-    }
-    return freeFPBBreakpointComparator;
-}
-
-uint32_t CpuCores::findFPBBreakpointComparator(uint32_t breakpointAddress, bool is32BitInstruction)
-{
-    uint32_t comparatorValueForThisBreakpoint = calculateFPBComparatorValue(breakpointAddress, is32BitInstruction);
-    uint32_t codeComparatorCount = getFPBCodeComparatorCount();
-    uint32_t currentComparatorAddress = FPB_COMP_ARRAY_Address;
-    for (uint32_t i = 0 ; i < codeComparatorCount ; i++)
-    {
-        uint32_t currentComparatorValue = 0;
-        if (readTargetMemory(currentComparatorAddress, &currentComparatorValue, sizeof(currentComparatorValue), SWD::TRANSFER_32BIT) != sizeof(currentComparatorValue))
-        {
-            logErrorF("Failed to read from FPB comparator at address 0x%08lX.", currentComparatorAddress);
-            return 0;
-        }
-        uint32_t maskOffReservedBits = maskOffFPBComparatorReservedBits(currentComparatorValue);
-        if (comparatorValueForThisBreakpoint == maskOffReservedBits)
-        {
-            return currentComparatorAddress;
-        }
-
-        currentComparatorAddress += sizeof(uint32_t);
-    }
-
-    // Return NULL if no FPB comparator is already enabled for this breakpoint.
-    return 0;
-}
-
-uint32_t CpuCores::calculateFPBComparatorValue(uint32_t breakpointAddress, bool is32BitInstruction)
-{
-    if (isBreakpointAddressInvalid(breakpointAddress))
-    {
-        return (uint32_t)~0U;
-    }
-    if (getFPBRevision() == FP_CTRL_REVISION2)
-    {
-        return calculateFPBComparatorValueRevision2(breakpointAddress);
-    }
-    else
-    {
-        return calculateFPBComparatorValueRevision1(breakpointAddress, is32BitInstruction);
-    }
-}
-
-bool CpuCores::isBreakpointAddressInvalid(uint32_t breakpointAddress)
-{
-    if (getFPBRevision() == FP_CTRL_REVISION2)
-    {
-        // On revision 2, can set breakpoint at any address in the 4GB range, except for at an odd addresses.
-        return isAddressOdd(breakpointAddress);
-    }
-    else
-    {
-        // On revision 1, can only set a breakpoint on addresses where the upper 3-bits are all 0 (upper 3.5GB is off
-        // limits) and the address is half-word aligned.
-        return isAddressAboveLowestHalfGig(breakpointAddress) || isAddressOdd(breakpointAddress);
-    }
-}
-
-uint32_t CpuCores::getFPBRevision()
-{
-    // Flash Patch breakpoint architecture revision. 0 for revision 1 and 1 for revision 2.
-    uint32_t FP_CTRL_REV_Shift = 28;
-    uint32_t FP_CTRL_REV_Mask = (0xF << FP_CTRL_REV_Shift);
-
-    uint32_t controlValue = readFPControlRegister();
-    return ((controlValue & FP_CTRL_REV_Mask) >> FP_CTRL_REV_Shift);
-}
-
-bool CpuCores::isAddressOdd(uint32_t address)
-{
-    return !!(address & 0x1);
-}
-
-bool CpuCores::isAddressAboveLowestHalfGig(uint32_t address)
-{
-    return !!(address & 0xE0000000);
-}
-
-uint32_t CpuCores::calculateFPBComparatorValueRevision1(uint32_t breakpointAddress, bool is32BitInstruction)
-{
-    uint32_t    comparatorValue;
-    comparatorValue = (breakpointAddress & FP_COMP_COMP_Mask);
-    comparatorValue |= FP_COMP_ENABLE_Bit;
-    comparatorValue |= calculateFPBComparatorReplaceValue(breakpointAddress, is32BitInstruction);
-
-    return comparatorValue;
-}
-
-uint32_t CpuCores::calculateFPBComparatorReplaceValue(uint32_t breakpointAddress, bool is32BitInstruction)
-{
-    //  Defines the behaviour for code address comparators.
-    uint32_t FP_COMP_REPLACE_Shift = 30;
-    // Breakpoint on lower halfword.
-    uint32_t FP_COMP_REPLACE_BREAK_LOWER = 0x1U << FP_COMP_REPLACE_Shift;
-    // Breakpoint on upper halfword.
-    uint32_t FP_COMP_REPLACE_BREAK_UPPER = 0x2U << FP_COMP_REPLACE_Shift;
-    // Breakpoint on word.
-    uint32_t FP_COMP_REPLACE_BREAK = 0x3U << FP_COMP_REPLACE_Shift;
-
-    if (is32BitInstruction)
-    {
-        return FP_COMP_REPLACE_BREAK;
-    }
-    else if (isAddressInUpperHalfword(breakpointAddress))
-    {
-        return FP_COMP_REPLACE_BREAK_UPPER;
-    }
-    else
-    {
-        return FP_COMP_REPLACE_BREAK_LOWER;
-    }
-}
-
-bool CpuCores::isAddressInUpperHalfword(uint32_t address)
-{
-    return !!(address & 0x2);
-}
-
-uint32_t CpuCores::calculateFPBComparatorValueRevision2(uint32_t breakpointAddress)
-{
-    return breakpointAddress | FP_COMP_BE_Bit;
-}
-
-uint32_t CpuCores::maskOffFPBComparatorReservedBits(uint32_t comparatorValue)
-{
-    //  Defines the behaviour for code address comparators.
-    uint32_t FP_COMP_REPLACE_Shift = 30;
-    uint32_t FP_COMP_REPLACE_Mask = 0x3U << FP_COMP_REPLACE_Shift;
-
-    if (getFPBRevision() == FP_CTRL_REVISION2)
-    {
-        return comparatorValue;
-    }
-    else
-    {
-        return (comparatorValue & (FP_COMP_REPLACE_Mask | FP_COMP_COMP_Mask | FP_COMP_ENABLE_Bit));
-    }
-}
-
-uint32_t CpuCores::findFreeFPBBreakpointComparator()
-{
-    uint32_t currentComparatorAddress = FPB_COMP_ARRAY_Address;
-    uint32_t codeComparatorCount = getFPBCodeComparatorCount();
-    for (uint32_t i = 0 ; i < codeComparatorCount ; i++)
-    {
-        uint32_t currentComparatorValue = 0;
-        if (readTargetMemory(currentComparatorAddress, &currentComparatorValue, sizeof(currentComparatorValue), SWD::TRANSFER_32BIT) != sizeof(currentComparatorValue))
-        {
-            logErrorF("Failed to read from FPB comparator at address 0x%08lX.", currentComparatorAddress);
-            return 0;
-        }
-        if (!isFPBComparatorEnabled(currentComparatorValue))
-        {
-            return currentComparatorAddress;
-        }
-
-        currentComparatorAddress += sizeof(uint32_t);
-    }
-
-    // Return 0 if no FPB breakpoint comparators are free.
-    return 0;
-}
-
-bool CpuCores::isFPBComparatorEnabled(uint32_t comparator)
-{
-    if (getFPBRevision() == FP_CTRL_REVISION2)
-    {
-        return isFPBComparatorEnabledRevision2(comparator);
-    }
-    else
-    {
-        return isFPBComparatorEnabledRevision1(comparator);
-    }
-}
-
-bool CpuCores::isFPBComparatorEnabledRevision1(uint32_t comparator)
-{
-    return !!(comparator & FP_COMP_ENABLE_Bit);
-}
-
-bool CpuCores::isFPBComparatorEnabledRevision2(uint32_t comparator)
-{
-    return !!((comparator & FP_COMP_BE_Bit) || (comparator & FP_COMP_FE_Bit));
-}
-
-uint32_t CpuCores::clearBreakpoint(uint32_t breakpointAddress, bool is32BitInstruction)
-{
-    uint32_t existingFPBBreakpoint = findFPBBreakpointComparator(breakpointAddress, is32BitInstruction);
-    if (existingFPBBreakpoint != 0)
-    {
-        clearFPBComparator(existingFPBBreakpoint);
-        logInfoF("Hardware breakpoint cleared at address 0x%08lX.", breakpointAddress);
-    }
-
-    return existingFPBBreakpoint;
-}
-
-void CpuCores::setWatchpoint(uintmri_t address, uintmri_t size,  PlatformWatchpointType type)
-{
-    uint32_t nativeType = convertWatchpointTypeToCortexMType(type);
-    if (!isValidDWTComparatorSetting(address, size, nativeType))
-    {
-        __throw(invalidArgumentException);
-    }
-
-    uint32_t comparatorAddress = enableDWTWatchpoint(address, size, nativeType);
-    if (comparatorAddress == 0)
-    {
-        __throw(exceededHardwareResourcesException);
-    }
-    logInfoF("Hardware watchpoint set at address 0x%08X.", address);
-}
-
-uint32_t CpuCores::convertWatchpointTypeToCortexMType(PlatformWatchpointType type)
-{
-    switch (type)
-    {
-    case MRI_PLATFORM_WRITE_WATCHPOINT:
-        return DWT_COMP_FUNCTION_FUNCTION_DATA_WRITE;
-    case MRI_PLATFORM_READ_WATCHPOINT:
-        return DWT_COMP_FUNCTION_FUNCTION_DATA_READ;
-    case MRI_PLATFORM_READWRITE_WATCHPOINT:
-        return DWT_COMP_FUNCTION_FUNCTION_DATA_READWRITE;
-    default:
-        return 0;
-    }
-}
-
-bool CpuCores::isValidDWTComparatorSetting(uint32_t watchpointAddress,
-                                           uint32_t watchpointSize,
-                                           uint32_t watchpointType)
-{
-    return isValidDWTComparatorSize(watchpointSize) &&
-           isValidDWTComparatorAddress(watchpointAddress, watchpointSize) &&
-           isValidDWTComparatorType(watchpointType);
-}
-
-bool CpuCores::isValidDWTComparatorSize(uint32_t watchpointSize)
-{
-    return isPowerOf2(watchpointSize);
-}
-
-bool CpuCores::isPowerOf2(uint32_t value)
-{
-    return (value & (value - 1)) == 0;
-}
-
-bool CpuCores::isValidDWTComparatorAddress(uint32_t watchpointAddress, uint32_t watchpointSize)
-{
-    return isAddressAlignedToSize(watchpointAddress, watchpointSize);
-}
-
-bool CpuCores::isAddressAlignedToSize(uint32_t address, uint32_t size)
-{
-    uint32_t addressMask = ~(size - 1);
-    return address == (address & addressMask);
-}
-
-bool CpuCores::isValidDWTComparatorType(uint32_t watchpointType)
-{
-    return (watchpointType == DWT_COMP_FUNCTION_FUNCTION_DATA_READ) ||
-           (watchpointType == DWT_COMP_FUNCTION_FUNCTION_DATA_WRITE) ||
-           (watchpointType == DWT_COMP_FUNCTION_FUNCTION_DATA_READWRITE);
-}
-
-uint32_t CpuCores::enableDWTWatchpoint(uint32_t watchpointAddress,
-                                       uint32_t watchpointSize,
-                                       uint32_t watchpointType)
-{
-    uint32_t comparatorAddress = findDWTComparator(watchpointAddress, watchpointSize, watchpointType);
-    if (comparatorAddress != 0)
-    {
-        // This watchpoint has already been set so return a pointer to it.
-        return comparatorAddress;
-    }
-
-    comparatorAddress = findFreeDWTComparator();
-    if (comparatorAddress == 0)
-    {
-        // There are no free comparators left.
-        logInfoF("No free hardware watchpoints for setting watchpoint at address 0x%08lX.", watchpointAddress);
-        return 0;
-    }
-
-    if (!attemptToSetDWTComparator(comparatorAddress, watchpointAddress, watchpointSize, watchpointType))
-    {
-        // Failed set due to the size being larger than supported by CPU.
-        logInfoF("Failed to set watchpoint at address 0x%08lX of size %lu bytes.", watchpointAddress, watchpointSize);
-        return 0;
-    }
-
-    // Successfully configured a free comparator for this watchpoint.
-    return comparatorAddress;
-}
-
-uint32_t CpuCores::findDWTComparator(uint32_t watchpointAddress,
-                                  uint32_t watchpointSize,
-                                  uint32_t watchpointType)
-{
-    uint32_t currentComparatorAddress = DWT_COMP_ARRAY_Address;
-    uint32_t comparatorCount = getDWTComparatorCount();
-    for (uint32_t i = 0 ; i < comparatorCount ; i++)
-    {
-        if (doesDWTComparatorMatch(currentComparatorAddress, watchpointAddress, watchpointSize, watchpointType))
-        {
-            return currentComparatorAddress;
-        }
-
-        currentComparatorAddress += sizeof(DWT_COMP_Type);
-    }
-
-    // Return NULL if no DWT comparator is already enabled for this watchpoint.
-    return 0;
-}
-
-bool CpuCores::doesDWTComparatorMatch(uint32_t comparatorAddress,
-                                      uint32_t address,
-                                      uint32_t size,
-                                      uint32_t function)
-{
-    return doesDWTComparatorFunctionMatch(comparatorAddress, function) &&
-           doesDWTComparatorAddressMatch(comparatorAddress, address) &&
-           doesDWTComparatorMaskMatch(comparatorAddress, size);
-}
-
-bool CpuCores::doesDWTComparatorFunctionMatch(uint32_t comparatorAddress, uint32_t function)
-{
-    uint32_t functionValue = 0;
-    if (readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, function), &functionValue, sizeof(functionValue), SWD::TRANSFER_32BIT) != sizeof(functionValue))
-    {
-        logError("Failed to read DWT function register.");
-        return false;
-    }
-    uint32_t importantFunctionBits = maskOffDWTFunctionBits(functionValue);
-
-    return importantFunctionBits == function;
-}
-
-uint32_t CpuCores::maskOffDWTFunctionBits(uint32_t functionValue)
-{
-    // Data Watchpoint and Trace Comparator Function Bits.
-    //  Data Address Linked Index 1.
-    const uint32_t DWT_COMP_FUNCTION_DATAVADDR1_Bit = 0xF << 16;
-    //  Data Address Linked Index 0.
-    const uint32_t DWT_COMP_FUNCTION_DATAVADDR0_Bit = 0xF << 12;
-    //  Selects size for data value matches.
-    const uint32_t DWT_COMP_FUNCTION_DATAVSIZE_Mask = 3 << 10;
-    //  Data Value Match.  Set to 0 for address compare and 1 for data value compare.
-    const uint32_t DWT_COMP_FUNCTION_DATAVMATCH_Bit = 1 << 8;
-    //  Cycle Count Match.  Set to 1 for enabling cycle count match and 0 otherwise.  Only valid on comparator 0.
-    const uint32_t DWT_COMP_FUNCTION_CYCMATCH_Bit = 1 << 7;
-    //  Enable Data Trace Address offset packets.  0 to disable.
-    const uint32_t DWT_COMP_FUNCTION_EMITRANGE_Bit = 1 << 5;
-
-    return functionValue & (DWT_COMP_FUNCTION_DATAVADDR1_Bit |
-                            DWT_COMP_FUNCTION_DATAVADDR0_Bit |
-                            DWT_COMP_FUNCTION_DATAVSIZE_Mask |
-                            DWT_COMP_FUNCTION_DATAVMATCH_Bit |
-                            DWT_COMP_FUNCTION_CYCMATCH_Bit |
-                            DWT_COMP_FUNCTION_EMITRANGE_Bit |
-                            DWT_COMP_FUNCTION_FUNCTION_Mask);
-
-}
-
-bool CpuCores::doesDWTComparatorAddressMatch(uint32_t comparatorAddress, uint32_t address)
-{
-    uint32_t compValue = 0;
-    if (readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, comp), &compValue, sizeof(compValue), SWD::TRANSFER_32BIT) != sizeof(compValue))
-    {
-        logError("Failed to read DWT comparator register.");
-        return false;
-    }
-    return compValue == address;
-}
-
-bool CpuCores::doesDWTComparatorMaskMatch(uint32_t comparatorAddress, uint32_t size)
-{
-    uint32_t maskValue = 0;
-    if (readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, mask), &maskValue, sizeof(maskValue), SWD::TRANSFER_32BIT) != sizeof(maskValue))
-    {
-        logError("Failed to read DWT mask register.");
-        return false;
-    }
-    return maskValue == calculateLog2(size);
-}
-
-uint32_t CpuCores::calculateLog2(uint32_t value)
-{
-    uint32_t log2 = 0;
-
-    while (value > 1)
-    {
-        value >>= 1;
-        log2++;
-    }
-
-    return log2;
-}
-
-uint32_t CpuCores::findFreeDWTComparator()
-{
-    uint32_t currentComparatorAddress = DWT_COMP_ARRAY_Address;
-    uint32_t comparatorCount = getDWTComparatorCount();
-    for (uint32_t i = 0 ; i < comparatorCount ; i++)
-    {
-        if (isDWTComparatorFree(currentComparatorAddress))
-        {
-            return currentComparatorAddress;
-        }
-        currentComparatorAddress += sizeof(DWT_COMP_Type);
-    }
-
-    // Return NULL if there are no free DWT comparators.
-    return 0;
-}
-
-bool CpuCores::isDWTComparatorFree(uint32_t comparatorAddress)
-{
-    //  Selects action to be taken on match.
-    //      Disabled
-    const uint32_t DWT_COMP_FUNCTION_FUNCTION_DISABLED = 0x0;
-
-    uint32_t functionValue = 0;
-    if (readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, function), &functionValue, sizeof(functionValue), SWD::TRANSFER_32BIT) != sizeof(functionValue))
-    {
-        logError("Failed to read DWT function register.");
-        return false;
-    }
-    return (functionValue & DWT_COMP_FUNCTION_FUNCTION_Mask) == DWT_COMP_FUNCTION_FUNCTION_DISABLED;
-}
-
-bool CpuCores::attemptToSetDWTComparator(uint32_t comparatorAddress,
-                                         uint32_t watchpointAddress,
-                                         uint32_t watchpointSize,
-                                         uint32_t watchpointType)
-{
-    if (!attemptToSetDWTComparatorMask(comparatorAddress, watchpointSize))
-    {
-        logErrorF("Failed to set DWT mask register to a size of %lu bytes.", watchpointSize);
-        return false;
-    }
-    if (writeTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, comp), &watchpointAddress, sizeof(watchpointAddress), SWD::TRANSFER_32BIT) != sizeof(watchpointAddress))
-    {
-        logError("Failed to write DWT comparator register.");
-        return false;
-    }
-    if (writeTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, function), &watchpointType, sizeof(watchpointType), SWD::TRANSFER_32BIT) != sizeof(watchpointType))
-    {
-        logError("Failed to write DWT function register.");
-        return false;
-    }
-    return true;
-}
-
-bool CpuCores::attemptToSetDWTComparatorMask(uint32_t comparatorAddress, uint32_t watchpointSize)
-{
-    uint32_t maskBitCount;
-
-    maskBitCount = calculateLog2(watchpointSize);
-    if (writeTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, mask), &maskBitCount, sizeof(maskBitCount), SWD::TRANSFER_32BIT) != sizeof(maskBitCount))
-    {
-        logError("Failed to write DWT mask register.");
-        return false;
-    }
-
-    // Processor may limit number of bits to be masked off so check.
-    uint32_t maskValue = 0;
-    if (readTargetMemory(comparatorAddress + offsetof(DWT_COMP_Type, mask), &maskValue, sizeof(maskValue), SWD::TRANSFER_32BIT) != sizeof(maskValue))
-    {
-        logError("Failed to read DWT mask register.");
-        return false;
-    }
-    return maskValue == maskBitCount;
-}
-
-void CpuCores::clearWatchpoint(uintmri_t address, uintmri_t size,  PlatformWatchpointType type)
-{
-    uint32_t nativeType = convertWatchpointTypeToCortexMType(type);
-
-    if (!isValidDWTComparatorSetting(address, size, nativeType))
-    {
-        __throw(invalidArgumentException);
-    }
-
-    disableDWTWatchpoint(address, size, nativeType);
-}
-
-uint32_t CpuCores::disableDWTWatchpoint(uint32_t watchpointAddress,
-                                        uint32_t watchpointSize,
-                                        uint32_t watchpointType)
-{
-    uint32_t comparatorAddress = findDWTComparator(watchpointAddress, watchpointSize, watchpointType);
-    if (comparatorAddress == 0)
-    {
-        // This watchpoint not set so return NULL.
-        return 0;
-    }
-
-    logInfoF("Hardware watchpoint cleared at address 0x%08lX.", watchpointAddress);
-    clearDWTComparator(comparatorAddress);
-    return comparatorAddress;
-}
-
-uint8_t CpuCores::determineCauseOfException(bool wasStopFromGDB)
-{
-    uint32_t DFSR_Value = 0;
-    if (readTargetMemory(DFSR_Address, &DFSR_Value, sizeof(DFSR_Value), SWD::TRANSFER_32BIT) != sizeof(DFSR_Value))
-    {
-        logError("Failed to read DFSR register.");
-        // NOTE: Catch all signal will be SIGSTOP.
-        return SIGSTOP;
-    }
-
-    // If VCATCH bit is set then look at CPSR to determine which exception handler was caught.
-    if (DFSR_Value & DFSR_VCATCH_Bit)
-    {
-        switch(getExceptionNumber())
-        {
-        case 2:
-            // NMI
-            logInfo("Exception caught: NMI.");
-            return SIGINT;
-        case 3:
-            // HardFault
-            logInfo("Exception caught: Hard Fault.");
-            return SIGSEGV;
-        case 4:
-            // MemManage
-            logInfo("Exception caught: Mem Manage.");
-            return SIGSEGV;
-        case 5:
-            // BusFault
-            logInfo("Exception caught: Bus Fault.");
-            return SIGBUS;
-        case 6:
-            // UsageFault
-            logInfo("Exception caught: Usage Fault.");
-            return SIGILL;
-        default:
-            // NOTE: Catch all signal for a vector/interrupt catch will be SIGINT.
-            logInfo("Exception caught: Unknown.");
-            return SIGINT;
-        }
-    }
-
-    // Check the other bits in the DFSR if VCATCH didn't occur.
-    if (DFSR_Value & DFSR_EXTERNAL_Bit)
-    {
-        logInfo("Debug event caught: External.");
-        return SIGSTOP;
-    }
-    else if (DFSR_Value & DFSR_DWTTRAP_Bit)
-    {
-        logInfo("Debug event caught: Watchpoint.");
-        return SIGTRAP;
-    }
-    else if (DFSR_Value & DFSR_BKPT_Bit)
-    {
-        logInfo("Debug event caught: Breakpoint.");
-        return SIGTRAP;
-    }
-    else if (DFSR_Value & DFSR_HALTED_Bit)
-    {
-        uint32_t DHCSR_Value = 0;
-        readDHCSR(&DHCSR_Value);
-        if ((DHCSR_Value & DHCSR_C_STEP_Bit) && !wasStopFromGDB)
-        {
-            logInfo("Debug event caught: Single Step.");
-            return SIGTRAP;
-        }
-        logInfo("Debug event caught: Halted.");
-        return SIGINT;
-    }
-
-    // NOTE: Default catch all signal is SIGSTOP.
-    logInfo("Debug event caught: Unknown.");
-    return SIGSTOP;
-}
-
-uint32_t CpuCores::getExceptionNumber()
-{
-    return readRegisterOnHaltedCore(CPSR) & IPSR_Mask;
-}
-
-PlatformTrapReason CpuCores::getTrapReason()
-{
-    return m_trapReason;
-}
-
-void CpuCores::displayFaultCauseToGdbConsole()
-{
-    // Nothing to do on ARMv6-M devices since they don't have fault status registers.
-    if (m_pSWD->getCpuType() < SWD::CPU_CORTEX_M3)
-    {
-        return;
-    }
-
-    switch (getExceptionNumber())
-    {
-    case 3:
-        /* HardFault */
-        displayHardFaultCauseToGdbConsole();
-        break;
-    case 4:
-        /* MemManage */
-        displayMemFaultCauseToGdbConsole();
-        break;
-    case 5:
-        /* BusFault */
-        displayBusFaultCauseToGdbConsole();
-        break;
-    case 6:
-        /* UsageFault */
-        displayUsageFaultCauseToGdbConsole();
-        break;
-    default:
-        return;
-    }
-    WriteStringToGdbConsole("\n");
-}
-
-void CpuCores::displayHardFaultCauseToGdbConsole()
-{
-    const uint32_t HFSR_Address = 0xE000ED2C;
-    const uint32_t debugEventBit = 1 << 31;
-    const uint32_t forcedBit = 1 << 30;
-    const uint32_t vectorTableReadBit = 1 << 1;
-    uint32_t       hardFaultStatusRegister = 0xBAADFEED;
-
-    if (readTargetMemory(HFSR_Address, &hardFaultStatusRegister, sizeof(hardFaultStatusRegister), SWD::TRANSFER_32BIT) != sizeof(hardFaultStatusRegister))
-    {
-        logError("Failed to read the HFSR register.");
-        return;
-    }
-
-    WriteStringToGdbConsole("\n**Hard Fault**");
-    WriteStringToGdbConsole("\n  Status Register: ");
-    WriteHexValueToGdbConsole(hardFaultStatusRegister);
-
-    if (hardFaultStatusRegister & debugEventBit)
-    {
-        WriteStringToGdbConsole("\n    Debug Event");
-    }
-
-    if (hardFaultStatusRegister & vectorTableReadBit)
-    {
-        WriteStringToGdbConsole("\n    Vector Table Read");
-    }
-
-    if (hardFaultStatusRegister & forcedBit)
-    {
-        WriteStringToGdbConsole("\n    Forced");
-        displayMemFaultCauseToGdbConsole();
-        displayBusFaultCauseToGdbConsole();
-        displayUsageFaultCauseToGdbConsole();
-    }
-}
-
-void CpuCores::displayMemFaultCauseToGdbConsole()
-{
-    const uint32_t MMARValidBit = 1 << 7;
-    const uint32_t FPLazyStatePreservationBit = 1 << 5;
-    const uint32_t stackingErrorBit = 1 << 4;
-    const uint32_t unstackingErrorBit = 1 << 3;
-    const uint32_t dataAccess = 1 << 1;
-    const uint32_t instructionFetch = 1;
-    uint32_t       CFSR_Value = 0xBAADFEED;
-
-    if (readTargetMemory(CFSR_Address, &CFSR_Value, sizeof(CFSR_Value), SWD::TRANSFER_32BIT) != sizeof(CFSR_Value))
-    {
-        logError("Failed to read the CFSR register.");
-        return;
-    }
-    uint8_t memManageFaultStatusRegister = CFSR_Value;
-
-    /* Check to make sure that there is a memory fault to display. */
-    if (memManageFaultStatusRegister == 0)
-    {
-        return;
-    }
-
-    WriteStringToGdbConsole("\n**MPU Fault**");
-    WriteStringToGdbConsole("\n  Status Register: ");
-    WriteHexValueToGdbConsole(memManageFaultStatusRegister);
-
-    if (memManageFaultStatusRegister & MMARValidBit)
-    {
-        const uint32_t MMFAR_Address = 0xE000ED34;
-        uint32_t       MMFAR_Value;
-        if (readTargetMemory(MMFAR_Address, &MMFAR_Value, sizeof(MMFAR_Value), SWD::TRANSFER_32BIT) != sizeof(MMFAR_Value))
-        {
-            logError("Failed to read the MMFAR register.");
-            return;
-        }
-
-        WriteStringToGdbConsole("\n    Fault Address: ");
-        WriteHexValueToGdbConsole(MMFAR_Value);
-    }
-    if (memManageFaultStatusRegister & FPLazyStatePreservationBit)
-        WriteStringToGdbConsole("\n    FP Lazy Preservation");
-
-    if (memManageFaultStatusRegister & stackingErrorBit)
-    {
-        WriteStringToGdbConsole("\n    Stacking Error w/ SP = ");
-        WriteHexValueToGdbConsole(readRegisterOnHaltedCore(SP));
-    }
-    if (memManageFaultStatusRegister & unstackingErrorBit)
-    {
-        WriteStringToGdbConsole("\n    Unstacking Error w/ SP = ");
-        WriteHexValueToGdbConsole(readRegisterOnHaltedCore(SP));
-    }
-    if (memManageFaultStatusRegister & dataAccess)
-    {
-        WriteStringToGdbConsole("\n    Data Access");
-    }
-
-    if (memManageFaultStatusRegister & instructionFetch)
-    {
-        WriteStringToGdbConsole("\n    Instruction Fetch");
-    }
-}
-
-void CpuCores::displayBusFaultCauseToGdbConsole()
-{
-    const uint32_t BFARValidBit = 1 << 7;
-    const uint32_t FPLazyStatePreservationBit = 1 << 5;
-    const uint32_t stackingErrorBit = 1 << 4;
-    const uint32_t unstackingErrorBit = 1 << 3;
-    const uint32_t impreciseDataAccessBit = 1 << 2;
-    const uint32_t preciseDataAccessBit = 1 << 1;
-    const uint32_t instructionPrefetch = 1;
-    uint32_t       CFSR_Value = 0xBAADFEED;
-
-    if (readTargetMemory(CFSR_Address, &CFSR_Value, sizeof(CFSR_Value), SWD::TRANSFER_32BIT) != sizeof(CFSR_Value))
-    {
-        logError("Failed to read the CFSR register.");
-        return;
-    }
-    uint8_t busFaultStatusRegister = CFSR_Value >> 8;
-
-    /* Check to make sure that there is a bus fault to display. */
-    if (busFaultStatusRegister == 0)
-    {
-        return;
-    }
-
-    WriteStringToGdbConsole("\n**Bus Fault**");
-    WriteStringToGdbConsole("\n  Status Register: ");
-    WriteHexValueToGdbConsole(busFaultStatusRegister);
-
-    if (busFaultStatusRegister & BFARValidBit)
-    {
-        const uint32_t BFAR_Address = 0xE000ED38;
-        uint32_t       BFAR_Value;
-        if (readTargetMemory(BFAR_Address, &BFAR_Value, sizeof(BFAR_Value), SWD::TRANSFER_32BIT) != sizeof(BFAR_Value))
-        {
-            logError("Failed to read the BFAR register.");
-            return;
-        }
-        WriteStringToGdbConsole("\n    Fault Address: ");
-        WriteHexValueToGdbConsole(BFAR_Value);
-    }
-    if (busFaultStatusRegister & FPLazyStatePreservationBit)
-    {
-        WriteStringToGdbConsole("\n    FP Lazy Preservation");
-    }
-
-    if (busFaultStatusRegister & stackingErrorBit)
-    {
-        WriteStringToGdbConsole("\n    Stacking Error w/ SP = ");
-        WriteHexValueToGdbConsole(readRegisterOnHaltedCore(SP));
-    }
-    if (busFaultStatusRegister & unstackingErrorBit)
-    {
-        WriteStringToGdbConsole("\n    Unstacking Error w/ SP = ");
-        WriteHexValueToGdbConsole(readRegisterOnHaltedCore(SP));
-    }
-    if (busFaultStatusRegister & impreciseDataAccessBit)
-    {
-        WriteStringToGdbConsole("\n    Imprecise Data Access");
-    }
-
-    if (busFaultStatusRegister & preciseDataAccessBit)
-    {
-        WriteStringToGdbConsole("\n    Precise Data Access");
-    }
-
-    if (busFaultStatusRegister & instructionPrefetch)
-    {
-        WriteStringToGdbConsole("\n    Instruction Prefetch");
-    }
-}
-
-void CpuCores::displayUsageFaultCauseToGdbConsole()
-{
-    const uint32_t divideByZeroBit = 1 << 9;
-    const uint32_t unalignedBit = 1 << 8;
-    const uint32_t coProcessorAccessBit = 1 << 3;
-    const uint32_t invalidPCBit = 1 << 2;
-    const uint32_t invalidStateBit = 1 << 1;
-    const uint32_t undefinedInstructionBit = 1;
-    uint32_t       CFSR_Value = 0xBAADFEED;
-
-    if (readTargetMemory(CFSR_Address, &CFSR_Value, sizeof(CFSR_Value), SWD::TRANSFER_32BIT) != sizeof(CFSR_Value))
-    {
-        logError("Failed to read the CFSR register.");
-        return;
-    }
-    uint8_t usageFaultStatusRegister = CFSR_Value >> 16;
-
-    /* Make sure that there is a usage fault to display. */
-    if (usageFaultStatusRegister == 0)
-    {
-        return;
-    }
-
-    WriteStringToGdbConsole("\n**Usage Fault**");
-    WriteStringToGdbConsole("\n  Status Register: ");
-    WriteHexValueToGdbConsole(usageFaultStatusRegister);
-
-    if (usageFaultStatusRegister & divideByZeroBit)
-    {
-        WriteStringToGdbConsole("\n    Divide by Zero");
-    }
-
-    if (usageFaultStatusRegister & unalignedBit)
-    {
-        WriteStringToGdbConsole("\n    Unaligned Access");
-    }
-
-    if (usageFaultStatusRegister & coProcessorAccessBit)
-    {
-        WriteStringToGdbConsole("\n    Coprocessor Access");
-    }
-
-    if (usageFaultStatusRegister & invalidPCBit)
-    {
-        WriteStringToGdbConsole("\n    Invalid Exception Return State");
-    }
-
-    if (usageFaultStatusRegister & invalidStateBit)
-    {
-        WriteStringToGdbConsole("\n    Invalid State");
-    }
-
-    if (usageFaultStatusRegister & undefinedInstructionBit)
-    {
-        WriteStringToGdbConsole("\n    Undefined Instruction");
-    }
+    m_pHaltedCore = NULL;
 }
 
 void CpuCores::reset()
 {
     // Power down the DAP on any other target cores during reset.
-    // The RP2040 had troubles reseting without this change.
-    for (size_t i = 1 ; i < m_swdTargetCount ; i++)
+    // The RP2040 had troubles resetting without this change.
+    assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
+    for (size_t i = 1 ; i < m_coreCount ; i++)
     {
-        m_swdTargets[i].disconnect();
+        m_cores[i].disconnect();
     }
-    m_swdTargetCount = 1;
+    m_coreCount = 1;
 
-    const uint32_t AIRCR_Address = 0xE000ED0C;
-    const uint32_t AIRCR_KEY_Shift = 16;
-    const uint32_t AIRCR_KEY_Mask = 0xFFFF << AIRCR_KEY_Shift;
-    const uint32_t AIRCR_KEY_VALUE = 0x05FA << AIRCR_KEY_Shift;
-    const uint32_t AIRCR_SYSRESETREQ_Bit = 1 << 2;
-    uint32_t AIRCR_Value = 0;
-    if (readTargetMemory(AIRCR_Address, &AIRCR_Value, sizeof(AIRCR_Value), SWD::TRANSFER_32BIT) != sizeof(AIRCR_Value))
+    m_pDefaultCore->reset();
+}
+
+void CpuCores::enableResetVectorCatch()
+{
+    assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
+    for (size_t i = 1 ; i < m_coreCount ; i++)
     {
-        logError("Failed to read AIRCR register for device reset.");
+        m_cores[i].enableResetVectorCatch();
     }
+}
 
-    // Clear out the existing key value and use the special ones to enable writes.
-    // Then set the SYSRESETREQ bit to request a device reset.
-    AIRCR_Value = (AIRCR_Value & ~AIRCR_KEY_Mask) | AIRCR_KEY_VALUE | AIRCR_SYSRESETREQ_Bit;
-
-    if (writeTargetMemory(AIRCR_Address, &AIRCR_Value, sizeof(AIRCR_Value), SWD::TRANSFER_32BIT) != sizeof(AIRCR_Value))
+uint32_t CpuCores::setBreakpoint(uint32_t breakpointAddress, bool is32BitInstruction)
+{
+    uint32_t retValue = 0xFFFFFFFF;
+    assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
+    for (size_t i = 1 ; i < m_coreCount ; i++)
     {
-        logError("Failed to write AIRCR register for device reset.");
+        uint32_t result = m_cores[i].setBreakpoint(breakpointAddress, is32BitInstruction);
+        // Expect all cores to be configured the same.
+        assert ( retValue == 0xFFFFFFFF || result == retValue );
+        retValue = result;
+    }
+    return retValue;
+}
+
+uint32_t CpuCores::clearBreakpoint(uint32_t breakpointAddress, bool is32BitInstruction)
+{
+    uint32_t retValue = 0xFFFFFFFF;
+    assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
+    for (size_t i = 1 ; i < m_coreCount ; i++)
+    {
+        uint32_t result = m_cores[i].clearBreakpoint(breakpointAddress, is32BitInstruction);
+        // Expect all cores to be configured the same.
+        assert ( retValue == 0xFFFFFFFF || result == retValue );
+        retValue = result;
+    }
+    return retValue;
+}
+
+void CpuCores::setWatchpoint(uintmri_t address, uintmri_t size,  PlatformWatchpointType type)
+{
+    int test = -1;
+    assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
+    for (size_t i = 1 ; i < m_coreCount ; i++)
+    {
+        int exceptionCode = noException;
+        __try
+        {
+            m_cores[i].setWatchpoint(address, size, type);
+        }
+        __catch
+        {
+            exceptionCode = getExceptionCode();
+        }
+        // Expect all cores to be configured the same.
+        assert ( test == -1 || exceptionCode == test );
+        test = exceptionCode;
+    }
+}
+
+void CpuCores::clearWatchpoint(uintmri_t address, uintmri_t size,  PlatformWatchpointType type)
+{
+    int test = -1;
+    assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
+    for (size_t i = 1 ; i < m_coreCount ; i++)
+    {
+        int exceptionCode = noException;
+        __try
+        {
+            m_cores[i].clearWatchpoint(address, size, type);
+        }
+        __catch
+        {
+            exceptionCode = getExceptionCode();
+        }
+        // Expect all cores to be configured the same.
+        assert ( test == -1 || exceptionCode == test );
+        test = exceptionCode;
     }
 }
 
@@ -2504,148 +3129,32 @@ bool CpuCores::dispatchMonitorCommandToDevice(const char** ppArgs, size_t argCou
         return false;
     }
 
-    return m_pDevice->handleMonitorCommand(m_pDeviceObject, m_pSWD, ppArgs, argCount);
-}
-
-void CpuCores::enableResetVectorCatch()
-{
-    if (!setOrClearBitsInDEMCR(DEMCR_VC_CORERESET_Bit, true))
-    {
-        logError("Failed to set reset vector catch bit in DEMCR register.");
-        return;
-    }
+    assert ( m_pDefaultTarget != NULL );
+    return m_pDevice->handleMonitorCommand(m_pDeviceObject, m_pDefaultTarget, ppArgs, argCount);
 }
 
 bool CpuCores::flashBegin()
 {
-    return m_pDevice->flashBegin(m_pDeviceObject, m_pSWD);
+    assert ( m_pDefaultTarget != NULL );
+    return m_pDevice->flashBegin(m_pDeviceObject, m_pDefaultTarget);
 }
 
 bool CpuCores::flashErase(uint32_t addressStart, uint32_t length)
 {
-    return m_pDevice->flashErase(m_pDeviceObject, m_pSWD, addressStart, length);
+    assert ( m_pDefaultTarget != NULL );
+    return m_pDevice->flashErase(m_pDeviceObject, m_pDefaultTarget, addressStart, length);
 }
 
 bool CpuCores::flashProgram(uint32_t addressStart, const void* pBuffer, size_t bufferSize)
 {
-    return m_pDevice->flashProgram(m_pDeviceObject, m_pSWD, addressStart, pBuffer, bufferSize);
+    assert ( m_pDefaultTarget != NULL );
+    return m_pDevice->flashProgram(m_pDeviceObject, m_pDefaultTarget, addressStart, pBuffer, bufferSize);
 }
 
 bool CpuCores::flashEnd()
 {
-    return m_pDevice->flashEnd(m_pDeviceObject, m_pSWD);
-}
-
-bool CpuCores::startCodeOnDevice(const CortexM_Registers* pRegistersIn)
-{
-    // UNDONE: Should take a bitmask of which register to write and read as it does all 16 now and this takes time.
-    // Set the CPU registers required for executing code on device.
-    bool result = true;
-    for (uint32_t i = 0 ; i < count_of(pRegistersIn->registers) ; i++)
-    {
-        result &= writeCpuRegister(i, pRegistersIn->registers[i]);
-    }
-    if (!result)
-    {
-        logError("Failed to set registers for executing code on device.");
-        return false;
-    }
-
-    // Want to keep interrupts masked while running this code and make sure that single stepping is disabled.
-    if (!disableSingleStepAndInterrupts())
-    {
-        logError("Failed to disable single step and interrupts.");
-        return false;
-    }
-
-    // Start the target CPU executing.
-    if (!requestCpuToResume())
-    {
-        logError("Failed to start executing debugger code on target device.");
-        reenableInterrupts();
-        return false;
-    }
-
-    return true;
-}
-
-bool CpuCores::disableSingleStepAndInterrupts()
-{
-    uint32_t DHCSR_Val = 0;
-    if (!readDHCSR(&DHCSR_Val))
-    {
-        return false;
-    }
-
-    DHCSR_Val = (DHCSR_Val & ~DHCSR_C_STEP_Bit) | DHCSR_C_MASKINTS_Bit;
-    if (!writeDHCSR(DHCSR_Val))
-    {
-        return false;
-    }
-    return true;
-}
-
-bool CpuCores::reenableInterrupts()
-{
-    uint32_t DHCSR_Val = 0;
-    if (!readDHCSR(&DHCSR_Val))
-    {
-        return false;
-    }
-
-    DHCSR_Val &= ~DHCSR_C_MASKINTS_Bit;
-    if (!writeDHCSR(DHCSR_Val))
-    {
-        return false;
-    }
-    return true;
-}
-
-bool CpuCores::waitForCodeToHalt(CortexM_Registers* pRegistersOut, uint32_t timeout_ms)
-{
-    // Wait for executing code to complete.
-    absolute_time_t endTime = make_timeout_time_ms(timeout_ms);
-    uint32_t DHCSR_Val = 0;
-    do
-    {
-        if (!readDHCSR(&DHCSR_Val))
-        {
-            break;
-        }
-    } while (!isCpuHalted(DHCSR_Val) && absolute_time_diff_us(get_absolute_time(), endTime) > 0);
-    reenableInterrupts();
-    if (!isCpuHalted(DHCSR_Val))
-    {
-        logError("Timeout out waiting for code execution on device to complete.");
-        return false;
-    }
-
-    // Retrieve the register contents after the code has completed execution so that the caller can see their contents.
-    bool result = true;
-    for (uint32_t i = 0 ; i < count_of(pRegistersOut->registers) ; i++)
-    {
-        result &= readCpuRegister(i, &pRegistersOut->registers[i]);
-    }
-    if (!result)
-    {
-        logError("Failed to fetch registers after executing code on device.");
-        return false;
-    }
-
-    return true;
-}
-
-bool CpuCores::runCodeOnDevice(CortexM_Registers* pRegistersInOut, uint32_t timeout_ms)
-{
-    if (!startCodeOnDevice(pRegistersInOut))
-    {
-        return false;
-    }
-    if (!waitForCodeToHalt(pRegistersInOut, timeout_ms))
-    {
-        return false;
-    }
-    return true;
+    assert ( m_pDefaultTarget != NULL );
+    return m_pDevice->flashEnd(m_pDeviceObject, m_pDefaultTarget);
 }
 
 
@@ -2668,11 +3177,11 @@ static bool       g_wasMemoryExceptionEncountered = false;
 
 
 // Forward Function Declarations.
-static void handleSwdDisconnect();
-static void triggerMriCoreToExit();
 static bool initSWD();
 static bool waitForSwdAttach(uint32_t delayBetweenAttempts_ms);
 static bool attemptSwdAttach();
+static void handleSwdDisconnect();
+static void triggerMriCoreToExit();
 static bool initNetwork();
 static void innerDebuggerLoop();
 static bool checkForNetworkDown();
@@ -2690,7 +3199,6 @@ void mainDebuggerLoop()
     g_isSwdConnected = false;
     g_isNetworkConnected = false;
     g_isInDebugger = false;
-    g_cores.setConnectionFailureCallback(handleSwdDisconnect);
     while (true)
     {
         if (!g_isSwdConnected)
@@ -2739,26 +3247,6 @@ void mainDebuggerLoop()
             cyw43_arch_deinit();
         }
     }
-}
-
-static void handleSwdDisconnect()
-{
-    g_isSwdConnected = false;
-    triggerMriCoreToExit();
-}
-
-static void triggerMriCoreToExit()
-{
-    if (!g_isInDebugger)
-    {
-        return;
-    }
-
-    // Push an empty packet into MRI so that it will return to its command line handling loop and call
-    // handleGDBCommand() which will actually request MRI to exit so that the main loop can try reconnecting.
-    const uint8_t emptyPacket[] = "+$#00";
-    g_gdbSocket.m_tcpToMriQueue.init();
-    g_gdbSocket.m_tcpToMriQueue.write(emptyPacket, sizeof(emptyPacket)-1);
 }
 
 static bool initSWD()
@@ -2814,9 +3302,29 @@ static bool attemptSwdAttach()
         return false;
     }
 
-    bool result = g_cores.init(&g_swdBus);
+    bool result = g_cores.init(&g_swdBus, handleSwdDisconnect);
     logInfo("SWD initialization complete!");
     return result;
+}
+
+static void handleSwdDisconnect()
+{
+    g_isSwdConnected = false;
+    triggerMriCoreToExit();
+}
+
+static void triggerMriCoreToExit()
+{
+    if (!g_isInDebugger)
+    {
+        return;
+    }
+
+    // Push an empty packet into MRI so that it will return to its command line handling loop and call
+    // handleGDBCommand() which will actually request MRI to exit so that the main loop can try reconnecting.
+    const uint8_t emptyPacket[] = "+$#00";
+    g_gdbSocket.m_tcpToMriQueue.init();
+    g_gdbSocket.m_tcpToMriQueue.write(emptyPacket, sizeof(emptyPacket)-1);
 }
 
 
@@ -2873,18 +3381,19 @@ static void innerDebuggerLoop()
             logInfoF("%s has requested a CPU halt.", g_haltOnAttach ? "User" : "GDB");
             g_wasStopFromGDB = true;
             g_haltOnAttach = false;
-            g_cores.requestCpuToHalt();
+            g_cores.requestCoresToHalt(CpuCores::CORE_NONE);
         }
 
         // Query current state of CPU.
-        CpuCores::CpuState cpuState = 0;
-        if (!g_cores.getCpuState(&cpuState, READ_DHCSR_TIMEOUT_MS))
+        if (!g_cores.refreshCoreStates(READ_DHCSR_TIMEOUT_MS))
         {
             logInfo("SWD target is no longer responding. Will attempt to reattach.");
             g_isSwdConnected = false;
             continue;
         }
-        if (g_cores.isDeviceResetting(cpuState))
+        int resettingCore = g_cores.indexOfResettingCore();
+        int haltingCore = g_cores.indexOfHaltedCore();
+        if (resettingCore != CpuCores::CORE_NONE)
         {
             if (g_isResetting)
             {
@@ -2898,9 +3407,10 @@ static void innerDebuggerLoop()
             }
             continue;
         }
-        if (!hasCpuHalted && g_cores.isCpuHalted(cpuState))
+        if (!hasCpuHalted && haltingCore != CpuCores::CORE_NONE)
         {
-            logInfo("CPU has halted.");
+            logInfoF("Core%d has halted.", haltingCore);
+            g_cores.requestCoresToHalt(haltingCore);
             hasCpuHalted = true;
         }
         // UNDONE: Should check the sleep, lockup, retire bits in the DHCSR as well.
@@ -2909,7 +3419,7 @@ static void innerDebuggerLoop()
         {
             hasCpuHalted = false;
 
-            g_cores.enterMriCore();
+            g_cores.enterMriCore(haltingCore);
             if (!g_isSwdConnected || !g_isNetworkConnected)
             {
                 continue;
@@ -3001,14 +3511,8 @@ static void checkForDeviceReset()
         return;
     }
 
-    // See if the Debug Halting Control and Status Register indicates that the CPU has been reset.
-    CpuCores::CpuState state = 0;
-    bool result = g_cores.getCpuState(&state, 0);
-    if (!result)
-    {
-        return;
-    }
-    if (g_cores.isDeviceResetting(state))
+    // See if the halted core has been reset out underneath us while debugging it.
+    if (g_cores.isHaltedCoreResetting())
     {
         logInfo("Device RESET detected while halted in GDB.");
         g_isResetting = false;
@@ -3896,7 +4400,7 @@ static const char g_targetFpuXML[] =
 
 uintmri_t Platform_GetTargetXmlSize(void)
 {
-    if (g_cores.hasFPU() >= CpuCores::FPU_MAYBE)
+    if (g_cores.hasFPU() >= CpuCore::FPU_MAYBE)
     {
         return sizeof(g_targetFpuXML);
     }
@@ -3908,7 +4412,7 @@ uintmri_t Platform_GetTargetXmlSize(void)
 
 const char* Platform_GetTargetXml(void)
 {
-    if (g_cores.hasFPU() >= CpuCores::FPU_MAYBE)
+    if (g_cores.hasFPU() >= CpuCore::FPU_MAYBE)
     {
         return g_targetFpuXML;
     }
