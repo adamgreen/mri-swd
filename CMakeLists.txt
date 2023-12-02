@@ -61,6 +61,7 @@ target_sources(mri-swd PRIVATE
     swd.cpp
     gdb_socket.cpp
     mri_platform.cpp
+    cpu_core.cpp
     )
 
 target_include_directories(mri-swd PRIVATE

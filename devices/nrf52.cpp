@@ -23,6 +23,7 @@
 #include <string.h>
 #include "nrf52.h"
 #include "mri_platform.h"
+#include "cpu_core.h"
 
 // MRI C headers
 extern "C"
@@ -78,30 +79,30 @@ struct nRF52Object
 static bool isAddressAndLength4kAligned(uint32_t address, uint32_t length);
 static bool is4kAligned(uint32_t value);
 static bool isAttemptingToFlashInvalidAddress(const DeviceMemoryRegion* pFlashRegion, uint32_t address, uint32_t length);
-static bool eraseEnable(SwdTarget* pSWD);
-static bool erasePage(SwdTarget* pSWD, uint32_t pageAddress);
-static bool waitForEraseToComplete(SwdTarget* pSWD);
-static bool eraseDisable(SwdTarget* pSWD);
+static bool eraseEnable(CpuCore* pCore);
+static bool erasePage(CpuCore* pCore, uint32_t pageAddress);
+static bool waitForEraseToComplete(CpuCore* pCore);
+static bool eraseDisable(CpuCore* pCore);
 static bool isAddressAndLengthWordAligned(uint32_t address, uint32_t length);
 static bool isWordAligned(uint32_t value);
-static bool writeEnable(SwdTarget* pSWD);
-static bool writeDisable(SwdTarget* pSWD);
-static bool eraseFlashAndUICR(SwdTarget* pSWD);
+static bool writeEnable(CpuCore* pCore);
+static bool writeDisable(CpuCore* pCore);
+static bool eraseFlashAndUICR(CpuCore* pCore);
 
 
 // mri-swd will call this function on each of the devices listed in g_supportedDevices until a non-NULL response
 // is encountered, indicating that the device attached to the debugger is supported by that element.
 //
-// pSWD is a pointer to the SWD object used for interfacing to the device.
+// pCore is a pointer to the CpuCore object used for interfacing to the core.
 //
 // The returned pointer can point to anything that the device specific code wants to access on subsequent calls to
 // other routines in this function table. It can even be something malloc()ed. Calling the free() function from this
 // table can then be used to free it. Should return NULL if the connected target isn't recognized as this type of
 // device.
-static DeviceObject* nrf52Detect(SwdTarget* pSWD)
+static DeviceObject* nrf52Detect(CpuCore* pCore)
 {
     // nRF52xxx devices all contain a Cortex-M4 core that should be recognized by the SWD class.
-    if (pSWD->getCpuType() != SWD::CPU_CORTEX_M4)
+    if (pCore->getTarget()->getCpuType() != SWD::CPU_CORTEX_M4)
     {
         return NULL;
     }
@@ -110,7 +111,7 @@ static DeviceObject* nrf52Detect(SwdTarget* pSWD)
     // If the read of this address fails then this isn't a nRF52xxx device.
     const uint32_t FICR_INFO_Address = 0x10000100;
     nRF52Object object;
-    if (!pSWD->readMemory(FICR_INFO_Address, &object.ficrInfo, sizeof(object.ficrInfo), SWD::TRANSFER_32BIT))
+    if (!pCore->readMemory(FICR_INFO_Address, &object.ficrInfo, sizeof(object.ficrInfo), SWD::TRANSFER_32BIT))
     {
         return NULL;
     }
@@ -147,8 +148,8 @@ static DeviceObject* nrf52Detect(SwdTarget* pSWD)
 // Can be used by the device specific code to free the object returned from detect().
 //
 // pvObject is a pointer to the object allocated by detect().
-// pSWD is a pointer to the SWD object used for interfacing to the device.
-static void nrf52Free(DeviceObject* pvObject, SwdTarget* pSWD)
+// pCore is a pointer to the CpuCore object used for interfacing to the core.
+static void nrf52Free(DeviceObject* pvObject, CpuCore* pCore)
 {
     free(pvObject);
 }
@@ -157,10 +158,10 @@ static void nrf52Free(DeviceObject* pvObject, SwdTarget* pSWD)
 // Gets friendly name for this device.
 //
 // pvObject is a pointer to the object allocated by detect().
-// pSWD is a pointer to the SWD object used for interfacing to the device.
+// pCore is a pointer to the CpuCore object used for interfacing to the core.
 //
 // Returns a \0 terminated string indicating this device's name.
-static const char* nrf52GetName(DeviceObject* pvObject, SwdTarget* pSWD)
+static const char* nrf52GetName(DeviceObject* pvObject, CpuCore* pCore)
 {
     return "nRF52xxx";
 }
@@ -168,10 +169,10 @@ static const char* nrf52GetName(DeviceObject* pvObject, SwdTarget* pSWD)
 // The SWD interface will be set to this frequency from the possibly lower rate used during SWD::init().
 //
 // pvObject is a pointer to the object allocated by detect().
-// pSWD is a pointer to the SWD object used for interfacing to the device.
+// pCore is a pointer to the CpuCore object used for interfacing to the core.
 //
 // Returns the maximum SWCLK frequency supported by this device.
-static uint32_t nrf52MaximumSWDClockFrequency(DeviceObject* pvObject, SwdTarget* pSWD)
+static uint32_t nrf52MaximumSWDClockFrequency(DeviceObject* pvObject, CpuCore* pCore)
 {
     // The nRF52xxx SWD DP can support clock rates up to 8MHz.
     return MAX_SWD_FREQUENCY;
@@ -182,16 +183,16 @@ static uint32_t nrf52MaximumSWDClockFrequency(DeviceObject* pvObject, SwdTarget*
 // initialization it needs here before the flashErase() and flashProgram() routines are called.
 //
 // pvObject is a pointer to the object allocated by detect().
-// pSWD is a pointer to the SWD object used for interfacing to the device.
+// pCore is a pointer to the CpuCore object used for interfacing to the core.
 //
 // Returns true if successful and false otherwise.
-static bool nrf52FlashBegin(DeviceObject* pvObject, SwdTarget* pSWD)
+static bool nrf52FlashBegin(DeviceObject* pvObject, CpuCore* pCore)
 {
     assert ( pvObject );
 
     // Drop the SWD clock rate to 800kHz while programming so that the word writes are slow enough for updating the
     // FLASH on the nRF52 (41µs per 32-bit write).
-    if (!pSWD->setFrequency(FLASH_WRITE_SWD_FREQUENCY))
+    if (!pCore->getTarget()->setFrequency(FLASH_WRITE_SWD_FREQUENCY))
     {
         logError("Failed to slow down the SWCLK for FLASH programming.");
         return false;
@@ -204,15 +205,15 @@ static bool nrf52FlashBegin(DeviceObject* pvObject, SwdTarget* pSWD)
 // GDB would like the FLASH at the specified address range to be erased in preparation for programming.
 //
 // pvObject is a pointer to the object allocated by detect().
-// pSWD is a pointer to the SWD object used for interfacing to the device.
+// pCore is a pointer to the CpuCore object used for interfacing to the core.
 // addressStart is the address at the beginning of the range to be erased. (inclusive)
 // length is the number of bytes starting at address to be erased.
 //
 // Returns true if successful and false otherwise.
-static bool nrf52FlashErase(DeviceObject* pvObject, SwdTarget* pSWD, uint32_t addressStart, uint32_t length)
+static bool nrf52FlashErase(DeviceObject* pvObject, CpuCore* pCore, uint32_t addressStart, uint32_t length)
 {
     nRF52Object* pObject = (nRF52Object*)pvObject;
-    assert ( pObject && pSWD );
+    assert ( pObject && pCore );
 
     if (!isAddressAndLength4kAligned(addressStart, length))
     {
@@ -225,7 +226,7 @@ static bool nrf52FlashErase(DeviceObject* pvObject, SwdTarget* pSWD, uint32_t ad
         return false;
     }
 
-    if (!eraseEnable(pSWD))
+    if (!eraseEnable(pCore))
     {
         return false;
     }
@@ -235,7 +236,7 @@ static bool nrf52FlashErase(DeviceObject* pvObject, SwdTarget* pSWD, uint32_t ad
     bool result = true;
     while (address < endAddress)
     {
-        if (!erasePage(pSWD, address))
+        if (!erasePage(pCore, address))
         {
             logErrorF("Failed to erase page starting at address 0x%08X.", address);
             result = false;
@@ -245,7 +246,7 @@ static bool nrf52FlashErase(DeviceObject* pvObject, SwdTarget* pSWD, uint32_t ad
         address += FLASH_PAGE_SIZE;
     }
 
-    if (!eraseDisable(pSWD))
+    if (!eraseDisable(pCore))
     {
         return false;
     }
@@ -277,10 +278,10 @@ static bool isAttemptingToFlashInvalidAddress(const DeviceMemoryRegion* pFlashRe
 
 static const uint32_t NVMC_CONFIG_Address = 0x4001E504;
 
-static bool eraseEnable(SwdTarget* pSWD)
+static bool eraseEnable(CpuCore* pCore)
 {
     const uint32_t eraseEnable = 2;
-    if (!pSWD->writeMemory(NVMC_CONFIG_Address, &eraseEnable, sizeof(eraseEnable), SWD::TRANSFER_32BIT))
+    if (!pCore->writeMemory(NVMC_CONFIG_Address, &eraseEnable, sizeof(eraseEnable), SWD::TRANSFER_32BIT))
     {
         logError("Failed to write to NVMC.CONFIG to enable FLASH erase.");
         return false;
@@ -288,16 +289,16 @@ static bool eraseEnable(SwdTarget* pSWD)
     return true;
 }
 
-static bool erasePage(SwdTarget* pSWD, uint32_t pageAddress)
+static bool erasePage(CpuCore* pCore, uint32_t pageAddress)
 {
     const uint32_t NVMC_ERASEPAGE_Address = 0x4001E508;
-    if (!pSWD->writeMemory(NVMC_ERASEPAGE_Address, &pageAddress, sizeof(pageAddress), SWD::TRANSFER_32BIT))
+    if (!pCore->writeMemory(NVMC_ERASEPAGE_Address, &pageAddress, sizeof(pageAddress), SWD::TRANSFER_32BIT))
     {
         logErrorF("Failed to write address 0x%08lX to NVMC.ERASEPAGE.", pageAddress);
         return false;
     }
 
-    if (!waitForEraseToComplete(pSWD))
+    if (!waitForEraseToComplete(pCore))
     {
         logError("Failed to erase all of FLASH and UICR.");
         return false;
@@ -305,14 +306,14 @@ static bool erasePage(SwdTarget* pSWD, uint32_t pageAddress)
     return true;
 }
 
-static bool waitForEraseToComplete(SwdTarget* pSWD)
+static bool waitForEraseToComplete(CpuCore* pCore)
 {
     absolute_time_t endTime = make_timeout_time_ms(FLASH_PAGE_ERASE_TIMEOUT_MS);
     uint32_t nvmcReady = 0;
     do
     {
         const uint32_t NVMC_READY_Address = 0x4001E400;
-        if (!pSWD->readMemory(NVMC_READY_Address, &nvmcReady, sizeof(nvmcReady), SWD::TRANSFER_32BIT))
+        if (!pCore->readMemory(NVMC_READY_Address, &nvmcReady, sizeof(nvmcReady), SWD::TRANSFER_32BIT))
         {
             logError("Failed to read NVMC.READY.");
             return false;
@@ -329,10 +330,10 @@ static bool waitForEraseToComplete(SwdTarget* pSWD)
     return true;
 }
 
-static bool eraseDisable(SwdTarget* pSWD)
+static bool eraseDisable(CpuCore* pCore)
 {
     const uint32_t readOnly = 0;
-    if (!pSWD->writeMemory(NVMC_CONFIG_Address, &readOnly, sizeof(readOnly), SWD::TRANSFER_32BIT))
+    if (!pCore->writeMemory(NVMC_CONFIG_Address, &readOnly, sizeof(readOnly), SWD::TRANSFER_32BIT))
     {
         logError("Failed to write to NVMC.CONFIG to make FLASH read-only.");
         return false;
@@ -344,16 +345,16 @@ static bool eraseDisable(SwdTarget* pSWD)
 // GDB would like the FLASH at the specified address to be programmed with the supplied data.
 //
 // pvObject is a pointer to the object allocated by detect().
-// pSWD is a pointer to the SWD object used for interfacing to the device.
+// pCore is a pointer to the CpuCore object used for interfacing to the core.
 // addressStart is the address at the beginning of the range to be programmed.
 // pBuffer is the address of the data to be programmed into the specified FLASH location.
 // bufferSize is the number of bytes in pBuffer to be programmed into FLASH at the specified location.
 //
 // Returns true if successful and false otherwise.
-static bool nrf52FlashProgram(DeviceObject* pvObject, SwdTarget* pSWD, uint32_t addressStart, const void* pBuffer, size_t bufferSize)
+static bool nrf52FlashProgram(DeviceObject* pvObject, CpuCore* pCore, uint32_t addressStart, const void* pBuffer, size_t bufferSize)
 {
     nRF52Object* pObject = (nRF52Object*)pvObject;
-    assert ( pObject && pSWD );
+    assert ( pObject && pCore );
 
     if (!isAddressAndLengthWordAligned(addressStart, bufferSize))
     {
@@ -366,7 +367,7 @@ static bool nrf52FlashProgram(DeviceObject* pvObject, SwdTarget* pSWD, uint32_t 
         return false;
     }
 
-    if (!writeEnable(pSWD))
+    if (!writeEnable(pCore))
     {
         return false;
     }
@@ -377,13 +378,13 @@ static bool nrf52FlashProgram(DeviceObject* pvObject, SwdTarget* pSWD, uint32_t 
     memcpy(alignedBuffer, pBuffer, bufferSize);
 
     bool result = true;
-    if (!pSWD->writeMemory(addressStart, alignedBuffer, bufferSize, SWD::TRANSFER_32BIT))
+    if (!pCore->writeMemory(addressStart, alignedBuffer, bufferSize, SWD::TRANSFER_32BIT))
     {
         logErrorF("Failed to write %lu bytes to FLASH at address 0x%08lX", bufferSize, addressStart);
         result = false;
     }
 
-    if (!writeDisable(pSWD))
+    if (!writeDisable(pCore))
     {
         return false;
     }
@@ -401,10 +402,10 @@ static bool isWordAligned(uint32_t value)
     return (value & (sizeof(uint32_t)-1)) == 0;
 }
 
-static bool writeEnable(SwdTarget* pSWD)
+static bool writeEnable(CpuCore* pCore)
 {
     const uint32_t writeEnable = 1;
-    if (!pSWD->writeMemory(NVMC_CONFIG_Address, &writeEnable, sizeof(writeEnable), SWD::TRANSFER_32BIT))
+    if (!pCore->writeMemory(NVMC_CONFIG_Address, &writeEnable, sizeof(writeEnable), SWD::TRANSFER_32BIT))
     {
         logError("Failed to write to NVMC.CONFIG to enable FLASH write.");
         return false;
@@ -412,10 +413,10 @@ static bool writeEnable(SwdTarget* pSWD)
     return true;
 }
 
-static bool writeDisable(SwdTarget* pSWD)
+static bool writeDisable(CpuCore* pCore)
 {
     // The same thing is written to NVMC.CONFIG to disable erasing and writing
-    return eraseDisable(pSWD);
+    return eraseDisable(pCore);
 }
 
 
@@ -423,15 +424,15 @@ static bool writeDisable(SwdTarget* pSWD)
 // cleanup it needs here after all the flashErase() and flashProgram() call have been made.
 //
 // pvObject is a pointer to the object allocated by detect().
-// pSWD is a pointer to the SWD object used for interfacing to the device.
+// pCore is a pointer to the CpuCore object used for interfacing to the core.
 //
 // Returns true if successful and false otherwise.
-static bool nrf52FlashEnd(DeviceObject* pvObject, SwdTarget* pSWD)
+static bool nrf52FlashEnd(DeviceObject* pvObject, CpuCore* pCore)
 {
-    assert ( pvObject && pSWD );
+    assert ( pvObject && pCore );
 
     // Restore the SWD clock rate back to the maximum now that we are done with FLASH programming.
-    if (!pSWD->setFrequency(MAX_SWD_FREQUENCY))
+    if (!pCore->getTarget()->setFrequency(MAX_SWD_FREQUENCY))
     {
         logError("Failed to restore SWCLK to 8MHz after FLASH programming.");
         return false;
@@ -448,13 +449,13 @@ static bool nrf52FlashEnd(DeviceObject* pvObject, SwdTarget* pSWD)
 // deviceDefaultMemoryLayout() function declared below.
 //
 // pvObject is a pointer to the object allocated by detect().
-// pSWD is a pointer to the SWD object used for interfacing to the device.
+// pCore is a pointer to the CpuCore object used for interfacing to the core.
 //
 // Returns a pointer to the memory layout description for this device. Can't be NULL.
-const DeviceMemoryLayout* nrf52GetMemoryLayout(DeviceObject* pvObject, SwdTarget* pSWD)
+const DeviceMemoryLayout* nrf52GetMemoryLayout(DeviceObject* pvObject, CpuCore* pCore)
 {
     nRF52Object* pObject = (nRF52Object*)pvObject;
-    assert ( pObject && pSWD );
+    assert ( pObject && pCore );
 
     // Return the memory layout for the specific device attached. This layout was generated in rp52Detect().
     return &pObject->memoryLayout;
@@ -465,11 +466,11 @@ const DeviceMemoryLayout* nrf52GetMemoryLayout(DeviceObject* pvObject, SwdTarget
 // opportunity to handle the command before letting the mri-swd core code handle it.
 //
 // pvObject is a pointer to the object allocated by detect().
-// pSWD is a pointer to the SWD object used for interfacing to the device.
+// pCore is a pointer to the CpuCore object used for interfacing to the core.
 //
 // Returns true if this command has been handled by this device specific code.
 // Returns false if the more generic mri-swd monitor command handler should be used instead.
-static bool nrf52HandleMonitorCommand(DeviceObject* pvObject, SwdTarget* pSWD, const char** ppArgs, size_t argCount)
+static bool nrf52HandleMonitorCommand(DeviceObject* pvObject, CpuCore* pCore, const char** ppArgs, size_t argCount)
 {
     // Check for "help" command to list nRF52 specific commands.
     if (argCount >= 1 && strcasecmp(ppArgs[0], "help") == 0)
@@ -489,35 +490,35 @@ static bool nrf52HandleMonitorCommand(DeviceObject* pvObject, SwdTarget* pSWD, c
     // Parse and handle nRF52 specific monitor commands.
     if (strcasecmp(ppArgs[1], "erase_flash_uicr") == 0)
     {
-        eraseFlashAndUICR(pSWD);
+        eraseFlashAndUICR(pCore);
         return true;
     }
 
     return false;
 }
 
-static bool eraseFlashAndUICR(SwdTarget* pSWD)
+static bool eraseFlashAndUICR(CpuCore* pCore)
 {
-    if (!eraseEnable(pSWD))
+    if (!eraseEnable(pCore))
     {
         return false;
     }
 
     const uint32_t NVMC_ERASEALL_Address = 0x4001E50C;
     const uint32_t eraseVal = 1;
-    if (!pSWD->writeMemory(NVMC_ERASEALL_Address, &eraseVal, sizeof(eraseVal), SWD::TRANSFER_32BIT))
+    if (!pCore->writeMemory(NVMC_ERASEALL_Address, &eraseVal, sizeof(eraseVal), SWD::TRANSFER_32BIT))
     {
         logError("Failed to write to NVMC.ERASEALL.");
         return false;
     }
 
-    if (!waitForEraseToComplete(pSWD))
+    if (!waitForEraseToComplete(pCore))
     {
         logError("Failed to erase all of FLASH and UICR.");
         return false;
     }
 
-    if (!eraseDisable(pSWD))
+    if (!eraseDisable(pCore))
     {
         return false;
     }

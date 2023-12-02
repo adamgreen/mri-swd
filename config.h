@@ -74,6 +74,9 @@
 #define LOGGING_DEVICE_ERROR_ENABLED 1
 #define LOGGING_DEVICE_DEBUG_ENABLED 1
 
+// cpu_core.cpp logging
+#define LOGGING_CPU_CORE_ERROR_ENABLED 1
+#define LOGGING_CPU_CORE_DEBUG_ENABLED 1
 
 // Size of the packet buffer to use for communicating with GDB.
 // Must be large enough to contain a 'G' packet sent from GDB to update all of the CPU registers in the context at once.

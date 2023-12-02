@@ -125,6 +125,23 @@
         #define logDebug(X)
         #define logDebugF(X, ...)
     #endif
+#elif defined (CPU_CORE_MODULE)
+    #define LOGGING_MODULE_FILENAME CPU_CORE_MODULE
+
+    #if LOGGING_CPU_CORE_ERROR_ENABLED
+        #define logError logError_
+        #define logErrorF logErrorF_
+    #else
+        #define logError(X)
+        #define logErrorF(X, ...)
+    #endif
+    #if LOGGING_CPU_CORE_DEBUG_ENABLED
+        #define logDebug logDebug_
+        #define logDebugF logDebugF_
+    #else
+        #define logDebug(X)
+        #define logDebugF(X, ...)
+    #endif
 #endif // SWD_MODULE
 
 
