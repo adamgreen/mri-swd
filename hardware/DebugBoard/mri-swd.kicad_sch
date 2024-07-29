@@ -6,7 +6,7 @@
 	(paper "A4")
 	(title_block
 		(title "MRI SWD Hardware Debugger Board")
-		(date "2024-07-13")
+		(date "2024-07-28")
 		(rev "1.1")
 	)
 	(lib_symbols
@@ -3155,10 +3155,6 @@
 		(at 147.32 90.17)
 		(uuid "e6814dff-0d4e-4502-acd9-552eb6894bef")
 	)
-	(no_connect
-		(at 69.85 100.33)
-		(uuid "f3181a9e-a61b-4f71-a023-d93a315a5465")
-	)
 	(wire
 		(pts
 			(xy 74.93 72.39) (xy 111.76 72.39)
@@ -3451,6 +3447,16 @@
 	)
 	(wire
 		(pts
+			(xy 69.85 100.33) (xy 69.85 97.79)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "6d710220-be05-4226-953e-869de7462ff9")
+	)
+	(wire
+		(pts
 			(xy 101.6 67.31) (xy 111.76 67.31)
 		)
 		(stroke
@@ -3728,6 +3734,26 @@
 			(type default)
 		)
 		(uuid "d8fbf1f3-f6db-405a-ba8c-63989533dec9")
+	)
+	(wire
+		(pts
+			(xy 88.9 97.79) (xy 88.9 100.33)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "d9422fae-54a2-4ef9-95c2-c7cd156aa6b4")
+	)
+	(wire
+		(pts
+			(xy 69.85 97.79) (xy 88.9 97.79)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "da35ecfc-5651-450b-a998-181fda045173")
 	)
 	(wire
 		(pts
@@ -5116,72 +5142,6 @@
 			(project "mri-swd"
 				(path "/80546db7-330b-449d-80f0-c8e0b594e123"
 					(reference "#PWR011")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "power:+3.3V")
-		(at 88.9 100.33 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "74da3686-f874-4eec-b5ad-b09172265636")
-		(property "Reference" "#PWR01"
-			(at 88.9 104.14 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Value" "+3.3V"
-			(at 88.9 95.25 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" ""
-			(at 88.9 100.33 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" ""
-			(at 88.9 100.33 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"+3.3V\""
-			(at 88.9 100.33 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "61ef2715-28db-4063-81b0-53970d9483b8")
-		)
-		(instances
-			(project "mri-swd"
-				(path "/80546db7-330b-449d-80f0-c8e0b594e123"
-					(reference "#PWR01")
 					(unit 1)
 				)
 			)
