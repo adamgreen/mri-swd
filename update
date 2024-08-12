@@ -1,0 +1,7 @@
+#! /usr/bin/env bash
+set -x
+
+cp mri/core/mri.h shared/
+cp mri/core/fileio.h shared/
+cp mri/semihost/newlib/newlib_stubs.h shared/
+cp mri/semihost/newlib/newlib_stubs.S shared/

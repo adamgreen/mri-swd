@@ -53,9 +53,9 @@ static bool       g_isNetworkConnected = false;
 static bool       g_haltOnAttach = false;
 static bool       g_wasStopFromGDB = false;
 static bool       g_isResetting = false;
+static bool       g_haltOnReset = false;
 static bool       g_isInDebugger = false;
 static bool       g_isDetaching = false;
-static bool       g_doesHaltDebuggingNeedToBeEnabled = false;
 
 static uint32_t   g_originalPC;
 static bool       g_wasMemoryExceptionEncountered = false;
@@ -251,15 +251,6 @@ static void innerDebuggerLoop()
             continue;
         }
 
-        // Handle setting up halting debug mode if needed.
-        if (g_doesHaltDebuggingNeedToBeEnabled)
-        {
-            if (g_cores.enableHaltDebugging(READ_DHCSR_TIMEOUT_MS))
-            {
-                g_doesHaltDebuggingNeedToBeEnabled = false;
-            }
-        }
-
         // See if the target should be halted because of attach or because GDB has sent a command via TCP/IP.
         if (g_haltOnAttach || (g_gdbSocket.isGdbConnected() && !g_gdbSocket.m_tcpToMriQueue.isEmpty()))
         {
@@ -277,30 +268,25 @@ static void innerDebuggerLoop()
             continue;
         }
         int resettingCore = g_cores.indexOfResettingCore();
-        int haltingCore = g_cores.indexOfHaltedCore();
+        int haltingCore = g_cores.indexOfHaltedCore(false);
         if (resettingCore != CpuCores::CORE_NONE)
         {
-            if (g_isResetting)
-            {
-                g_cores.resetCompleted();
-                g_isResetting = false;
-                logInfo("Device RESET request completed.");
-            }
-            else
-            {
-                logInfo("External device RESET detected.");
-            }
+            logInfo("External device RESET detected.");
             continue;
         }
         if (!hasCpuHalted && haltingCore != CpuCores::CORE_NONE)
         {
             logInfoF("Core%d has halted.", haltingCore);
             g_cores.requestCoresToHalt(haltingCore);
-            hasCpuHalted = true;
+            hasCpuHalted = g_cores.waitForCoresToHalt(READ_DHCSR_TIMEOUT_MS);
+            if (!hasCpuHalted)
+            {
+                logError("Timed out waiting for all cores to halt.");
+            }
         }
         // UNDONE: Should check the sleep, lockup, retire bits in the DHCSR as well.
 
-        if (!g_isResetting && g_gdbSocket.isGdbConnected() && hasCpuHalted)
+        if (g_gdbSocket.isGdbConnected() && hasCpuHalted)
         {
             hasCpuHalted = false;
 
@@ -312,6 +298,7 @@ static void innerDebuggerLoop()
             else if (g_isResetting)
             {
                 logInfo("GDB has requested device RESET.");
+                g_isResetting = false;
             }
             else
             {
@@ -323,7 +310,8 @@ static void innerDebuggerLoop()
                 }
                 else
                 {
-                    logInfoF("CPU execution has been resumed. %s", Platform_IsSingleStepping() ? "Single stepping enabled." : "");
+                    logInfoF("CPU execution has been resumed. %s",
+                        g_cores.isAnyCoreSingleStepping() ? "Single stepping enabled." : "");
                 }
             }
         }
@@ -451,8 +439,6 @@ void Platform_CommSendChar(int character)
 // *********************************************************************************************************************
 void Platform_Init(Token* pParameterTokens)
 {
-    g_cores.initForDebugging();
-    g_doesHaltDebuggingNeedToBeEnabled = true;
 }
 
 
@@ -1329,7 +1315,7 @@ const char* Platform_GetDeviceMemoryMapXml(void)
 // *********************************************************************************************************************
 void Platform_ResetDevice(void)
 {
-    g_cores.reset();
+    g_cores.reset(g_haltOnReset, READ_DHCSR_TIMEOUT_MS);
     g_isResetting = true;
 }
 
@@ -1508,6 +1494,8 @@ static uint32_t handleMonitorDetachCommand()
 
 static uint32_t handleMonitorResetCommand(Buffer* pBuffer)
 {
+    // Default to not halting on reset.
+    g_haltOnReset = false;
     // If no optional parameters are specified then let MRI core handle this request instead.
     if (Buffer_BytesLeft(pBuffer) == 0)
     {
@@ -1526,7 +1514,7 @@ static uint32_t handleMonitorResetCommand(Buffer* pBuffer)
     {
         // A request to reset and then halt in Reset Handler has been made.
         RequestResetOnNextContinue();
-        g_cores.enableResetVectorCatch();
+        g_haltOnReset = true;
         WriteStringToGdbConsole("Will reset and then halt on next continue.\r\n");
         PrepareStringResponse("OK");
         return HANDLER_RETURN_HANDLED;
@@ -1724,51 +1712,57 @@ bool runCodeOnDevice(CortexM_Registers* pRegistersInOut, uint32_t timeout_ms)
 
 
 
+// *********************************************************************************************************************
+// Routines called by the MRI core to interact with RTOS and/or hardware threads/cores.
+// *********************************************************************************************************************
 uintmri_t Platform_RtosGetHaltedThreadId(void)
 {
-    return 0;
+    return g_cores.getHaltedThreadId();
 }
 
 uintmri_t Platform_RtosGetFirstThreadId(void)
 {
-    return 0;
+    return g_cores.getFirstThreadId();
 }
 
 uintmri_t Platform_RtosGetNextThreadId(void)
 {
-    return 0;
+    return g_cores.getNextThreadId();
 }
 
 const char* Platform_RtosGetExtraThreadInfo(uintmri_t threadId)
 {
-    return NULL;
+    return g_cores.getExtraThreadInfo(threadId);
 }
 
 MriContext* Platform_RtosGetThreadContext(uintmri_t threadId)
 {
-    return NULL;
+    return g_cores.getThreadContext(threadId);
 }
 
 int Platform_RtosIsThreadActive(uintmri_t threadId)
 {
-    return 0;
+    return g_cores.isThreadActive(threadId);
 }
 
 int Platform_RtosIsSetThreadStateSupported(void)
 {
-    return 0;
+    return g_cores.isSetThreadStateSupported();
 }
 
 void Platform_RtosSetThreadState(uintmri_t threadId, PlatformThreadState state)
 {
+    g_cores.setThreadState(threadId, state);
 }
 
 void Platform_RtosRestorePrevThreadState(void)
 {
+    g_cores.restorePrevThreadState();
 }
 
 
 
+// This situation is of no concern for SWD hardware debugging.
 void Platform_HandleFaultFromHighPriorityCode(void)
 {
 }

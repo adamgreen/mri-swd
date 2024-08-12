@@ -26,7 +26,7 @@
 #define SWDIO_PIN 3
 
 // Should the debugger halt the CPU as soon as it attaches? This is useful to break out of an infinite reset loop.
-#define HALT_ON_ATTACH true
+#define HALT_ON_ATTACH false
 
 // Timeout in milliseconds to use when attempting to connect to the WiFi router.
 #define WIFI_ROUTER_TIMEOUT_MS 30000

@@ -1,4 +1,4 @@
-/* Copyright 2023 Adam Green (https://github.com/adamgreen/)
+/* Copyright 2024 Adam Green (https://github.com/adamgreen/)
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -25,6 +25,9 @@ CpuCore::CpuCore()
 bool CpuCore::init(SWD* pSwdBus, void (*pHandler)(void), uint32_t coreId)
 {
     m_coreId = coreId;
+    m_ignoreReadErrors = false;
+    m_prevState = MRI_PLATFORM_THREAD_THAWED;
+    m_currState = MRI_PLATFORM_THREAD_THAWED;
 
     assert ( m_pSwdBus == NULL && m_contextEntries.count == 0 && m_currentDHCSR == 0 );
     if (!initSWD(pSwdBus))
@@ -33,6 +36,9 @@ bool CpuCore::init(SWD* pSwdBus, void (*pHandler)(void), uint32_t coreId)
     }
     m_connectionFailureHandler = pHandler;
     m_hasDetectedSwdDisconnect = false;
+
+    initForDebugging();
+    enableHaltDebugging(READ_DHCSR_TIMEOUT_MS);
 
     return true;
 }
@@ -48,23 +54,6 @@ bool CpuCore::initSWD(SWD* pSwdBus)
     }
     m_pSwdBus = pSwdBus;
     return true;
-}
-
-void CpuCore::uninit()
-{
-    m_swd.uninit();
-    m_pSwdBus = NULL;
-    m_contextEntries.count = 0;
-    m_currentDHCSR = 0;
-}
-
-void CpuCore::disconnect()
-{
-    m_swd.disconnect();
-    m_swd.uninit();
-    m_pSwdBus = NULL;
-    m_contextEntries.count = 0;
-    m_currentDHCSR = 0;
 }
 
 void CpuCore::initForDebugging()
@@ -144,7 +133,7 @@ uint32_t CpuCore::readMemory(uint32_t address, void* pvBuffer, uint32_t bufferSi
     }
 
     uint32_t bytesRead = m_swd.readMemory(address, pvBuffer, bufferSize, readSize);
-    if (bytesRead == 0 && m_swd.getLastReadWriteError() == SWD::SWD_PROTOCOL)
+    if (bytesRead == 0 && m_swd.getLastReadWriteError() == SWD::SWD_PROTOCOL && !m_ignoreReadErrors)
     {
         handleUnrecoverableSwdError();
     }
@@ -325,6 +314,7 @@ bool CpuCore::enableHaltDebugging(uint32_t timeout_ms)
     uint32_t DHCSR_Val = 0;
     if (!readDHCSRWithRetry(&DHCSR_Val, timeout_ms))
     {
+        logErrorF("Core%lu: Failed to read DHCSR to enable debugging.", m_coreId);
         return false;
     }
 
@@ -363,6 +353,8 @@ bool CpuCore::readDHCSRWithRetry(uint32_t* pValue, uint32_t timeout_ms)
     {
         logErrorDisable();
     }
+
+    m_ignoreReadErrors = true;
     do
     {
         if (readDHCSR(pValue))
@@ -371,11 +363,20 @@ bool CpuCore::readDHCSRWithRetry(uint32_t* pValue, uint32_t timeout_ms)
             break;
         }
     } while (absolute_time_diff_us(get_absolute_time(), endTime) > 0);
+    m_ignoreReadErrors = false;
+
     if (timeout_ms > 0)
     {
         logErrorEnable();
     }
     m_pSwdBus->enableErrorLogging();
+
+    if (!returnVal)
+    {
+        // The read errors were ignored in readMemory() so handle the SWD error here if we time out on attempting to
+        // read the DHCSR.
+        handleUnrecoverableSwdError();
+    }
 
     return returnVal;
 }
@@ -400,6 +401,23 @@ bool CpuCore::writeDHCSR(uint32_t DHCSR_Value)
     DHCSR_Value = (DHCSR_Value & ~DHCSR_DBGKEY_Mask) | DHCSR_DBGKEY;
 
     return writeMemory(DHCSR_Address, &DHCSR_Value, sizeof(DHCSR_Value), SWD::TRANSFER_32BIT) == sizeof(DHCSR_Value);
+}
+
+void CpuCore::uninit()
+{
+    m_swd.uninit();
+    m_pSwdBus = NULL;
+    m_contextEntries.count = 0;
+    m_currentDHCSR = 0;
+}
+
+void CpuCore::disconnect()
+{
+    m_swd.disconnect();
+    m_swd.uninit();
+    m_pSwdBus = NULL;
+    m_contextEntries.count = 0;
+    m_currentDHCSR = 0;
 }
 
 bool CpuCore::requestHalt()
@@ -778,7 +796,23 @@ void CpuCore::disableResetVectorCatch()
     }
 }
 
-void CpuCore::clearDFSR()
+bool CpuCore::hasDebugEvent(bool ignoreHaltedEvent)
+{
+    uint32_t dfsr = 0;
+    if (!readDFSR(&dfsr))
+    {
+        logErrorF("Core%lu: Failed to read DFSR for zero check.", m_coreId);
+        return false;
+    }
+    if (ignoreHaltedEvent)
+    {
+        dfsr &= ~DFSR_HALTED_Bit;
+    }
+
+    return dfsr != 0;
+}
+
+void CpuCore::clearDebugEvent()
 {
     uint32_t dfsr = 0;
     if (!readDFSR(&dfsr))
@@ -804,6 +838,26 @@ bool CpuCore::writeDFSR(uint32_t dfsr)
 }
 
 bool CpuCore::resume()
+{
+    m_prevState = m_currState;
+    if (m_currState == MRI_PLATFORM_THREAD_FROZEN)
+    {
+        // This core/thread has been requested to be frozen by GDB so just return without resuming it.
+        return true;
+    }
+    if (m_currState == MRI_PLATFORM_THREAD_SINGLE_STEPPING)
+    {
+        enableSingleStep();
+    }
+    else
+    {
+        disableSingleStep();
+    }
+
+    return clearHaltBit();
+}
+
+bool CpuCore::clearHaltBit()
 {
     uint32_t DHCSR_Val = 0;
     readDHCSR(&DHCSR_Val);
@@ -840,6 +894,36 @@ void CpuCore::reset()
     {
         logErrorF("Core%lu: Failed to write AIRCR register for device reset.", m_coreId);
     }
+}
+
+bool CpuCore::waitForCoreToReset(uint32_t timeout_ms)
+{
+    absolute_time_t endTime = make_timeout_time_ms(timeout_ms);
+    do
+    {
+        refreshCoreState(0);
+        if (isResetting())
+        {
+            return true;
+        }
+    } while (absolute_time_diff_us(get_absolute_time(), endTime) > 0);
+
+    return false;
+}
+
+bool CpuCore::waitForCoreToHalt(uint32_t timeout_ms)
+{
+    absolute_time_t endTime = make_timeout_time_ms(timeout_ms);
+    do
+    {
+        refreshCoreState(0);
+        if (isHalted())
+        {
+            return true;
+        }
+    } while (absolute_time_diff_us(get_absolute_time(), endTime) > 0);
+
+    return false;
 }
 
 void CpuCore::configureSingleSteppingBitsInDHCSR(bool enableSingleStepping)
@@ -1767,7 +1851,7 @@ bool CpuCore::startCodeOnDevice(const CortexM_Registers* pRegistersIn)
     }
 
     // Start the target CPU executing.
-    if (!resume())
+    if (!clearHaltBit())
     {
         logError("Failed to start executing debugger code on target device.");
         reenableInterrupts();
@@ -1858,6 +1942,9 @@ bool CpuCore::runCodeOnDevice(CortexM_Registers* pRegistersInOut, uint32_t timeo
 
 
 
+
+// Buffer to be used for storing extra thread info.
+char CpuCores::m_threadExtraInfo[16];
 
 CpuCores::CpuCores()
 {
@@ -2111,26 +2198,6 @@ void CpuCores::disconnect()
     m_pHaltedCore = NULL;
 }
 
-void CpuCores::initForDebugging()
-{
-    assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
-    for (size_t i = 0 ; i < m_coreCount ; i++)
-    {
-        m_cores[i].initForDebugging();
-    }
-}
-
-bool CpuCores::enableHaltDebugging(uint32_t timeout_ms)
-{
-    assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
-    bool result = true;
-    for (size_t i = 0 ; i < m_coreCount ; i++)
-    {
-        result &= m_cores[i].enableHaltDebugging(timeout_ms);
-    }
-    return result;
-}
-
 bool CpuCores::refreshCoreStates(uint32_t timeout_ms)
 {
     assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
@@ -2152,29 +2219,46 @@ int CpuCores::indexOfResettingCore()
             return i;
         }
     }
-    return -1;
+    return CORE_NONE;
 }
 
-int CpuCores::indexOfHaltedCore()
+int CpuCores::indexOfHaltedCore(bool requireDebugEvent)
 {
+    int haltedCore = CORE_NONE;
     assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
     for (size_t i = 0 ; i < m_coreCount ; i++)
     {
-        if (m_cores[i].isHalted())
+        if (m_cores[i].isHalted() && m_cores[i].getState() != MRI_PLATFORM_THREAD_FROZEN)
         {
-            return i;
+            // When requiring debug event, we want to ignore the HALT debug event which would have been generated when
+            // some cores were forced to halt.
+            if (m_cores[i].hasDebugEvent(requireDebugEvent))
+            {
+                // Always have a preference for halted cores which have events to be debugged.
+                return i;
+            }
+            else if (!requireDebugEvent && haltedCore == CORE_NONE)
+            {
+                // If requireDebugEvent is false then just return first halted core detected.
+                haltedCore = i;
+            }
         }
     }
-    return -1;
+    if (!requireDebugEvent && haltedCore != CORE_NONE)
+    {
+        logInfoF("Treating Core%d as halted even though it doesn't have a debug event.", haltedCore);
+    }
+    return haltedCore;
 }
 
 bool CpuCores::requestCoresToHalt(int alreadyHaltedCore)
 {
+    // UNDONE: Might not need alreadyHaltedCore parameter now.
     assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
     bool result = true;
     for (int i = 0 ; i < (int)m_coreCount ; i++)
     {
-        if (i != alreadyHaltedCore)
+        if (!m_cores[i].isHalted())
         {
             result &= m_cores[i].requestHalt();
         }
@@ -2182,13 +2266,46 @@ bool CpuCores::requestCoresToHalt(int alreadyHaltedCore)
     return result;
 }
 
+bool CpuCores::waitForCoresToHalt(uint32_t timeout_ms)
+{
+    size_t coresToHalt = m_coreCount;
+    uint32_t coresHalted = 0;
+    absolute_time_t endTime = make_timeout_time_ms(timeout_ms);
+    do
+    {
+        for (size_t i = 0 ; i < m_coreCount ; i++)
+        {
+            uint32_t coreMask = 1 << i;
+            if ((coresHalted & coreMask) == 0)
+            {
+                m_cores[i].refreshCoreState(0);
+                if (m_cores[i].isHalted())
+                {
+                    coresHalted |= coreMask;
+                    coresToHalt--;
+                }
+            }
+        }
+    } while (coresToHalt > 0 && absolute_time_diff_us(get_absolute_time(), endTime) > 0);
+    return coresToHalt == 0;
+}
+
 void CpuCores::enterMriCore(int haltedCore)
 {
     assert ( haltedCore >= 0 && haltedCore < (int)count_of(m_cores) );
     m_pHaltedCore = &m_cores[haltedCore];
 
+    markAllCoresFrozen();
     m_pDefaultCore->checkForFpu(&m_fpu);
     mriDebugException(m_pHaltedCore->getContext(m_fpu));
+}
+
+void CpuCores::markAllCoresFrozen()
+{
+    for (size_t i = 0 ; i < m_coreCount ; i++)
+    {
+        m_cores[i].setState(MRI_PLATFORM_THREAD_FROZEN);
+    }
 }
 
 void CpuCores::enteringDebugger()
@@ -2196,54 +2313,96 @@ void CpuCores::enteringDebugger()
     assert ( m_pHaltedCore != NULL );
 
     m_trapReason = m_pHaltedCore->determineTrapReason();
-    disableResetVectorCatch();
+    disableResetVectorCatchAndSingleStepping();
 }
 
-void CpuCores::disableResetVectorCatch()
+void CpuCores::disableResetVectorCatchAndSingleStepping()
 {
     assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
     for (size_t i = 0 ; i < m_coreCount ; i++)
     {
         m_cores[i].disableResetVectorCatch();
+        m_cores[i].disableSingleStep();
     }
 }
 
 void CpuCores::leavingDebugger()
 {
-    // UNDONE: Do I need to clear the DFSR on all cores incase more than 1 actually halted?
     assert ( m_pHaltedCore != NULL );
-    m_pHaltedCore->clearDFSR();
+    m_pHaltedCore->clearDebugEvent();
 }
 
 void CpuCores::resume()
 {
     assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
+
+    // We are done debugging the current core so forget about it in m_pHaltedCore.
+    assert ( m_pHaltedCore != NULL && !m_pHaltedCore->hasDebugEvent(true) );
+    m_pHaltedCore = NULL;
+
+    // Write out the context for all cores which might have been modified.
     for (size_t i = 0 ; i < m_coreCount ; i++)
     {
         m_cores[i].writeContext(m_fpu);
+    }
+
+    // Don't actually resume execution if there are still any cores with debug events to be debugged. The main loop
+    // will detect the still halted core and jump back into debug mode for GDB to debug this core.
+    if (indexOfHaltedCore(true) != CORE_NONE)
+    {
+        return;
+    }
+
+    // Debug events on all cores have been seen by GDB so it is safe to resume execution of all cores again.
+    for (size_t i = 0 ; i < m_coreCount ; i++)
+    {
         m_cores[i].resume();
     }
-    m_pHaltedCore = NULL;
 }
 
-void CpuCores::reset()
+void CpuCores::reset(bool haltOnReset, uint32_t timeout_ms)
 {
-    // Power down the DAP on any other target cores during reset.
-    // The RP2040 had troubles resetting without this change.
+    // Walk the core list backwards so that core 0 is reset last.
+    // Reset each core and wait for it to halt at the reset vector.
     assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
-    for (size_t i = 1 ; i < m_coreCount ; i++)
+    for (int i = m_coreCount - 1 ; i >= 0 ; i--)
     {
-        m_cores[i].disconnect();
+        logInfoF("Resetting%s Core%d.", haltOnReset ? " and halting" : "", i);
+        m_cores[i].enableResetVectorCatch();
+        m_cores[i].reset();
+        if (!m_cores[i].waitForCoreToReset(timeout_ms))
+        {
+            logErrorF("Core%d: Timed out waiting for reset.", i);
+        }
+        if (!m_cores[i].waitForCoreToHalt(timeout_ms))
+        {
+            logErrorF("Core%d: Timed out waiting for halt after reset.", i);
+        }
+        m_cores[i].disableResetVectorCatch();
+        m_cores[i].clearDebugEvent();
     }
-    m_coreCount = 1;
 
-    m_pDefaultCore->reset();
+    // We are currently halted at the reset vector at this point.
+    if (haltOnReset)
+    {
+        return;
+    }
+
+    // Walk the core list backwards so that core 0 is started last.
+    for (int i = m_coreCount - 1 ; i >= 0 ; i--)
+    {
+        m_cores[i].setState(MRI_PLATFORM_THREAD_THAWED);
+        if (!m_cores[i].resume())
+        {
+            logErrorF("Core%lu: Failed to resume.", i);
+        }
+    }
 }
 
 void CpuCores::enableResetVectorCatch()
 {
     assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
-    for (size_t i = 1 ; i < m_coreCount ; i++)
+    for (size_t i = 0 ; i < m_coreCount ; i++)
     {
         m_cores[i].enableResetVectorCatch();
     }
@@ -2253,7 +2412,7 @@ uint32_t CpuCores::setBreakpoint(uint32_t breakpointAddress, bool is32BitInstruc
 {
     uint32_t retValue = 0xFFFFFFFF;
     assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
-    for (size_t i = 1 ; i < m_coreCount ; i++)
+    for (size_t i = 0 ; i < m_coreCount ; i++)
     {
         uint32_t result = m_cores[i].setBreakpoint(breakpointAddress, is32BitInstruction);
         // Expect all cores to be configured the same.
@@ -2267,7 +2426,7 @@ uint32_t CpuCores::clearBreakpoint(uint32_t breakpointAddress, bool is32BitInstr
 {
     uint32_t retValue = 0xFFFFFFFF;
     assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
-    for (size_t i = 1 ; i < m_coreCount ; i++)
+    for (size_t i = 0 ; i < m_coreCount ; i++)
     {
         uint32_t result = m_cores[i].clearBreakpoint(breakpointAddress, is32BitInstruction);
         // Expect all cores to be configured the same.
@@ -2281,7 +2440,7 @@ void CpuCores::setWatchpoint(uintmri_t address, uintmri_t size,  PlatformWatchpo
 {
     int test = -1;
     assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
-    for (size_t i = 1 ; i < m_coreCount ; i++)
+    for (size_t i = 0 ; i < m_coreCount ; i++)
     {
         int exceptionCode = noException;
         __try
@@ -2302,7 +2461,7 @@ void CpuCores::clearWatchpoint(uintmri_t address, uintmri_t size,  PlatformWatch
 {
     int test = -1;
     assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
-    for (size_t i = 1 ; i < m_coreCount ; i++)
+    for (size_t i = 0 ; i < m_coreCount ; i++)
     {
         int exceptionCode = noException;
         __try
@@ -2353,4 +2512,44 @@ bool CpuCores::flashEnd()
 {
     assert ( m_pDefaultCore != NULL );
     return m_pDevice->flashEnd(m_pDeviceObject, m_pDefaultCore);
+}
+
+const char* CpuCores::getExtraThreadInfo(uintmri_t threadId)
+{
+    if (!isThreadActive(threadId))
+    {
+        return NULL;
+    }
+
+    snprintf(m_threadExtraInfo, sizeof(m_threadExtraInfo), "Core%u", threadId-1);
+    return m_threadExtraInfo;
+}
+
+void CpuCores::restorePrevThreadState()
+{
+    for (size_t i = 0 ; i < m_coreCount ; i++)
+    {
+        m_cores[i].restoreThreadState();
+    }
+}
+
+void CpuCores::setThreadState(uintmri_t threadId, PlatformThreadState state)
+{
+    if (threadId == MRI_PLATFORM_ALL_THREADS || threadId == MRI_PLATFORM_ALL_FROZEN_THREADS)
+    {
+        for (size_t i = 0 ; i < m_coreCount ; i++)
+        {
+            if (threadId == MRI_PLATFORM_ALL_THREADS ||
+                (threadId == MRI_PLATFORM_ALL_FROZEN_THREADS && m_cores[i].getState() == MRI_PLATFORM_THREAD_FROZEN))
+            {
+                m_cores[i].setState(state);
+            }
+        }
+
+        return;
+    }
+    else if (isThreadActive(threadId))
+    {
+        m_cores[threadId-1].setState(state);
+    }
 }

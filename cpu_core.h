@@ -1,4 +1,4 @@
-/* Copyright 2023 Adam Green (https://github.com/adamgreen/)
+/* Copyright 2024 Adam Green (https://github.com/adamgreen/)
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -78,13 +78,6 @@ public:
     // that would mean the DAP would be powered up again.
     void disconnect();
 
-    // Enables this core for debugging. This enables vector catch along with the Data Watchpoint and Flash Breakpoint
-    // functionality.
-    void initForDebugging();
-
-    // Attempt to enable halting debug mode on this core.
-    bool enableHaltDebugging(uint32_t timeout_ms);
-
     // Read and cache the most recent state of the CPU core.
     // Call isResetting() or isHalted() after to determine which of these state, if any, are
     // currently being experienced by the core.
@@ -94,7 +87,7 @@ public:
         bool result = readDHCSRWithRetry(&dhcsr, timeout_ms);
 
         // The m_currentDHCSR field should be set inside the above call to readDHCSRWithRetry().
-        assert ( dhcsr == m_currentDHCSR );
+        assert ( !result || dhcsr == m_currentDHCSR );
         return result;
     }
     bool isResetting()
@@ -149,14 +142,28 @@ public:
     // Disable halting on device reset for this core.
     void disableResetVectorCatch();
 
+    // Reads the Debug Fault Status Register and returns true if it is non-zero, meaning that it has hit a debug
+    // event which hasn't been handled and cleared yet.
+    // Can set ignoreHaltedEvent to ignore HALTED bit in DFSR as cores are forced into halt state if they weren't
+    // the core which hit the original debug event.
+    bool hasDebugEvent(bool ignoreHaltedEvent);
+
     // Clears the Debug Fault Status Register on this core. Typically done after debugging a halted core.
-    void clearDFSR();
+    void clearDebugEvent();
 
     // Resumes execution of this core.
     bool resume();
 
     // Ask the core to reset.
     void reset();
+
+    // Waits for this core to indicate that it has been reset.
+    // Returns false if this wait times out and true otherwise.
+    bool waitForCoreToReset(uint32_t timeout_ms);
+
+    // Wait for this core to indicate that it has been halted.
+    // Returns false if this wait times out and true otherwise.
+    bool waitForCoreToHalt(uint32_t timeout_ms);
 
 
     // Read from the requested memory range on this core. Can be used for reading memory mapped registers as those
@@ -168,7 +175,6 @@ public:
     uint32_t writeMemory(uint32_t address, const void* pvBuffer, uint32_t bufferSize, SWD::TransferSize writeSize);
 
 
-    // UNDONE: Might just ignore this for multithread and use thread state instead.
     // Enable single stepping.
     void enableSingleStep()
     {
@@ -243,12 +249,26 @@ public:
         return &m_swd;
     }
 
+    // Accessors for PlatformThreadState for this core/thread.
+    PlatformThreadState getState()
+    {
+        return m_currState;
+    }
+    void setState(PlatformThreadState state)
+    {
+        m_currState = state;
+    }
+    void restoreThreadState()
+    {
+        m_currState = m_prevState;
+    }
+
 
 
 
 protected:
     bool initSWD(SWD* pSwdBus);
-
+    void initForDebugging();
     void enableDWTandVectorCatches();
     bool setOrClearBitsInDEMCR(uint32_t bitMask, bool set);
     void handleUnrecoverableSwdError();
@@ -265,6 +285,7 @@ protected:
     void enableFPB();
     void writeFPControlRegister(uint32_t FP_CTRL_Value);
 
+    bool enableHaltDebugging(uint32_t timeout_ms);
     bool readDHCSRWithRetry(uint32_t* pValue, uint32_t timeout_ms);
     bool readDHCSR(uint32_t* pValue);
     bool writeDHCSR(uint32_t DHCSR_Value);
@@ -282,6 +303,7 @@ protected:
 
     bool writeDFSR(uint32_t dfsr);
 
+    bool clearHaltBit();
     void configureSingleSteppingBitsInDHCSR(bool enableSingleStepping);
 
     uint32_t findFPBBreakpointComparator(uint32_t breakpointAddress, bool is32BitInstruction);
@@ -455,29 +477,36 @@ protected:
 
 
     // Pointer to lower level SWD bus object used to communicate with all target/cores on the device.
-    SWD*           m_pSwdBus = NULL;
+    SWD*            m_pSwdBus = NULL;
 
     // Callback to call when SWD connection errors are detected.
     void (*m_connectionFailureHandler)(void) = NULL;
 
     // CPU register context information is stored here.
-    uintmri_t      m_contextRegisters[registerCountFPU];
-    ContextSection m_contextEntries = { .pValues = &m_contextRegisters[0], .count = 0 };
-    MriContext     m_context;
+    uintmri_t       m_contextRegisters[registerCountFPU];
+    ContextSection  m_contextEntries = { .pValues = &m_contextRegisters[0], .count = 0 };
+    MriContext      m_context;
 
     // Higher level SWD target object which is configured to communicate with this core.
-    SwdTarget      m_swd;
+    SwdTarget       m_swd;
 
     // Most recent value of the Debug Halting Control & Status Register value read out by a call to the
     // readDHCSR() method.
-    uint32_t       m_currentDHCSR = 0;
+    uint32_t        m_currentDHCSR = 0;
 
     // The index of CPU core to display when logging messages from this core.
     uint32_t        m_coreId = -1;
 
+    // Previous and current core/thread state.
+    PlatformThreadState m_prevState = MRI_PLATFORM_THREAD_THAWED;
+    PlatformThreadState m_currState = MRI_PLATFORM_THREAD_THAWED;
+
     // Set to true if any read/writeMemory() call fails because of a SWD protocol error which means that the
     // target has stopped responding.
-    bool           m_hasDetectedSwdDisconnect = false;
+    bool            m_hasDetectedSwdDisconnect = false;
+
+    // Should we ignore SWD read errors when inside readDHCSRWithRetry().
+    bool            m_ignoreReadErrors = false;
 };
 
 
@@ -503,13 +532,6 @@ public:
     // that would mean the DAP would be powered up again.
     void disconnect();
 
-    // Enables the CPU cores for debugging. This enables vector catch along with the Data Watchpoint
-    // and Flash Breakpoint functionality.
-    void initForDebugging();
-
-    // Attempt to enable halting debug mode on the CPU cores.
-    bool enableHaltDebugging(uint32_t timeout_ms);
-
     // Read the current state of each core on the device and store it away for subsequent indexOf*Core() calls.
     bool refreshCoreStates(uint32_t timeout_ms);
 
@@ -519,8 +541,10 @@ public:
     // Returns the lowest index of a resetting core, CORE_NONE if none are resetting.
     int indexOfResettingCore();
 
-    // Returns the loweset index of a halted core, CORE_NONE if none are halting.
-    int indexOfHaltedCore();
+    // Returns the lowest index of a halted core, CORE_NONE if none are halting.
+    // Set requireDebugEvent to true if you only want the index of a halted core with the DFSR set to a non-zero value
+    // indicating that the core has a debug event which hasn't been handled yet.
+    int indexOfHaltedCore(bool requireDebugEvent);
 
     // Has the halted core been externally reset while halted in debugger?
     bool isHaltedCoreResetting()
@@ -537,6 +561,10 @@ public:
     // Set alreadyHaltedCore to CORE_NONE to halt ALL cores.
     bool requestCoresToHalt(int alreadyHaltedCore);
 
+    // Wait for all of the cores to enter halted state within the specified timeout amount.
+    // Returns false if the wait times out and true otherwise.
+    bool waitForCoresToHalt(uint32_t timeout_ms);
+
 
     // Enter MRI by calling mriDebugException() after grabbing the required register context of the specified halted
     // core.
@@ -549,7 +577,7 @@ public:
 
     // Typically called from Platform_LeavingDebugger() to let this object know that the MRI core is about to exit and
     // allow execution to be resumed. It makes sure that the Debug Fault Status Register (DFSR) is cleared since we no
-    // longer need to know about the cause of the last halt.
+    // longer need to know about the cause of the last halt on the currently halted core.
     void leavingDebugger();
 
     // Ask execution to resume on all of the cores. It also takes care of restoring any modified register context before
@@ -561,16 +589,9 @@ public:
     void enableResetVectorCatch();
 
     // Ask the cores to reset.
-    void reset();
-
-    // Should be called as soon as the main loop determines that a reset has occurred so that the object can
-    // re-initialize the information it has about all of the cores after their reset.
-    void resetCompleted()
-    {
-        assert ( m_connectionFailureHandler != NULL );
-        checkForMultipleCores(m_connectionFailureHandler);
-    }
-
+    //  haltOnReset will cause the cores to halt at reset vector if set to true.
+    //  timeout_ms is the maximum amount of time to wait for each core to reset and halt.
+    void reset(bool haltOnReset, uint32_t timeout_ms);
 
     // Read the requested register on the halted core.
     uintmri_t readRegisterOnHaltedCore(size_t index)
@@ -586,47 +607,53 @@ public:
         Context_Set(m_pHaltedCore->getContext(m_fpu), index, newValue);
     }
 
-    // Read from the requested memory range in FLASH, ROM, or RAM. Not to be used for reading memory mapped registers as
-    // those reads need to be directed at a specific core.
+    // Read from the requested memory range in FLASH, ROM, or RAM. Not to be used internally for reading memory mapped
+    // registers as those reads need to be directed at a specific core.
     uint32_t readMemory(uint32_t address, void* pvBuffer, uint32_t bufferSize, SWD::TransferSize readSize)
     {
-        // Make sure that we don't try to read registers with this method.
-        assert ( address < 0xA0000000 );
         assert ( m_pDefaultCore != NULL );
         return m_pDefaultCore->readMemory(address, pvBuffer, bufferSize, readSize);
     }
 
-    // Write to the requested memory range in FLASH, ROM, or RAM. Not to be used for writing memory mapped registers as
-    // those writes need to be directed at a specific core.
+    // Write to the requested memory range in FLASH, ROM, or RAM. Not to be used internally for writing memory mapped
+    // registers as those writes need to be directed at a specific core.
     uint32_t writeMemory(uint32_t address, const void* pvBuffer, uint32_t bufferSize, SWD::TransferSize writeSize)
     {
-        // Make sure that we don't try to write registers with this method.
-        assert ( address < 0xA0000000 );
         assert ( m_pDefaultCore != NULL );
         return m_pDefaultCore->writeMemory(address, pvBuffer, bufferSize, writeSize);
     }
 
 
-    // UNDONE: Might just ignore this for multithread and use thread state instead.
     // Enable single stepping.
     void enableSingleStep()
     {
-        assert ( m_pDefaultCore != NULL );
-        m_pDefaultCore->enableSingleStep();
+        // Single step is enabled through setThreadState() instead.
     }
 
     // Disable single stepping.
     void disableSingleStep()
     {
-        assert ( m_pDefaultCore != NULL );
-        m_pDefaultCore->disableSingleStep();
+        // Single step is disabled through setThreadState() instead.
     }
 
-    // Is single stepping enabled?
+    // Is single stepping enabled on the core which caused the latest debug halt?
     bool isSingleStepping()
     {
-        assert ( m_pDefaultCore != NULL );
-        return m_pDefaultCore->isSingleStepping();
+        assert ( m_pHaltedCore != NULL );
+        return m_pHaltedCore->isSingleStepping() || m_pHaltedCore->getState() == MRI_PLATFORM_THREAD_SINGLE_STEPPING;
+    }
+
+    // Is single stepping enabled on any of the cores?
+    bool isAnyCoreSingleStepping()
+    {
+        for (size_t i = 0 ; i < m_coreCount ; i++)
+        {
+            if (m_cores[i].isSingleStepping() || m_cores[i].getState() == MRI_PLATFORM_THREAD_SINGLE_STEPPING)
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
 
@@ -730,6 +757,64 @@ public:
     }
 
 
+    // Get 1 based threadId index for halted thread/core.
+    uintmri_t getHaltedThreadId()
+    {
+        assert ( m_pHaltedCore != NULL );
+        return m_pHaltedCore - &m_cores[0] + 1;
+    }
+
+    // Get 1 based threadId index for the first thread/core.
+    uintmri_t getFirstThreadId()
+    {
+        m_nextThreadId = 1;
+        return getNextThreadId();
+    }
+
+    // Get 1 based threadId index for the next thread/core. Returns 0 once the list has been completely iterated over.
+    uintmri_t getNextThreadId()
+    {
+        if (m_nextThreadId > m_coreCount)
+        {
+            return 0;
+        }
+        return m_nextThreadId++;
+    }
+
+    // Returns a string description for the 1-based threadId.
+    const char* getExtraThreadInfo(uintmri_t threadId);
+
+    // Get pointer to register context for the specified 1 based register index.
+    MriContext* getThreadContext(uintmri_t threadId)
+    {
+        if (!isThreadActive(threadId))
+        {
+            return NULL;
+        }
+        return m_cores[threadId-1].getContext(m_fpu);
+    }
+
+    // Returns 1/true if the requested 1-based threadId is a valid core index and 0/false otherwise.
+    int isThreadActive(uintmri_t threadId)
+    {
+        if (threadId >= 1 && threadId <= m_coreCount)
+        {
+            return 1;
+        }
+        return 0;
+    }
+
+    // Return 1/true to let MRI core know that we support multiple threads.
+    int isSetThreadStateSupported()
+    {
+        return 1;
+    }
+
+    void setThreadState(uintmri_t threadId, PlatformThreadState state);
+
+    void restorePrevThreadState();
+
+
     // Does the device have a FPU?
     CpuCore::FpuDiscoveryStates hasFPU()
     {
@@ -753,7 +838,8 @@ protected:
     void constructMemoryLayoutXML();
     void checkForMultipleCores(void (*pHandler)(void));
     void cleanupDeviceObject();
-    void disableResetVectorCatch();
+    void markAllCoresFrozen();
+    void disableResetVectorCatchAndSingleStepping();
 
 
 
@@ -777,6 +863,9 @@ protected:
     int32_t m_memoryLayoutAllocSize = 0;
     int32_t m_memoryLayoutSize = 0;
 
+    // Used to track current thread id used by getFirst/NextThreadId() methods.
+    uintmri_t m_nextThreadId = 0;
+
     // Cache the reason if breakpoint or watchpoint caused core to halt from the enteringDebugger() method. It is cached
     // because the bit read to determine which watchpoint was hit, if any, is cleared on read.
     PlatformTrapReason m_trapReason;
@@ -785,12 +874,15 @@ protected:
     CpuCore::FpuDiscoveryStates m_fpu = CpuCore::FPU_NONE;
 
     // The actual list of CpuCore objects and their related SWD targets.
-    CpuCore    m_cores[MAX_DPV2_TARGETS];
+    CpuCore     m_cores[MAX_DPV2_TARGETS];
     // The number of elements used in the above arrays for the currently attached CPU.
-    size_t     m_coreCount = 0;
+    size_t      m_coreCount = 0;
 
     // Has a SWD protocol error been detected that should cause a disconnect to be triggered.
-    bool       m_hasDetectedSwdDisconnect = false;
+    bool        m_hasDetectedSwdDisconnect = false;
+
+    // Buffer to be used for storing extra thread info.
+    static char m_threadExtraInfo[16];
 };
 
 #endif // CPU_CORE_H_

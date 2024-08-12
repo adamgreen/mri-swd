@@ -1312,7 +1312,16 @@ void SWD::handleStickyErrors(uint32_t ack, bool* pRetry)
     // Flag that we are handling FAIL/WAIT so that we don't infinite loop trying to clear error bits.
     m_clearingErrors++;
         uint32_t stat = 0;
-        readDP(DP_CTRL_STAT, &stat);
+        if (!readDP(DP_CTRL_STAT, &stat))
+        {
+            // Try a line reset if the first step to clear the sticky error fails and request a retry.
+            logError("Failed to readDP(DP_CTRL_STAT, &stat). Attempting to clear error with line reset.");
+            handleProtocolAndParityErrors();
+            m_lastReadWriteError = SWD_FAULT_WDATAERR;
+            *pRetry = true;
+            m_clearingErrors--;
+            return;
+        }
 
         // Clear the sticky errors via the ABORT register.
         uint32_t abortBitsToClear = 0;
