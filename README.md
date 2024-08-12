@@ -19,10 +19,10 @@
 ## Important Notes
 ![Dogfood Setup](images/dogfood.jpg)
 
-* __[8/16/2023]:__ The code found within this repository is now at the point where I can start using it to flash and debug the `mri-swd` firmware itself instead of the Segger J-Link that I had been using previously. I am now using it daily to debug a nRF52840 based project. This has helped to surface more issues that have now been corrected.
+* __[12/9/2023]:__ The code found within this repository is now at the point where I can start using it to flash and debug the `mri-swd` firmware itself instead of the Segger J-Link that I had been using previously. I am now using it daily to debug nRF52840 and RP2040 based projects. This has helped to surface more issues that have now been corrected. One of the issues fixed was the poor FLASH programming performance of RP2040 parts which has now been increased to ~150kB/s. nRF52xxx FLASH programming performance still needs to be similarly addressed.
 * The initial goal is to just be able to debug and program the dual core [RP2040 microcontroller](https://www.raspberrypi.com/products/rp2040/). Support has also been added for the [nRF52xxx family of microcontrollers](https://infocenter.nordicsemi.com/index.jsp?topic=%2Fstruct_nrf52%2Fstruct%2Fnrf52.html). Support for other microcontrollers will be added in the future.
 * The `mri-swd` firmware is initially being developed to run on the low cost [Pico W](https://www.adafruit.com/product/5526). It will use the Pico W's WiFi capabilities to wirelessly communicate with GDB. No intermediate program like OpenOCD will be required since the [mri remote debug stub](https://github.com/adamgreen/mri) functionality will be running on the Pico W itself.
-* With only one unpaid part-time developer, me, I have to limit the features and devices supported so that I can concentrate on making this debugger work as well as possible for the devices and features that it does support. This brings me to my list of  **Non-Goals**:
+* I want to concentrate on making this debugger work as well as possible for the devices and features that it does support. This brings me to my list of  **Non-Goals**:
   * JTAG Support
   * Devices other than Cortex-M microcontrollers
 
@@ -40,11 +40,13 @@
 * `watch`, `awatch`, `rwatch` (Hardware Watchpoints)
 * `monitor reset [halt]` (Reboot the microcontroller)
 * `monitor detach` (Power down target DAP and shutdown mri-swd)
+* `info thread` and `thread`:
+  * Only used to expose the second RP2040 core at this point in time
+  * **No RTOS** support
 * GDB connection over WiFi on port 2331
 * Semihosting
 
 ## Unsupported Features
-* Debugging of **Second RP2040 Core**
 * FLASH programming of microcontrollers other than the RP2040 or nRF52xxx.
 * RTOS Thread Support
 * Connecting GDB over USB. Only WiFi for now.
@@ -65,7 +67,7 @@ This file is included in the repository's `.gitignore` so that it isn't accident
 
 ## How to Build
 ### GNU Make based Auto Setup
-This repository contains the [pico-sdk](https://github.com/raspberrypi/pico-sdk) and [mri core](https://github.com/adamgreen/mri) repositories as submodules. The following GNU Make command will initialize these submodules and apply the needed patches:
+This repository contains the [pico-sdk](https://github.com/raspberrypi/pico-sdk) and [mri core](https://github.com/adamgreen/mri) repositories as submodules. The following GNU Make command will initialize these submodules:
 ```shell
 make init
 ```
@@ -94,8 +96,6 @@ cd build
 cmake -G "NMake Makefiles" ..
 nmake
 ```
-
-This build will encounter an error when building some of the pico-sdk sources. This is because I enable more compilers warnings than the pico examples. You can look at [pico-sdk.patch](pico-sdk.patch) to see what changes need to be manually applied to fix these build errors.
 
 
 ## Wiring Diagram
@@ -194,11 +194,12 @@ In the root folder can be found  a [config.h](config.h) which can be used to cus
 
 
 ## Current Hardware Progress
+I have designed a PCB that allows attaching a PicoW to my [Pololu 3π+ 2040 robot](https://www.pololu.com/category/300/3pi-plus-2040-robot). The images below show my current progress on that project.<br>
 ![Image of version 1.0 of the Schematic](images/20231030-PCBv1.0-Schematic.png)</br>
 ![Image of version 1.0 of PCB Front](images/20231030-PCBv1.0-Front.png)
 ![Image of version 1.0 of PCB Back](images/20231030-PCBv1.0-Back.png)</br>
-![Image of version 1.0 of PCB Front once Soldered](images/20231114-PCBv1.0-Soldered.jpg)
-
+![Image of version 1.0 of PCB Front once Soldered](images/20231114-PCBv1.0-Soldered.jpg)</br>
+![Image of version 1.0 of PCB mounted on 3π+ 2040 bot](images/20231114-PCB-MountedOn3pi+2040.jpg)
 
 
 ## Next Steps
@@ -207,6 +208,8 @@ In the root folder can be found  a [config.h](config.h) which can be used to cus
 * ~~Basic nRF52 (Cortex-M4F) Debugging Support~~
 * ~~Semihosting Support~~
 * ~~Custom PCB~~
+* ~~Improve Performance~~
+* ~~RP2040 Core 1 Support~~
 * Addition of a small OLED Display
   * Report IP address
   * Report WiFi connections
@@ -214,6 +217,5 @@ In the root folder can be found  a [config.h](config.h) which can be used to cus
   * Report target Vcc voltage
   * etc
 * Bridge microcontroller's UART on another WiFi TCP/IP port.
-* Improve Performance
-* RP2040 Core 1 Support
+* RTOS Thread Support
 * Improve Usability
