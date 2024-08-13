@@ -25,13 +25,15 @@ static void runFileTests();
 static void blinkLED();
 
 // Can use fprintf(stdout, ) to force output to go to GDB even when pico_stdlib is linked in.
-#define printf(...) fprintf(stdout, __VA_ARGS__)
+// #define printf(...) fprintf(stdout, __VA_ARGS__)
 
 // Selection variable to be set from GDB.
 static volatile int g_selection = 0;
 
 int main(void)
 {
+    stdio_init_all();
+
     // Disable buffering for writes to stdout as performed by printf().
     setvbuf(stdout, NULL, _IONBF, 0);
 

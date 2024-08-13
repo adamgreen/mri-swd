@@ -53,6 +53,7 @@ pico_add_extra_outputs(mri-swd-tests)
 
 pico_enable_stdio_usb(mri-swd-tests 0)
 pico_enable_stdio_uart(mri-swd-tests 0)
+pico_enable_stdio_semihosting(mri-swd-tests 1)
 
 # Show the size of the binary.
 pico_find_compiler(PICO_OBJSIZE ${PICO_GCC_TRIPLE}-size)

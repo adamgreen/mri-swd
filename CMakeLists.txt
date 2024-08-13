@@ -102,7 +102,6 @@ target_sources(mri-swd PRIVATE
     mri/core/token.c
     mri/core/try_catch.c
     mri/semihost/newlib/semihost_newlib.c
-    mri/semihost/mbed/semihost_mbed.c
 )
 
 target_include_directories(mri-swd PRIVATE

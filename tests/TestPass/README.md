@@ -1,5 +1,5 @@
 # mri-swd Test Pass
-This README documents the manual steps that I conduct in GDB when running a test pass on the [mri-swd](https://github.com/adamgreen/mri-swd) against a [Pico target](https://www.raspberrypi.com/products/raspberry-pi-pico/). This repository also contains the source code for the [test program](main.c) that I run on the target Pico board while running through the steps in this test pass.
+This README documents the manual steps that I conduct in GDB when running a test pass on the [mri-swd debug probe](https://github.com/adamgreen/mri-swd) against a [Pico target](https://www.raspberrypi.com/products/raspberry-pi-pico/). This repository also contains the source code for the [test program](main.c) that I run on the target Pico board while running through the steps in this test pass.
 
 
 ## Build and Deploy Test Program
@@ -344,7 +344,6 @@ isr_hardfault () at /Users/user/depots/mri-swd/pico-sdk/src/rp2_common/pico_stan
 Use the ```monitor showfault``` GDB command to attempt dumping the information about this fault but it will generate no output as ARMv6-M has none of the required fault status registers:
 ```console
 (gdb) monitor showfault
-(gdb)
 ```
 
 The registers should have known values at this time, most ascending as seen below:
@@ -893,7 +892,7 @@ Selection:
 ```
 
 
-## Single Stepping Disabling of Interrupts
+## Single Stepping Should Disable Interrupts
 When single stepping through a thread with GDB, **mri-swd** will disable interrupts that would allow ISRs to run in the background and potentially add randomness to the code walk through. This test, ```5) Log to stdout from main() and an ISR at the same time.```, makes sure that an alarm ISR will not fire while single stepping through a simple NOP loop from the main code. While single stepping through the main loop, you should see no ```Alarm Callback Output``` output on stdout. Can use ```set var g_stop=true``` to stop the test and return to the menu. The missed alarms will all spew output once you issue the final ```continue``` instruction.
 ```console
 Selection: 5
