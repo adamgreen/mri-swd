@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <pico/stdlib.h>
 #include <pico/multicore.h>
 #include <hardware/sync.h>
 
@@ -12,7 +13,8 @@ void testContextWithHardcodedBreakpoint(void);
 void testStackingHandlerException(void);
 
 // Forward function declarations.
-int64_t alarmCallback(alarm_id_t id, void *user_data);
+static void testForBreakpoints();
+static int64_t alarmCallback(alarm_id_t id, void *user_data);
 static void __attribute__ ((noinline)) breakOnMe(void);
 static void runThreads(void);
 static void thread1Func(void);
@@ -20,6 +22,7 @@ static void thread2Func(void);
 static void sleep_ms_with_check(uint32_t timeout_ms);
 static void runThreadAndISR(void);
 static void runFileTests();
+static void blinkLED();
 
 // Can use fprintf(stdout, ) to force output to go to GDB even when pico_stdlib is linked in.
 #define printf(...) fprintf(stdout, __VA_ARGS__)
@@ -44,6 +47,7 @@ int main(void)
         printf("5) Log to stdout from main() and an ISR at the same time.\n");
         printf("6) Run Semi-Hosting tests.\n");
         printf("7) Trigger stacking exception.\n");
+        printf("8) Blink LED.\n");
 
         printf("Selection: ");
         char buffer[64];
@@ -58,16 +62,10 @@ int main(void)
                 testContextWithHardcodedBreakpoint();
                 break;
             case 3:
-                alarm_id_t alarm = add_alarm_in_ms(500, alarmCallback, NULL, true);
-
-                printf("Delaying 10 seconds...\n");
-                sleep_ms(10000);
-                breakOnMe();
-
-                cancel_alarm(alarm);
+                testForBreakpoints();
                 break;
             case 4:
-               runThreads();
+                runThreads();
                 break;
             case 5:
                 runThreadAndISR();
@@ -78,6 +76,9 @@ int main(void)
             case 7:
                 testStackingHandlerException();
                 break;
+            case 8:
+                blinkLED();
+                break;
             default:
                 printf("Invalid selection\n");
                 break;
@@ -85,7 +86,18 @@ int main(void)
     }
 }
 
-int64_t alarmCallback(alarm_id_t id, void *user_data)
+static void testForBreakpoints()
+{
+    alarm_id_t alarm = add_alarm_in_ms(500, alarmCallback, NULL, true);
+
+    printf("Delaying 10 seconds...\n");
+    sleep_ms(10000);
+    breakOnMe();
+
+    cancel_alarm(alarm);
+}
+
+static int64_t alarmCallback(alarm_id_t id, void *user_data)
 {
     printf("Alarm Callback Output\n");
 
@@ -318,4 +330,20 @@ static void runFileTests()
 
 
     printf("\nTest completed\n");
+}
+
+void blinkLED()
+{
+    const uint32_t ledPin = 25;
+    const uint32_t ledPinMask = 1 << ledPin;
+    gpio_init(ledPin);
+    gpio_set_dir(ledPin, true);
+
+    g_stop = false;
+    printf("Set g_stop to true to end test...\n");
+    while (!g_stop)
+    {
+        gpio_xor_mask(ledPinMask);
+        sleep_ms(500);
+    }
 }

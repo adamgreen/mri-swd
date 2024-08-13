@@ -1,5 +1,5 @@
 # mri-swd Test Pass
-This README documents the manual steps that I conduct in GDB when running a test pass on the [mri-swd](https://github.com/user/mri-swd) against a [Pico target](https://www.raspberrypi.com/products/raspberry-pi-pico/). This repository also contains the source code for the [test program](main.c) that I run on the target Pico board while running through the steps in this test pass.
+This README documents the manual steps that I conduct in GDB when running a test pass on the [mri-swd](https://github.com/adamgreen/mri-swd) against a [Pico target](https://www.raspberrypi.com/products/raspberry-pi-pico/). This repository also contains the source code for the [test program](main.c) that I run on the target Pico board while running through the steps in this test pass.
 
 
 ## Build and Deploy Test Program
@@ -10,7 +10,6 @@ This README documents the manual steps that I conduct in GDB when running a test
 * Once the initial menu of test options is displayed in GDB, press **CTRL+C** to halt the target.
 
 The test code uses the semi-hosting support built into **mri-swd** to redirect its standard output (stdout) and standard input (stdin) to/from the GDB terminal so all interactions with the test can occur from within GDB itself. No Terminal program is required.
-
 ```console
 user@Mac TestPass % make clean all
 Removing build output for clean build...
@@ -204,6 +203,7 @@ Continuing.
 5) Log to stdout from main() and an ISR at the same time.
 6) Run Semi-Hosting tests.
 7) Trigger stacking exception.
+8) Blink LED.
 Selection: ^C
 Thread 1 received signal SIGINT, Interrupt.
 mriNewlib_SemihostRead () at /Users/user/depots/mri-swd/shared/newlib_stubs.S:41
@@ -255,10 +255,11 @@ Num Enb Low Addr   High Addr  Attrs
 
 
 ## Verify Initial Threads
-Since the RP2040 has 2 cores, it should show 2 threads:
+Since the RP2040 has 2 cores, the ```info thread``` and ```thread apply all bt``` GDB commands should show 2 threads:
 * Core0: In main(), waiting for input from the user over stdin.
 * Core1: In the Boot ROM code at an address from the first 0x4000 bytes of memory since this core in initially halted by the second stage bootloader.
-```
+
+```console
 (gdb) info thread
   Id   Target Id         Frame
 * 1    Thread 1 (Core0)  mriNewlib_SemihostRead () at /Users/user/depots/mri-swd/shared/newlib_stubs.S:41
@@ -292,9 +293,30 @@ Cannot access memory at address 0xfffffff0
 ```
 
 
+## Verify Simple "monitor" GDB Commands
+The **mri-swd** supports a few GDB ```monitor``` commands that we should verify at this time and then a few more at the end of the test pass.
+
+First start with ```monitor help``` to get a list of supported monitor commands.
+```console
+(gdb) monitor help
+Supported monitor commands:
+detach
+reset [halt]
+showfault
+version
+```
+
+Next issue the ```monitor version``` command to see the version of **mri-swd** and **mri** being used.
+```console
+(gdb) monitor version
+|mri-swd| Monitor for Remote Inspection - SWD Edition
+ mri-swd  Version: 0.4-20240812.0 [https://github.com/adamgreen/mri-swd]
+ mri-core Version: 1.6-20231022.0 [https://github.com/adamgreen/mri]
+```
+
+
 ## Test Generated Hard Fault
 Reset the target (via the ```monitor reset``` and ```continue``` commands) and then select the following test to run: ```1) Set registers to known values and crash.```
-
 ```console
 (gdb) monitor reset
 Will reset on next continue.
@@ -308,14 +330,21 @@ Continuing.
 5) Log to stdout from main() and an ISR at the same time.
 6) Run Semi-Hosting tests.
 7) Trigger stacking exception.
+8) Blink LED.
 Selection: 1
 ```
 
 This test should generate a Hard Fault caused by a precise data access to address 0xFFFFFFF0 as seen below:
-```
+```console
 Thread 1 received signal SIGSEGV, Segmentation fault.
 isr_hardfault () at /Users/user/depots/mri-swd/pico-sdk/src/rp2_common/pico_standard_link/crt0.S:98
 98      decl_isr_bkpt isr_hardfault
+```
+
+Use the ```monitor showfault``` GDB command to attempt dumping the information about this fault but it will generate no output as ARMv6-M has none of the required fault status registers:
+```console
+(gdb) monitor showfault
+(gdb)
 ```
 
 The registers should have known values at this time, most ascending as seen below:
@@ -347,7 +376,7 @@ control        0x0                 0
 ```
 
 Dumping the callstack, with the ```bt``` GDB command, should show something like this:
-```
+```console
 (gdb) bt
 #0  isr_hardfault () at /Users/user/depots/mri-swd/pico-sdk/src/rp2_common/pico_standard_link/crt0.S:98
 #1  <signal handler called>
@@ -356,7 +385,7 @@ Dumping the callstack, with the ```bt``` GDB command, should show something like
 ```
 
 We can now reset the target again and let the test continue executing:
-```
+```console
 (gdb) monitor reset
 Will reset on next continue.
 (gdb) continue
@@ -369,6 +398,7 @@ Continuing.
 5) Log to stdout from main() and an ISR at the same time.
 6) Run Semi-Hosting tests.
 7) Trigger stacking exception.
+8) Blink LED.
 Selection:
 ```
 
@@ -377,7 +407,7 @@ Selection:
 Use GDB to select the ```2) Set registers to known values and stop at hardcoded bkpt.``` test.
 
 This test should generate a debug trap caused by a hardcoded breakpoint in the test routine as seen below:
-```
+```console
 Selection: 2
 
 Thread 1 received signal SIGTRAP, Trace/breakpoint trap.
@@ -386,7 +416,7 @@ testContextWithHardcodedBreakpoint () at /Users/user/depots/mri-swd/tests/TestPa
 ```
 
 The registers should have known values at this time, most ascending as seen in the GDB session below:
-```
+```console
 (gdb) info all-reg
 r0             0x0                 0
 r1             0x1                 1
@@ -416,10 +446,21 @@ control        0x0                 0
 #1  0x10000a92 in main () at /Users/user/depots/mri-swd/tests/TestPass/main.c:58
 ```
 
-Single step over the breakpoint exception as this should just cause **mri-swd** to soft step over the instruction and immediately trap on the next instruction from which we can continue execution:
+Update the value of the one of the registers, **R0** from GDB:
+```console
+(gdb) set var $r0=-1
 ```
+
+Single step over the breakpoint exception as this should just cause **mri-swd** to soft step over the instruction and immediately trap on the next instruction: from which we can continue execution:
+```console
 (gdb) si
 111         pop     {r0-r4}
+```
+
+Verify the contents of **R0** has been udpated before continuing execution:
+```console
+(gdb) p $r0
+$4 = -1
 (gdb) c
 Continuing.
 
@@ -430,11 +471,12 @@ Continuing.
 5) Log to stdout from main() and an ISR at the same time.
 6) Run Semi-Hosting tests.
 7) Trigger stacking exception.
+8) Blink LED.
 Selection:
 ```
 
 Use GDB to select ```2) Set registers to known values and stop at hardcoded bkpt``` again and then just issue a ```continue``` to let the test program resume execution. **mri-swd** will first single step over the hardcoded breakpoint and then resume execution.
-```
+```console
 Selection: 2
 
 Thread 1 received signal SIGTRAP, Trace/breakpoint trap.
@@ -450,6 +492,7 @@ Continuing.
 5) Log to stdout from main() and an ISR at the same time.
 6) Run Semi-Hosting tests.
 7) Trigger stacking exception.
+8) Blink LED.
 Selection:
 ```
 
@@ -462,7 +505,6 @@ Selection:
 * Issue ```break alarmCallback``` command to GDB. This will set a breakpoint on an ISR that we know fires on a regular basis.
 * Issue ```continue``` command to resume execution, which is still waiting for user input from GDB.
 * From GDB, type ```3``` following by **Return** to start the ```3) Call breakOnMe() to increment g_global.``` test.
-
 ```console
 Selection: ^C
 Thread 1 received signal SIGINT, Interrupt.
@@ -524,11 +566,12 @@ Alarm Callback Output
 Alarm Callback Output
 Alarm Callback Output
 
-Thread 1 hit Breakpoint 2, breakOnMe () at /Users/user/depots/mri-swd/tests/TestPass/main.c:100
-100         g_global++;
+Thread 1 hit Breakpoint 2, breakOnMe () at /Users/adamgreen/depots/mri-swd/tests/TestPass/main.c:112
+112         g_global++;
 (gdb) bt
-#0  breakOnMe () at /Users/user/depots/mri-swd/tests/TestPass/main.c:100
-#1  0x10000abe in main () at /Users/user/depots/mri-swd/tests/TestPass/main.c:65
+#0  breakOnMe () at /Users/adamgreen/depots/mri-swd/tests/TestPass/main.c:112
+#1  0x10000530 in testForBreakpoints () at /Users/adamgreen/depots/mri-swd/tests/TestPass/main.c:95
+#2  0x10000b42 in main () at /Users/adamgreen/depots/mri-swd/tests/TestPass/main.c:65
 ```
 
 
@@ -551,6 +594,7 @@ Continuing.
 5) Log to stdout from main() and an ISR at the same time.
 6) Run Semi-Hosting tests.
 7) Trigger stacking exception.
+8) Blink LED.
 Selection: 3
 Delaying 10 seconds...
 Alarm Callback Output
@@ -598,6 +642,7 @@ Continuing.
 5) Log to stdout from main() and an ISR at the same time.
 6) Run Semi-Hosting tests.
 7) Trigger stacking exception.
+8) Blink LED.
 Selection: 3
 Delaying 10 seconds...
 Alarm Callback Output
@@ -638,6 +683,7 @@ Continuing.
 5) Log to stdout from main() and an ISR at the same time.
 6) Run Semi-Hosting tests.
 7) Trigger stacking exception.
+8) Blink LED.
 Selection:
 ```
 
@@ -648,8 +694,7 @@ Normally when single stepping through code on one core with GDB, the code on the
 Use the GDB console to select the ```4) Log to stdout from both cores at the same time.```.
 
 Once the 2 cores have started logging text to the terminal, we can break in and perform some single stepping tests on the second core. In the terminal window, output from both cores should be seen while performing this single stepping. I use the ```fin``` command on the second core so that I can single step through ```thread2Func()``` instead of the Pico C SDK timer code.
-
-```
+```console
 Selection: 4
 Set g_stop to true to end test...
 Thread1 Output
@@ -762,8 +807,7 @@ Thread2 Output
 
 ## Test Locked Single Stepping from Second Core
 This test can continue where we left off with the last one but switch GDB into the ```step``` locking mode where it freezes other cores when single stepping through the current core. When single stepping in this mode we should only see output from Thread2 in the terminal.
-
-```
+```console
 (gdb) set scheduler-locking step
 (gdb) n
 139             sleep_ms_with_check(2000);
@@ -804,15 +848,13 @@ Thread2 Output
 ```
 
 At the end of the test we should set the mode back to its original, ```off``` setting.
-
-```
+```console
 (gdb) set scheduler-locking off
 ```
 
 
 # CTRL+C During Long Single Step
 When stepping over the ```delay(2000)``` calls, try pressing **CTRL+C** to break in and dump the callstack.
-
 ```console
 (gdb) n
 139             sleep_ms_with_check(2000);
@@ -846,13 +888,13 @@ Multi-threaded test stopping...
 5) Log to stdout from main() and an ISR at the same time.
 6) Run Semi-Hosting tests.
 7) Trigger stacking exception.
+8) Blink LED.
 Selection:
 ```
 
 
 ## Single Stepping Disabling of Interrupts
 When single stepping through a thread with GDB, **mri-swd** will disable interrupts that would allow ISRs to run in the background and potentially add randomness to the code walk through. This test, ```5) Log to stdout from main() and an ISR at the same time.```, makes sure that an alarm ISR will not fire while single stepping through a simple NOP loop from the main code. While single stepping through the main loop, you should see no ```Alarm Callback Output``` output on stdout. Can use ```set var g_stop=true``` to stop the test and return to the menu. The missed alarms will all spew output once you issue the final ```continue``` instruction.
-
 ```console
 Selection: 5
 Set g_stop to true to end test...
@@ -938,6 +980,7 @@ ISR test stopping...
 5) Log to stdout from main() and an ISR at the same time.
 6) Run Semi-Hosting tests.
 7) Trigger stacking exception.
+8) Blink LED.
 Selection:
 ```
 
@@ -946,7 +989,6 @@ Selection:
 MRI is able to redirect mbed LocalFileSystem I/O to access the local filesystem on the GDB host.
 
 Use GDB to select ```6) Run Semi-Hosting tests.``` and verify that all of its tests run successfully.
-
 ```console
 Selection: 6
 Semi-hosting Tests
@@ -973,6 +1015,7 @@ Test completed
 5) Log to stdout from main() and an ISR at the same time.
 6) Run Semi-Hosting tests.
 7) Trigger stacking exception.
+8) Blink LED.
 Selection:
 ```
 
@@ -980,7 +1023,6 @@ Selection:
 Use GDB to select ```7) Trigger stacking exception.```.
 
 This should lead to a stacking exception (because msp/sp is set to an invalid address) as seen below:
-
 ```console
 Selection: 7
 
@@ -1016,3 +1058,52 @@ basepri        0x0                 0
 faultmask      0x0                 0
 control        0x0                 0
 ```
+
+
+## Test "monitor detach" and "monitor reset halt"
+The ```monitor reset halt``` command should reset the two cores of the RP2040 and halt their execution at the beginning of the Boot ROM. The ```symbol-file``` GDB command can be used to load the corresponding BootROM symbols into GDB.
+```console
+(gdb) symbol-file ../../b1.elf
+Load new symbol table from "../../b1.elf"? (y or n) y
+Reading symbols from ../../b1.elf...
+(gdb) monitor reset halt
+Will reset and then halt on next continue.
+(gdb) c
+Continuing.
+
+Thread 1 received signal SIGSTOP, Stopped (signal).
+_start () at /home/graham/dev/mu/pico_bootrom/bootrom/bootrom_rt0.S:233
+warning: 233    /home/graham/dev/mu/pico_bootrom/bootrom/bootrom_rt0.S: No such file or directory
+(gdb) info thread
+  Id   Target Id         Frame
+* 1    Thread 1 (Core0)  _start () at /home/graham/dev/mu/pico_bootrom/bootrom/bootrom_rt0.S:233
+  2    Thread 2 (Core1)  _start () at /home/graham/dev/mu/pico_bootrom/bootrom/bootrom_rt0.S:233
+```
+
+If we start running the ```8) Blink LED.``` test, it will blink an LED. A GDB ```detach``` will exit GDB and leave the program running so that the LED continues to blink. Sending a ```monitor detach``` command will also leave the program running but it also powers down the DAP on the RP2040 and disconnects **mri-swd**.
+```console
+(gdb) c
+Continuing.
+
+1) Set registers to known values and crash.
+2) Set registers to known values and stop at hardcoded bkpt.
+3) Call breakOnMe() to increment g_global.
+4) Log to stdout from both cores at the same time.
+5) Log to stdout from main() and an ISR at the same time.
+6) Run Semi-Hosting tests.
+7) Trigger stacking exception.
+8) Blink LED.
+Selection: 8
+Set g_stop to true to end test...
+^C
+Thread 1 received signal SIGINT, Interrupt.
+0x10001d84 in ?? ()
+(gdb) monitor detach
+Will detach on next continue. Debugger will require reset to reconnect.
+(gdb) c
+Continuing.
+Remote connection closed
+(gdb) q
+```
+
+Need to press the reset button on the **mri-swd** hardware or power cycle it to get it working again after a detach.
