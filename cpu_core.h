@@ -557,9 +557,8 @@ public:
         return m_pHaltedCore->isResetting();
     }
 
-    // Request the CPU cores to halt, skipping the alreadyHaltedCore.
-    // Set alreadyHaltedCore to CORE_NONE to halt ALL cores.
-    bool requestCoresToHalt(int alreadyHaltedCore);
+    // Request the CPU cores to halt, skipping any that are already in the halted state.
+    bool requestCoresToHalt();
 
     // Wait for all of the cores to enter halted state within the specified timeout amount.
     // Returns false if the wait times out and true otherwise.
@@ -611,7 +610,13 @@ public:
     // registers as those reads need to be directed at a specific core.
     uint32_t readMemory(uint32_t address, void* pvBuffer, uint32_t bufferSize, SWD::TransferSize readSize)
     {
-        assert ( m_pDefaultCore != NULL );
+        // UNDONE: Do I even need the m_pDefaultCore fallback?
+        // assert ( m_pHaltedCore != NULL || m_pDefaultCore != NULL );
+        assert ( m_pHaltedCore != NULL );
+        if (m_pHaltedCore != NULL)
+        {
+            return m_pHaltedCore->readMemory(address, pvBuffer, bufferSize, readSize);
+        }
         return m_pDefaultCore->readMemory(address, pvBuffer, bufferSize, readSize);
     }
 
@@ -619,7 +624,13 @@ public:
     // registers as those writes need to be directed at a specific core.
     uint32_t writeMemory(uint32_t address, const void* pvBuffer, uint32_t bufferSize, SWD::TransferSize writeSize)
     {
-        assert ( m_pDefaultCore != NULL );
+        // UNDONE: Do I even need the m_pDefaultCore fallback?
+        // assert ( m_pHaltedCore != NULL || m_pDefaultCore != NULL );
+        assert ( m_pHaltedCore != NULL );
+        if (m_pHaltedCore != NULL)
+        {
+            return m_pHaltedCore->writeMemory(address, pvBuffer, bufferSize, writeSize);
+        }
         return m_pDefaultCore->writeMemory(address, pvBuffer, bufferSize, writeSize);
     }
 

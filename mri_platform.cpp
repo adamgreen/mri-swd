@@ -257,7 +257,7 @@ static void innerDebuggerLoop()
             logInfoF("%s has requested a CPU halt.", g_haltOnAttach ? "User" : "GDB");
             g_wasStopFromGDB = true;
             g_haltOnAttach = false;
-            g_cores.requestCoresToHalt(CpuCores::CORE_NONE);
+            g_cores.requestCoresToHalt();
         }
 
         // Query current state of CPU.
@@ -277,7 +277,7 @@ static void innerDebuggerLoop()
         if (!hasCpuHalted && haltingCore != CpuCores::CORE_NONE)
         {
             logInfoF("Core%d has halted.", haltingCore);
-            g_cores.requestCoresToHalt(haltingCore);
+            g_cores.requestCoresToHalt();
             hasCpuHalted = g_cores.waitForCoresToHalt(READ_DHCSR_TIMEOUT_MS);
             if (!hasCpuHalted)
             {
@@ -1528,13 +1528,15 @@ static uint32_t handleMonitorVersionCommand(Buffer* pBuffer)
 {
     WriteStringToGdbConsole("|mri-swd| Monitor for Remote Inspection - SWD Edition\r\n");
     WriteStringToGdbConsole(" mri-swd  Version: " MRI_SWD_VERSION_STRING " [" MRI_SWD_BRANCH "]\r\n");
-    WriteStringToGdbConsole(" mri-core Version: " MRI_VERSION_STRING "\r\n");
+    WriteStringToGdbConsole(" mri-core Version: " MRI_VERSION_STRING " [" MRI_BRANCH "]\r\n");
     PrepareStringResponse("OK");
     return HANDLER_RETURN_HANDLED;
 }
 
 static uint32_t handleMonitorHelpCommand()
 {
+    // showfault is implemented and handled in MRI core.
+    // The rest are implemented in this module.
     WriteStringToGdbConsole("Supported monitor commands:\r\n");
     WriteStringToGdbConsole("detach\r\n");
     WriteStringToGdbConsole("reset [halt]\r\n");

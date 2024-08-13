@@ -2251,9 +2251,8 @@ int CpuCores::indexOfHaltedCore(bool requireDebugEvent)
     return haltedCore;
 }
 
-bool CpuCores::requestCoresToHalt(int alreadyHaltedCore)
+bool CpuCores::requestCoresToHalt()
 {
-    // UNDONE: Might not need alreadyHaltedCore parameter now.
     assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
     bool result = true;
     for (int i = 0 ; i < (int)m_coreCount ; i++)
@@ -2486,8 +2485,11 @@ bool CpuCores::dispatchMonitorCommandToDevice(const char** ppArgs, size_t argCou
         return false;
     }
 
-    assert ( m_pDefaultCore != NULL );
-    return m_pDevice->handleMonitorCommand(m_pDeviceObject, m_pDefaultCore, ppArgs, argCount);
+    // UNDONE: Do I even need the m_pDefaultCore fallback?
+    // assert ( m_pHaltedCoreCore != NULL || m_pDefaultCore != NULL );
+    assert ( m_pHaltedCore != NULL );
+    CpuCore* pCore = (m_pHaltedCore != NULL) ? m_pHaltedCore : m_pDefaultCore;
+    return m_pDevice->handleMonitorCommand(m_pDeviceObject, pCore, ppArgs, argCount);
 }
 
 bool CpuCores::flashBegin()
