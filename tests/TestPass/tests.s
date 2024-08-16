@@ -15,6 +15,7 @@
 /* Implementation of code to place known values in registers to verify context reading code. */
     .text
     .syntax unified
+    .thumb
 
     .global testContextWithCrash
     .type testContextWithCrash, %function
@@ -67,10 +68,6 @@ testContextWithCrash:
     .size   testContextWithCrash, .-testContextWithCrash
 
 
-/* Implementation of code to place known values in registers to verify context reading code. */
-    .text
-    .syntax unified
-
     .global testContextWithHardcodedBreakpoint
     .type testContextWithHardcodedBreakpoint, %function
     .thumb_func
@@ -119,9 +116,6 @@ testContextWithHardcodedBreakpoint:
     .pool
     .size   testContextWithHardcodedBreakpoint, .-testContextWithHardcodedBreakpoint
 
-
-    .text
-    .syntax unified
 
     .global testStackingHandlerException
     .type testStackingHandlerException, %function

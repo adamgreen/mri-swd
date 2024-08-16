@@ -5,7 +5,18 @@
 #include <sys/stat.h>
 #include <pico/stdlib.h>
 #include <pico/multicore.h>
+#include <hardware/exception.h>
 #include <hardware/sync.h>
+#include "../../shared/mriswd_semihost.h"
+
+
+// What should Hard Fault handler do when semi-host requests are made when debugger isn't attached?
+// - Set to 1 to hang on such semi-host requests.
+// - Set to 0 to ignore/drop semi-host writes to stdout but hang on all other such semi-host requests.
+#define HANG_ON_SEMIHOST_REQUESTS 1
+
+// Can use fprintf(stdout, ) to force output to go to GDB even when pico_stdlib is linked in.
+// #define printf(...) fprintf(stdout, __VA_ARGS__)
 
 // Assembly language functions found in tests.S
 void testContextWithCrash(void);
@@ -13,6 +24,8 @@ void testContextWithHardcodedBreakpoint(void);
 void testStackingHandlerException(void);
 
 // Forward function declarations.
+static void installLoopingHardFaultHandler(void);
+static void installIgnoringSemihostWritesHardFaultHandler(void);
 static void testForBreakpoints();
 static int64_t alarmCallback(alarm_id_t id, void *user_data);
 static void __attribute__ ((noinline)) breakOnMe(void);
@@ -24,15 +37,22 @@ static void runThreadAndISR(void);
 static void runFileTests();
 static void blinkLED();
 
-// Can use fprintf(stdout, ) to force output to go to GDB even when pico_stdlib is linked in.
-// #define printf(...) fprintf(stdout, __VA_ARGS__)
-
 // Selection variable to be set from GDB.
 static volatile int g_selection = 0;
+
 
 int main(void)
 {
     stdio_init_all();
+
+    if (HANG_ON_SEMIHOST_REQUESTS)
+    {
+        installLoopingHardFaultHandler();
+    }
+    else
+    {
+        installIgnoringSemihostWritesHardFaultHandler();
+    }
 
     // Disable buffering for writes to stdout as performed by printf().
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -86,6 +106,16 @@ int main(void)
                 break;
         }
     }
+}
+
+static void installLoopingHardFaultHandler(void)
+{
+    exception_set_exclusive_handler(HARDFAULT_EXCEPTION, mriswd_semihost_stdout_wait_for_debugger_attach);
+}
+
+static void installIgnoringSemihostWritesHardFaultHandler(void)
+{
+    exception_set_exclusive_handler(HARDFAULT_EXCEPTION, mriswd_semihost_stdout_ignore_until_debugger_attach);
 }
 
 static void testForBreakpoints()

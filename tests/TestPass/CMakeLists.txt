@@ -38,6 +38,8 @@ target_sources(mri-swd-tests PRIVATE
     # Compile the following 2 files to get semi-host support for stdin/stdout/stderr and other file APIs.
     ../../shared/newlib_retarget.c
     ../../shared/newlib_stubs.S
+    ../../shared/mriswd_semihost.S
+    ../../shared/mriswd_semihost_c.c
 )
 
 # Enable all semi-hosting thunks to redirect all file system calls to GDB.
@@ -48,6 +50,7 @@ target_compile_definitions(mri-swd-tests PRIVATE
 target_link_libraries(mri-swd-tests PRIVATE
     pico_stdlib
     pico_multicore
+    hardware_exception
 )
 pico_add_extra_outputs(mri-swd-tests)
 

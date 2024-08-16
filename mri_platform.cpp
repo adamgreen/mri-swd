@@ -546,6 +546,8 @@ static size_t writeBytesToBufferAsHex(Buffer* pBuffer, void* pBytes, size_t byte
 // *********************************************************************************************************************
 // Routines called by the MRI core to read and write memory on the target device.
 // *********************************************************************************************************************
+static int isWordAligned(uintmri_t value);
+
 uint32_t Platform_MemRead32(uintmri_t address)
 {
     g_wasMemoryExceptionEncountered = false;
@@ -615,6 +617,20 @@ void Platform_MemWrite8(uintmri_t address, uint8_t value)
     }
 }
 
+uintmri_t Platform_ReadMemory(void* pvBuffer, uintmri_t address, uintmri_t readByteCount)
+{
+    if (isWordAligned(readByteCount) && isWordAligned(address))
+    {
+        return g_cores.readMemory(address, pvBuffer, readByteCount, SWD::TRANSFER_32BIT);
+    }
+    return g_cores.readMemory(address, pvBuffer, readByteCount, SWD::TRANSFER_8BIT);
+}
+
+static int isWordAligned(uintmri_t value)
+{
+    return (value & 3) == 0;
+}
+
 int Platform_WasMemoryFaultEncountered()
 {
     return g_wasMemoryExceptionEncountered;
@@ -636,7 +652,6 @@ static uint32_t readMemoryBytesIntoHexBuffer(Buffer* pBuffer, uintmri_t address,
 static uint32_t readMemoryHalfWordIntoHexBuffer(Buffer* pBuffer, uintmri_t address);
 static int isNotHalfWordAligned(uintmri_t address);
 static uint32_t readMemoryWordIntoHexBuffer(Buffer* pBuffer, uintmri_t address);
-static int isWordAligned(uintmri_t value);
 
 uintmri_t ReadMemoryIntoHexBuffer(Buffer* pBuffer, uintmri_t address, uintmri_t readByteCount)
 {
@@ -704,11 +719,6 @@ static uint32_t readMemoryWordIntoHexBuffer(Buffer* pBuffer, uintmri_t address)
         return 0;
     }
     return writeBytesToBufferAsHex(pBuffer, &value, sizeof(value));
-}
-
-static int isWordAligned(uintmri_t value)
-{
-    return (value & 3) == 0;
 }
 
 
@@ -1776,7 +1786,7 @@ void Platform_HandleFaultFromHighPriorityCode(void)
 // *********************************************************************************************************************
 // Routines called by the MRI core to determine if the stop was caused by semihost request.
 // *********************************************************************************************************************
-static int isInstructionMbedSemihostBreakpoint(uint16_t instruction);
+static int isInstructionArmSemihostBreakpoint(uint16_t instruction);
 static int isInstructionNewlibSemihostBreakpoint(uint16_t instruction);
 static int isInstructionHardcodedBreakpoint(uint16_t instruction);
 PlatformInstructionType Platform_TypeOfCurrentInstruction(void)
@@ -1795,10 +1805,10 @@ PlatformInstructionType Platform_TypeOfCurrentInstruction(void)
     }
 
     bool isGdbTryingToBreakIn = g_gdbSocket.isGdbConnected() && !g_gdbSocket.m_tcpToMriQueue.isEmpty();
-    if (isInstructionMbedSemihostBreakpoint(currentInstruction))
+    if (isInstructionArmSemihostBreakpoint(currentInstruction))
     {
         return isGdbTryingToBreakIn ? MRI_PLATFORM_INSTRUCTION_HARDCODED_BREAKPOINT :
-                                      MRI_PLATFORM_INSTRUCTION_MBED_SEMIHOST_CALL;
+                                      MRI_PLATFORM_INSTRUCTION_ARM_SEMIHOST_CALL;
     }
     else if (isInstructionNewlibSemihostBreakpoint(currentInstruction))
     {
@@ -1815,11 +1825,11 @@ PlatformInstructionType Platform_TypeOfCurrentInstruction(void)
     }
 }
 
-static int isInstructionMbedSemihostBreakpoint(uint16_t instruction)
+static int isInstructionArmSemihostBreakpoint(uint16_t instruction)
 {
-    const uint16_t mbedSemihostBreakpointMachineCode = 0xbeab;
+    const uint16_t armSemihostBreakpointMachineCode = 0xbeab;
 
-    return mbedSemihostBreakpointMachineCode == instruction;
+    return armSemihostBreakpointMachineCode == instruction;
 }
 
 static int isInstructionNewlibSemihostBreakpoint(uint16_t instruction)
@@ -1852,6 +1862,21 @@ PlatformSemihostParameters Platform_GetSemihostCallParameters(void)
 }
 
 
+uintmri_t Platform_GetNewlibSemihostOperation(void)
+{
+    uintmri_t opCode = 0;
+    __try
+    {
+        opCode = getFirstHalfWordOfCurrentInstruction();
+    }
+    __catch
+    {
+        opCode = 0;
+    }
+    return opCode & 0xFF;
+}
+
+
 void Platform_SetSemihostCallReturnAndErrnoValues(int returnValue, int errNo)
 {
     g_cores.writeRegisterOnHaltedCore(R0, returnValue);
@@ -1867,7 +1892,7 @@ int Semihost_IsDebuggeeMakingSemihostCall(void)
 {
     PlatformInstructionType instructionType = Platform_TypeOfCurrentInstruction();
 
-    return (instructionType == MRI_PLATFORM_INSTRUCTION_MBED_SEMIHOST_CALL ||
+    return (instructionType == MRI_PLATFORM_INSTRUCTION_ARM_SEMIHOST_CALL ||
             instructionType == MRI_PLATFORM_INSTRUCTION_NEWLIB_SEMIHOST_CALL);
 }
 
@@ -1877,8 +1902,8 @@ int Semihost_HandleSemihostRequest(void)
     PlatformInstructionType    instructionType = Platform_TypeOfCurrentInstruction();
     PlatformSemihostParameters parameters = Platform_GetSemihostCallParameters();
 
-    if (instructionType == MRI_PLATFORM_INSTRUCTION_MBED_SEMIHOST_CALL)
-        return Semihost_HandleMbedSemihostRequest(&parameters);
+    if (instructionType == MRI_PLATFORM_INSTRUCTION_ARM_SEMIHOST_CALL)
+        return Semihost_HandleArmSemihostRequest(&parameters);
     else if (instructionType == MRI_PLATFORM_INSTRUCTION_NEWLIB_SEMIHOST_CALL)
         return Semihost_HandleNewlibSemihostRequest(&parameters);
     else
@@ -1921,255 +1946,16 @@ static int writeToGdbConsole(const TransferParameters* pParameters)
 }
 
 
-
 // *********************************************************************************************************************
-// Semihost functionality for redirecting ARM/mbed operations such as file I/O to the GNU debugger.
+// Can safely return an empty UUID for all boards that would be connected to MRI-SWD.
 // *********************************************************************************************************************
-static uint32_t convertRealViewOpenModeToPosixOpenFlags(uint32_t openMode);
-static int      handleMbedSemihostOpenRequest(PlatformSemihostParameters* pSemihostParameters);
-static int      handleMbedSemihostIsTtyRequest(PlatformSemihostParameters* pSemihostParameters);
-static void     convertBytesTransferredToBytesNotTransferred(int bytesThatWereToBeTransferred);
-static int      handleMbedSemihostWriteRequest(PlatformSemihostParameters* pSemihostParameters);
-static int      handleMbedSemihostCloseRequest(PlatformSemihostParameters* pSemihostParameters);
-static int      handleMbedSemihostReadRequest(PlatformSemihostParameters* pSemihostParameters);
-static int      handleMbedSemihostSeekRequest(PlatformSemihostParameters* pSemihostParameters);
-static uint32_t extractWordFromBigEndianByteArray(const void* pBigEndianValueToExtract);
-static int      handleMbedSemihostFileLengthRequest(PlatformSemihostParameters* pSemihostParameters);
-static int      handleMbedSemihostRemoveRequest(PlatformSemihostParameters* pSemihostParameters);
-static int      handleMbedSemihostRenameRequest(PlatformSemihostParameters* pSemihostParameters);
-static int      handleMbedSemihostErrorNoRequest(PlatformSemihostParameters* pSemihostParameters);
-int Semihost_HandleMbedSemihostRequest(PlatformSemihostParameters* pParameters)
+const uint8_t* Platform_GetUid(void)
 {
-    uint32_t opCode;
-
-    opCode = pParameters->parameter1;
-    switch (opCode)
-    {
-    case 1:
-        return handleMbedSemihostOpenRequest(pParameters);
-    case 2:
-        return handleMbedSemihostCloseRequest(pParameters);
-    case 5:
-        return handleMbedSemihostWriteRequest(pParameters);
-    case 6:
-        return handleMbedSemihostReadRequest(pParameters);
-    case 9:
-        return handleMbedSemihostIsTtyRequest(pParameters);
-    case 10:
-        return handleMbedSemihostSeekRequest(pParameters);
-    case 12:
-        return handleMbedSemihostFileLengthRequest(pParameters);
-    case 14:
-        return handleMbedSemihostRemoveRequest(pParameters);
-    case 15:
-        return handleMbedSemihostRenameRequest(pParameters);
-    case 19:
-        return handleMbedSemihostErrorNoRequest(pParameters);
-    default:
-        return 0;
-    }
+    return NULL;
 }
 
-static int handleMbedSemihostOpenRequest(PlatformSemihostParameters* pSemihostParameters)
+
+size_t Platform_GetUidSize(void)
 {
-    struct
-    {
-        uint32_t filenameAddress;
-        uint32_t openMode;
-        uint32_t filenameLength;
-    } armParameters;
-    uint32_t bytesRead = g_cores.readMemory(pSemihostParameters->parameter2, &armParameters, sizeof(armParameters), SWD::TRANSFER_32BIT);
-    if (bytesRead != sizeof(armParameters))
-    {
-        return 0;
-    }
-
-    OpenParameters parameters;
-    parameters.filenameAddress = armParameters.filenameAddress;
-    parameters.flags = convertRealViewOpenModeToPosixOpenFlags(armParameters.openMode);
-    parameters.mode = GDB_S_IRUSR | GDB_S_IWUSR | GDB_S_IRGRP | GDB_S_IWGRP | GDB_S_IROTH | GDB_S_IWOTH;
-    parameters.filenameLength = armParameters.filenameLength + 1;
-
-    return IssueGdbFileOpenRequest(&parameters);
-}
-
-static uint32_t convertRealViewOpenModeToPosixOpenFlags(uint32_t openMode)
-{
-    uint32_t posixOpenMode = 0;
-    uint32_t posixOpenDisposition = 0;
-
-    if (openMode & OPENMODE_W)
-    {
-        posixOpenMode = GDB_O_WRONLY;
-        posixOpenDisposition = GDB_O_CREAT | GDB_O_TRUNC;
-    }
-    else if (openMode & OPENMODE_A)
-    {
-        posixOpenMode = GDB_O_WRONLY ;
-        posixOpenDisposition = GDB_O_CREAT | GDB_O_APPEND;
-    }
-    else
-    {
-        posixOpenMode = GDB_O_RDONLY;
-        posixOpenDisposition = 0;
-    }
-    if (openMode & OPENMODE_PLUS)
-    {
-        posixOpenMode = GDB_O_RDWR;
-    }
-
-    return posixOpenMode | posixOpenDisposition;
-}
-
-static int handleMbedSemihostIsTtyRequest(PlatformSemihostParameters* pSemihostParameters)
-{
-    // Just need to advance the program counter past the semi-host bkpt instruction.
-    Platform_AdvanceProgramCounterToNextInstruction();
-    // Just going to hardcode all such file handles to non-TTY so that they are buffered.
-    Platform_SetSemihostCallReturnAndErrnoValues(0, 0);
-
-    return 1;
-}
-
-static int handleMbedSemihostWriteRequest(PlatformSemihostParameters* pSemihostParameters)
-{
-    TransferParameters parameters;
-    uint32_t bytesRead = g_cores.readMemory(pSemihostParameters->parameter2, &parameters, sizeof(parameters), SWD::TRANSFER_32BIT);
-    if (bytesRead != sizeof(parameters))
-    {
-        return 0;
-    }
-
-    int returnValue = Semihost_WriteToFileOrConsole(&parameters);
-    if (returnValue)
-    {
-        convertBytesTransferredToBytesNotTransferred(parameters.bufferSize);
-    }
-    return returnValue;
-}
-
-static int handleMbedSemihostReadRequest(PlatformSemihostParameters* pSemihostParameters)
-{
-    TransferParameters parameters;
-    uint32_t bytesRead = g_cores.readMemory(pSemihostParameters->parameter2, &parameters, sizeof(parameters), SWD::TRANSFER_32BIT);
-    if (bytesRead != sizeof(parameters))
-    {
-        return 0;
-    }
-
-    int returnValue = IssueGdbFileReadRequest(&parameters);
-    if (returnValue)
-    {
-        convertBytesTransferredToBytesNotTransferred(parameters.bufferSize);
-    }
-    return returnValue;
-}
-
-static void convertBytesTransferredToBytesNotTransferred(int bytesThatWereToBeTransferred)
-{
-    int bytesTransferred = GetSemihostReturnCode();
-
-    /* The mbed version of the read/write function need bytes not transferred instead of bytes transferred. */
-    if (bytesTransferred >= 0)
-        Platform_SetSemihostCallReturnAndErrnoValues(bytesThatWereToBeTransferred - bytesTransferred, 0);
-}
-
-static int handleMbedSemihostCloseRequest(PlatformSemihostParameters* pSemihostParameters)
-{
-    struct
-    {
-        uint32_t fileDescriptor;
-    } parameters;
-    uint32_t bytesRead = g_cores.readMemory(pSemihostParameters->parameter2, &parameters, sizeof(parameters), SWD::TRANSFER_32BIT);
-    if (bytesRead != sizeof(parameters))
-    {
-        return 0;
-    }
-
-    return IssueGdbFileCloseRequest(parameters.fileDescriptor);
-}
-
-static int handleMbedSemihostSeekRequest(PlatformSemihostParameters* pSemihostParameters)
-{
-    struct
-    {
-        uint32_t fileDescriptor;
-        int32_t  offsetFromStart;
-    } armParameters;
-    uint32_t bytesRead = g_cores.readMemory(pSemihostParameters->parameter2, &armParameters, sizeof(armParameters), SWD::TRANSFER_32BIT);
-    if (bytesRead != sizeof(armParameters))
-    {
-        return 0;
-    }
-
-    SeekParameters parameters;
-    parameters.fileDescriptor = armParameters.fileDescriptor;
-    parameters.offset = armParameters.offsetFromStart;
-    parameters.whence = GDB_SEEK_SET;
-    return IssueGdbFileSeekRequest(&parameters);
-}
-
-static int handleMbedSemihostFileLengthRequest(PlatformSemihostParameters* pSemihostParameters)
-{
-    struct
-    {
-        uint32_t fileDescriptor;
-    } parameters;
-    uint32_t bytesRead = g_cores.readMemory(pSemihostParameters->parameter2, &parameters, sizeof(parameters), SWD::TRANSFER_32BIT);
-    if (bytesRead != sizeof(parameters))
-    {
-        return 0;
-    }
-
-    GdbStats gdbFileStats;
-    int returnValue = IssueGdbFileFStatRequest(parameters.fileDescriptor, (uint32_t)&gdbFileStats);
-    if (returnValue && GetSemihostReturnCode() == 0)
-    {
-        /* The stat command was successfully executed to set R0 to the file length field. */
-        Platform_SetSemihostCallReturnAndErrnoValues(extractWordFromBigEndianByteArray(&gdbFileStats.totalSizeLowerWord), 0);
-    }
-
-    return returnValue;
-}
-
-static uint32_t extractWordFromBigEndianByteArray(const void* pBigEndianValueToExtract)
-{
-    const unsigned char* pBigEndianValue = (const unsigned char*)pBigEndianValueToExtract;
-    return pBigEndianValue[3]        | (pBigEndianValue[2] << 8) |
-          (pBigEndianValue[1] << 16) | (pBigEndianValue[0] << 24);
-}
-
-static int handleMbedSemihostRemoveRequest(PlatformSemihostParameters* pSemihostParameters)
-{
-    RemoveParameters parameters;
-    uint32_t bytesRead = g_cores.readMemory(pSemihostParameters->parameter2, &parameters, sizeof(parameters), SWD::TRANSFER_32BIT);
-    if (bytesRead != sizeof(parameters))
-    {
-        return 0;
-    }
-
-    parameters.filenameLength++;
-    return IssueGdbFileUnlinkRequest(&parameters);
-}
-
-static int handleMbedSemihostRenameRequest(PlatformSemihostParameters* pSemihostParameters)
-{
-    RenameParameters parameters;
-    uint32_t bytesRead = g_cores.readMemory(pSemihostParameters->parameter2, &parameters, sizeof(parameters), SWD::TRANSFER_32BIT);
-    if (bytesRead != sizeof(parameters))
-    {
-        return 0;
-    }
-
-    parameters.origFilenameLength++;
-    parameters.newFilenameLength++;
-    return IssueGdbFileRenameRequest(&parameters);
-}
-
-static int handleMbedSemihostErrorNoRequest(PlatformSemihostParameters* pSemihostParameters)
-{
-    Platform_AdvanceProgramCounterToNextInstruction();
-    Platform_SetSemihostCallReturnAndErrnoValues(GetSemihostErrno(), 0);
-
-    return 1;
+    return 0;
 }
