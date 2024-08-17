@@ -1,4 +1,4 @@
-/* Copyright 2023 Adam Green (https://github.com/adamgreen/)
+/* Copyright 2024 Adam Green (https://github.com/adamgreen/)
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -19,7 +19,6 @@
 #include <string.h>
 #include <pico/stdlib.h>
 #include <hardware/pio.h>
-#include <hardware/dma.h>
 
 class SwdTarget;
 
@@ -53,7 +52,8 @@ class SWD
             CPU_CORTEX_M0_PLUS,
             CPU_CORTEX_M3,
             CPU_CORTEX_M4,
-            CPU_CORTEX_M7
+            CPU_CORTEX_M7,
+            CPU_CORTEX_M33,
         };
 
         // Constructor just sets up object. Need to call init() methods to actually initialize the PIO state machine.
@@ -160,6 +160,26 @@ class SWD
             TRANSFER_16BIT = 16,
             TRANSFER_32BIT = 32
         };
+
+        // Method to issue a target memory read.
+        //
+        // address - The 32-bit target address from which to start the read.
+        // pvBuffer - Pointer to the data buffer to be filled in with the data read from the target.
+        // bufferSize - The size of the read to be made, in bytes.
+        // readSize - Is the size of each individual target read: 8, 16, or 32 bits.
+        //
+        // Returns the number of bytes successfully read. 0 if none were read successfully.
+        uint32_t readTargetMemory(uint32_t address, void* pvBuffer, uint32_t bufferSize, TransferSize readSize);
+
+        // Method to issue a target memory write.
+        //
+        // address - The 32-bit target address to which the write should be made.
+        // pvBuffer - Pointer to the data buffer to be written to the target.
+        // bufferSize - The size of the write to be made, in bytes.
+        // writeSize - Is the size of each individual target write: 8, 16, or 32 bits.
+        //
+        // Returns the number of bytes successfully written. 0 if none were written successfully.
+        uint32_t writeTargetMemory(uint32_t address, const void* pvBuffer, uint32_t bufferSize, TransferSize writeSize);
 
         // Method to find first DPv2 DP targets attached to SWD bus.
         // Can keep calling findNextSwdTarget() until it returns false to enumerate all of the connected targets.
@@ -305,8 +325,6 @@ class SWD
         //  BIT_PATTERN: Ready to send arbitrary bit patterns like line reset, JTAG to SWD switch are such patterns.
         //  PACKET: Ready to send SWD packets with packet requests, acknowledge response, and read/write data transfers.
         enum SignalMode { BIT_PATTERN, PACKET };
-        // State machine for iterating over target ids.
-        enum EnumTargetState { PARTNO_DESIGNER, INSTANCE, DONE_INSTANCES };
         // Valid values for AP_CSW::AddrInc.
         enum CSW_AddrIncs { ADDR_INC_DISABLED = 0, ADDR_INC_SINGLE_ENABLED = 1, ADDR_INC_PACKED_ENABLED };
         // Valid values for AP_CSW::Size.
@@ -320,6 +338,7 @@ class SWD
             CSW_SIZE_256BIT = 5
         };
 
+    public:
         // These bits are placed in the DP_* and AP_* register definitions to indicate required setting in DPBANKSEL or
         // APBANKSEL for accesses to this register.
         static const uint32_t BANKSEL_0 = 0x0 << 4;
@@ -327,7 +346,20 @@ class SWD
         static const uint32_t BANKSEL_2 = 0x2 << 4;
         static const uint32_t BANKSEL_3 = 0x3 << 4;
         static const uint32_t BANKSEL_4 = 0x4 << 4;
+        static const uint32_t BANKSEL_5 = 0x5 << 4;
+        static const uint32_t BANKSEL_E = 0xE << 4;
         static const uint32_t BANKSEL_F = 0xF << 4;
+        static const uint32_t BANKSEL_D0 = 0xD0 << 4;
+        static const uint32_t BANKSEL_D1 = 0xD1 << 4;
+        static const uint32_t BANKSEL_DE = 0xDE << 4;
+        static const uint32_t BANKSEL_DF = 0xDF << 4;
+        static const uint32_t BANKSEL_F0 = 0xF0 << 4;
+        static const uint32_t BANKSEL_FA = 0xFA << 4;
+        static const uint32_t BANKSEL_FB = 0xFB << 4;
+        static const uint32_t BANKSEL_FC = 0xFC << 4;
+        static const uint32_t BANKSEL_FD = 0xFD << 4;
+        static const uint32_t BANKSEL_FE = 0xFE << 4;
+        static const uint32_t BANKSEL_FF = 0xFF << 4;
 
         // These bits are placed in the DP_* and AP_* register definitions to indicate whether they are RO, WO, or RW.
         static const uint32_t AP_DP_RO = 1 << 31;
@@ -335,61 +367,75 @@ class SWD
         static const uint32_t AP_DP_RW = AP_DP_RO | AP_DP_WO;
 
         // SWD DP Register Addresses which can be passed into readDP()/writeDP methods.
-        static const uint32_t DP_DPIDR =     AP_DP_RO | 0x0;  // Read-only
-        static const uint32_t DP_ABORT =     AP_DP_WO | 0x0;  // Write-only
+        static const uint32_t DP_DPIDR =     AP_DP_RO | BANKSEL_0 | 0x0;    // Read-only
+        static const uint32_t DP_DPIDR1 =    AP_DP_RO | BANKSEL_1 | 0x0;    // Read-only
+        static const uint32_t DP_BASEPTR0 =  AP_DP_RO | BANKSEL_2 | 0x0;    // Read-only
+        static const uint32_t DP_BASEPTR1 =  AP_DP_RO | BANKSEL_3 | 0x0;    // Read-only
+        static const uint32_t DP_ABORT =     AP_DP_WO | 0x0;                // Write-only
         static const uint32_t DP_CTRL_STAT = AP_DP_RW | BANKSEL_0 | 0x4;    // Read/Write
         static const uint32_t DP_DLCR =      AP_DP_RW | BANKSEL_1 | 0x4;    // Read/Write
         static const uint32_t DP_TARGETID =  AP_DP_RO | BANKSEL_2 | 0x4;    // Read-only
         static const uint32_t DP_DLPIDR =    AP_DP_RO | BANKSEL_3 | 0x4;    // Read-only
         static const uint32_t DP_EVENTSTAT = AP_DP_RO | BANKSEL_4 | 0x4;    // Read-only
+        static const uint32_t DP_SELECT1 =   AP_DP_WO | BANKSEL_5 | 0x4;    // Write-only
         static const uint32_t DP_RESEND =    AP_DP_RO | 0x8;  // Read-only
         static const uint32_t DP_SELECT =    AP_DP_WO | 0x8;  // Write-only
         static const uint32_t DP_RDBUFF =    AP_DP_RO | 0xC;  // Read-only
         static const uint32_t DP_TARGETSEL = AP_DP_WO | 0xC;  // Write-only
 
-        // SWD AP Register Addresses which can be passed into readAP()/writeAP method.
-        static const uint32_t AP_CSW =  AP_DP_RW | BANKSEL_0 | 0x0;
-        static const uint32_t AP_TAR =  AP_DP_RW | BANKSEL_0 | 0x4;
-        static const uint32_t AP_DRW =  AP_DP_RW | BANKSEL_0 | 0xC;
-        static const uint32_t AP_BD0 =  AP_DP_RW | BANKSEL_1 | 0x0;
-        static const uint32_t AP_BD1 =  AP_DP_RW | BANKSEL_1 | 0x4;
-        static const uint32_t AP_BD2 =  AP_DP_RW | BANKSEL_1 | 0x8;
-        static const uint32_t AP_BD3 =  AP_DP_RW | BANKSEL_1 | 0xC;
-        static const uint32_t AP_CFG =  AP_DP_RO | BANKSEL_F | 0x4;
-        static const uint32_t AP_BASE = AP_DP_RO | BANKSEL_F | 0x8;
-        static const uint32_t AP_IDR =  AP_DP_RO | BANKSEL_F | 0xC;
+        // SWD APv1 Register Addresses which can be passed into readAP()/writeAP method.
+        static const uint32_t APv1_CSW  = AP_DP_RW | BANKSEL_0 | 0x0;
+        static const uint32_t APv1_TAR  = AP_DP_RW | BANKSEL_0 | 0x4;
+        static const uint32_t APv1_DRW  = AP_DP_RW | BANKSEL_0 | 0xC;
+        static const uint32_t APv1_BD0  = AP_DP_RW | BANKSEL_1 | 0x0;
+        static const uint32_t APv1_BD1  = AP_DP_RW | BANKSEL_1 | 0x4;
+        static const uint32_t APv1_BD2  = AP_DP_RW | BANKSEL_1 | 0x8;
+        static const uint32_t APv1_BD3  = AP_DP_RW | BANKSEL_1 | 0xC;
+        static const uint32_t APv1_CFG1 = AP_DP_RO | BANKSEL_E | 0x0;
+        static const uint32_t APv1_CFG  = AP_DP_RO | BANKSEL_F | 0x4;
+        static const uint32_t APv1_BASE = AP_DP_RO | BANKSEL_F | 0x8;
+        static const uint32_t APv1_IDR  = AP_DP_RO | BANKSEL_F | 0xC;
 
-        // Unknown value.
-        static const uint32_t UNKNOWN_VAL = 0xFFFFFFFF;
+        // SWD APv2 Register Addresses which can be passed into readAP()/writeAP method.
+        static const uint32_t APv2_CSW        = AP_DP_RW | BANKSEL_D0 | 0x0;
+        static const uint32_t APv2_TAR        = AP_DP_RW | BANKSEL_D0 | 0x4;
+        static const uint32_t APv2_DRW        = AP_DP_RW | BANKSEL_D0 | 0xC;
+        static const uint32_t APv2_BD0        = AP_DP_RW | BANKSEL_D1 | 0x0;
+        static const uint32_t APv2_BD1        = AP_DP_RW | BANKSEL_D1 | 0x4;
+        static const uint32_t APv2_BD2        = AP_DP_RW | BANKSEL_D1 | 0x8;
+        static const uint32_t APv2_BD3        = AP_DP_RW | BANKSEL_D1 | 0xC;
+        static const uint32_t APv2_CFG1       = AP_DP_RO | BANKSEL_DE | 0x0;
+        static const uint32_t APv2_CFG        = AP_DP_RO | BANKSEL_DF | 0x4;
+        static const uint32_t APv2_BASE       = AP_DP_RO | BANKSEL_DF | 0x8;
+        static const uint32_t APv2_IDR        = AP_DP_RO | BANKSEL_DF | 0xC;
+        static const uint32_t APv2_ITCTRL     = AP_DP_RW | BANKSEL_F0 | 0x0;
+        static const uint32_t APv2_CLAIMSET   = AP_DP_RW | BANKSEL_FA | 0x0;
+        static const uint32_t APv2_CLAIMCLR   = AP_DP_RW | BANKSEL_FA | 0x4;
+        static const uint32_t APv2_DEVAFF0    = AP_DP_RO | BANKSEL_FA | 0x8;
+        static const uint32_t APv2_DEVAFF1    = AP_DP_RO | BANKSEL_FA | 0xC;
+        static const uint32_t APv2_LAR        = AP_DP_WO | BANKSEL_FB | 0x0;
+        static const uint32_t APv2_LSR        = AP_DP_RO | BANKSEL_FB | 0x4;
+        static const uint32_t APv2_AUTHSTATUS = AP_DP_RO | BANKSEL_FB | 0x8;
+        static const uint32_t APv2_DEVARCH    = AP_DP_RO | BANKSEL_FB | 0xC;
+        static const uint32_t APv2_DEVID2     = AP_DP_RO | BANKSEL_FC | 0x0;
+        static const uint32_t APv2_DEVID1     = AP_DP_RO | BANKSEL_FC | 0x4;
+        static const uint32_t APv2_DEVID      = AP_DP_RO | BANKSEL_FC | 0x8;
+        static const uint32_t APv2_DEVTYPE    = AP_DP_RO | BANKSEL_FC | 0xC;
+        static const uint32_t APv2_PIDR4      = AP_DP_RO | BANKSEL_FD | 0x0;
+        static const uint32_t APv2_PIDR5      = AP_DP_RO | BANKSEL_FD | 0x4;
+        static const uint32_t APv2_PIDR6      = AP_DP_RO | BANKSEL_FD | 0x8;
+        static const uint32_t APv2_PIDR7      = AP_DP_RO | BANKSEL_FD | 0xC;
+        static const uint32_t APv2_PIDR0      = AP_DP_RO | BANKSEL_FE | 0x0;
+        static const uint32_t APv2_PIDR1      = AP_DP_RO | BANKSEL_FE | 0x4;
+        static const uint32_t APv2_PIDR2      = AP_DP_RO | BANKSEL_FE | 0x8;
+        static const uint32_t APv2_PIDR3      = AP_DP_RO | BANKSEL_FE | 0xC;
+        static const uint32_t APv2_CIDR0      = AP_DP_RO | BANKSEL_FF | 0x0;
+        static const uint32_t APv2_CIDR1      = AP_DP_RO | BANKSEL_FF | 0x4;
+        static const uint32_t APv2_CIDR2      = AP_DP_RO | BANKSEL_FF | 0x8;
+        static const uint32_t APv2_CIDR3      = AP_DP_RO | BANKSEL_FF | 0xC;
 
-        void invalidateDpApState()
-        {
-            // Some of the remembered AP/DP state is no longer valid once a new target has been selected.
-            m_dpBank = UNKNOWN_VAL;
-            m_apBank = UNKNOWN_VAL;
-            m_ap = UNKNOWN_VAL;
-            m_cswValid = false;
-        }
-        bool powerDownDebugPort()
-        {
-            return controlPower(true, false);
-        }
-        void setBitPatternSignalMode();
-        void setPacketSignalMode();
-        void restartStateMachineInSignalMode();
-        void sendRawLineReset();
-        void __no_inline_not_in_flash_func(writeAndOptionalReadPIO)(uint32_t* pWrite,
-                                                                    uint32_t writeLength,
-                                                                    uint32_t* pRead,
-                                                                    uint32_t readLength) __attribute__ ((optimize(3)));
-        bool readDPIDR();
-        bool checkAP(uint32_t ap);
-        uint32_t readTargetMemory(uint32_t address, void* pvBuffer, uint32_t bufferSize, TransferSize readSize);
-        uint32_t writeTargetMemory(uint32_t address, const void* pvBuffer, uint32_t bufferSize, TransferSize writeSize);
-        uint32_t readTargetMemoryInternal(uint32_t address, uint8_t* pDest, uint32_t bufferSize, TransferSize readSize);
-        uint32_t writeTargetMemoryInternal(uint32_t address, const uint8_t* pSrc, uint32_t bufferSize, TransferSize writeSize);
-        bool updateCSW(CSW_AddrIncs addrInc, TransferSize transferSize);
-        uint32_t calculateTransferCount(uint32_t startAddress, uint32_t expectedAddress);
+        // Methods to read/write the DP and AP registers directly.
+        // Return true if operation was successful and false otherwise.
         bool readDP(uint32_t address, uint32_t* pData)
         {
             return read(DP, address, pData);
@@ -406,17 +452,57 @@ class SWD
         {
             return write(AP, address, data);
         }
+
+        // UNDONE: If my current implementation works then this can be return void since it does nothing but
+        //         set a few members. It can even be inlined.
+        // Method to select the AP to which AP register reads/writes should be sent.
+        // Returns true if operation was successful and false otherwise.
+        bool selectAP(uint32_t ap);
+
+
+    protected:
+        // Unknown value.
+        static const uint32_t UNKNOWN_VAL = 0xFFFFFFFF;
+
+        void invalidateDpApState()
+        {
+            // Some of the remembered AP/DP state is no longer valid once a new target has been selected.
+            m_dpBank = UNKNOWN_VAL;
+            m_apBank = UNKNOWN_VAL;
+            m_ap = 0;
+            m_cswValid = false;
+        }
+        bool powerDownDebugPort()
+        {
+            return controlPower(true, false);
+        }
+        void setBitPatternSignalMode();
+        void setPacketSignalMode();
+        void restartStateMachineInSignalMode();
+        void sendRawLineReset();
+        void __no_inline_not_in_flash_func(writeAndOptionalReadPIO)(uint32_t* pWrite,
+                                                                    uint32_t writeLength,
+                                                                    uint32_t* pRead,
+                                                                    uint32_t readLength) __attribute__ ((optimize(3)));
+        bool readDPIDR();
+        bool checkAP(uint32_t ap);
+        uint32_t readTargetMemoryInternal(uint32_t address, uint8_t* pDest, uint32_t bufferSize, TransferSize readSize);
+        uint32_t writeTargetMemoryInternal(uint32_t address, const uint8_t* pSrc, uint32_t bufferSize, TransferSize writeSize);
+        bool updateCSW(CSW_AddrIncs addrInc, TransferSize transferSize);
+        uint32_t calculateTransferCount(uint32_t startAddress, uint32_t expectedAddress);
         bool read(SwdApOrDp APnDP, uint32_t address, uint32_t* pData);
         bool write(SwdApOrDp APnDP, uint32_t address, uint32_t data);
-        bool selectAP(uint8_t ap);
         bool selectBank(SwdApOrDp APnDP, uint32_t address);
         bool selectDpBank(uint32_t address);
         bool selectApBank(uint32_t address);
         bool updateSelect();
         uint32_t buildPacketRequest(SwdApOrDp APnDP, SwdReadOrWrite RnW, uint8_t address);
         uint32_t calculateParity(uint32_t bitsForParity);
-        DPv2Targets nextTargetId();
-        bool enableOverrunDetection(bool enable);
+        DPv2Targets currentTargetId();
+        void advanceTargetId(bool foundTarget);
+        bool initControlStatRegister();
+        bool setTurnAroundPeriod(uint32_t cycles);
+        bool initDpVersion3Registers();
         bool controlPower(bool systemPower = true, bool debugPower = true);
         bool findDebugMemAP();
         bool clearAbortErrorBits();
@@ -433,13 +519,20 @@ class SWD
         uint32_t        m_programOffset = UNKNOWN_VAL;
         uint32_t        m_swclkPin = 0;
         uint32_t        m_swdioPin = 0;
+        uint32_t        m_ap = 0;
         uint32_t        m_dpBank = UNKNOWN_VAL;
         uint32_t        m_apBank = UNKNOWN_VAL;
-        uint32_t        m_ap = UNKNOWN_VAL;
         uint32_t        m_dpidr = UNKNOWN_VAL;
+        uint32_t        m_dpVersion = 0;
+        uint32_t        m_apAddressSize = 8;
         uint32_t        m_csw = 0;
-        uint32_t        m_nextTargetToTry = 0;
-        uint32_t        m_nextTargetInstanceToTry = 0;
+
+        // Parts of TARGETSEL used when iterating through possible targets via findFirst/NextSwdTarget().
+        uint32_t        m_nextTargetDesignerContinuationCode = 0;
+        uint32_t        m_nextTargetDesignerIdCode = 0;
+        uint32_t        m_nextTargetPartNo = 0;
+        uint32_t        m_nextTargetInstance = 0;
+
         uint32_t        m_lineResetHighClocks = 51;
         uint32_t        m_lineResetLowClocks = 8;
         uint32_t        m_maxPowerMicroSeconds = 1000;
@@ -457,7 +550,6 @@ class SWD
         TransferError   m_lastReadWriteError = SWD_SUCCESS;
         SignalMode      m_signalMode = BIT_PATTERN;
         DPv2Targets     m_target = UNKNOWN;
-        EnumTargetState m_targetEnumState = PARTNO_DESIGNER;
         bool            m_cswValid = false;
         bool            m_apWritePending = false;
 };

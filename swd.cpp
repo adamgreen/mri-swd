@@ -1,4 +1,4 @@
-/* Copyright 2023 Adam Green (https://github.com/adamgreen/)
+/* Copyright 2024 Adam Green (https://github.com/adamgreen/)
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -261,7 +261,8 @@ void SWD::sendRawLineReset()
 
     // Unselects the current target.
     m_target = UNKNOWN;
-    m_dpidr = 0xFFFFFFFF;
+    m_dpidr = UNKNOWN_VAL;
+    m_dpVersion = 0;
 }
 
 void SWD::writeAndOptionalReadPIO(uint32_t* pWrite, uint32_t writeLength, uint32_t* pRead, uint32_t readLength)
@@ -433,66 +434,65 @@ bool SWD::searchForKnownSwdTarget()
 
 bool SWD::findFirstSwdTarget(DPv2Targets* pTarget)
 {
-    m_nextTargetToTry = 0;
-    // UNDONE: m_nextTargetToTry = 0x01000000 >> 1;
-    m_nextTargetInstanceToTry = 0;
-    m_targetEnumState = PARTNO_DESIGNER;
+    // UNDONE: Can start with continuation code of 9, used by Raspberry Pi to speed up search for testing purposes only.
+    m_nextTargetDesignerContinuationCode = 0;
+    m_nextTargetDesignerIdCode = 1;
+    m_nextTargetPartNo = 0;
+    m_nextTargetInstance = 0;
     return findNextSwdTarget(pTarget);
 }
 
 bool SWD::findNextSwdTarget(DPv2Targets* pTarget)
 {
-    // Only iterate through the valid TPARTNO and TDESIGNER values and assume that TINSTANCE of 0 will be valid.
-    const uint32_t maximumTargetToTry = (1 << 27) - 1;
-    if (m_nextTargetToTry > maximumTargetToTry)
-    {
-        return false;
-    }
-
     bool result = false;
     disableErrorLogging();
-    while (m_nextTargetToTry <= maximumTargetToTry && (result = selectSwdTarget(nextTargetId())) == false)
+    while (m_nextTargetDesignerContinuationCode <= 9 && (result = selectSwdTarget(currentTargetId())) == false)
     {
+        advanceTargetId(false);
     }
-    enableErrorLogging();
-
     if (result)
     {
-        *pTarget = m_target;
-        if (m_targetEnumState == PARTNO_DESIGNER)
-        {
-            m_targetEnumState = INSTANCE;
-            m_nextTargetInstanceToTry++;
-            // m_nextTargetToTry was already advanced to next, must decrement back to iterate over its instances.
-            m_nextTargetToTry--;
-        }
+        advanceTargetId(true);
     }
+    enableErrorLogging();
+    *pTarget = getTarget();
     return result;
 }
 
-SWD::DPv2Targets SWD::nextTargetId()
+SWD::DPv2Targets SWD::currentTargetId()
 {
-    uint32_t targetId = (m_nextTargetInstanceToTry << 28) | (m_nextTargetToTry << 1) | 1;
-    switch (m_targetEnumState)
-    {
-        case PARTNO_DESIGNER:
-            m_nextTargetToTry++;
-            break;
-        case INSTANCE:
-            m_nextTargetInstanceToTry++;
-            if (m_nextTargetInstanceToTry >= 16)
-            {
-                m_targetEnumState = DONE_INSTANCES;
-                m_nextTargetInstanceToTry = 0;
-                m_nextTargetToTry++;
-            }
-            break;
-        case DONE_INSTANCES:
-            m_targetEnumState = PARTNO_DESIGNER;
-            m_nextTargetToTry++;
-            break;
-    }
+    uint32_t targetId = (m_nextTargetInstance << 28) |
+                        (m_nextTargetPartNo << 12) |
+                        (m_nextTargetDesignerContinuationCode << 8) |
+                        (m_nextTargetDesignerIdCode << 1) | 1;
     return (DPv2Targets)targetId;
+}
+
+void SWD::advanceTargetId(bool foundTarget)
+{
+    // Increment instance if we are looking at more than the 0th instance for this particular designer/part_no.
+    if (foundTarget || m_nextTargetInstance > 0)
+    {
+        m_nextTargetInstance++;
+    }
+    if (m_nextTargetInstance > 0xF)
+    {
+        m_nextTargetInstance = 0;
+    }
+    if (m_nextTargetInstance == 0)
+    {
+        m_nextTargetPartNo++;
+    }
+    if (m_nextTargetPartNo > 0xFFFF)
+    {
+        m_nextTargetPartNo = 0;
+        m_nextTargetDesignerIdCode++;
+    }
+    if (m_nextTargetDesignerIdCode > 126)
+    {
+        m_nextTargetDesignerIdCode = 1;
+        m_nextTargetDesignerContinuationCode++;
+    }
 }
 
 bool SWD::initTargetForDebugging(SwdTarget& target)
@@ -503,10 +503,22 @@ bool SWD::initTargetForDebugging(SwdTarget& target)
         logError("Failed to call controlPower(true, true)");
         return false;
     }
-    result = enableOverrunDetection(true);
+    result = initControlStatRegister();
     if (!result)
     {
-        logError("Failed to call enableOverrunDetection(true)");
+        logError("Failed to call initControlStatRegister()");
+        return false;
+    }
+    result = setTurnAroundPeriod(1);
+    if (!result)
+    {
+        logError("Failed to call setTurnAroundPeriod(1)");
+        return false;
+    }
+    result = initDpVersion3Registers();
+    if (!result)
+    {
+        logError("Failed to call initDpVersion3Registers()");
         return false;
     }
     result = findDebugMemAP();
@@ -579,38 +591,114 @@ bool SWD::controlPower(bool systemPower /* = true */, bool debugPower /* = true 
     return true;
 }
 
-bool SWD::enableOverrunDetection(bool enable)
+bool SWD::initControlStatRegister()
 {
-    uint32_t overrunDetectMask = 1 << 0;
-    uint32_t overrunDetect = enable ? overrunDetectMask : 0;
-    uint32_t ctrlStat;
+    const uint32_t TRNCNT_Mask = 0xFFF << 12;
+    const uint32_t TRNMODE_Mask = 0x1 << 2;
+    const uint32_t ERRMODE_Mask = 0x1 << 24;
+    const uint32_t ORUNDETECT_Mask = 1 << 0;
+    const uint32_t bitsToClear = TRNCNT_Mask | TRNMODE_Mask | ERRMODE_Mask;
+    const uint32_t bitsToSet = ORUNDETECT_Mask;
 
+    // Read out the current CONFIG/STAT value.
+    uint32_t ctrlStat = 0;
     bool result = readDP(DP_CTRL_STAT, &ctrlStat);
     if (!result)
     {
         logError("Failed to call readDP(DP_CTRL_STAT, &ctrlStat)");
         return false;
     }
-    if ((ctrlStat & overrunDetectMask) == overrunDetect)
+
+    // Calculate the new CTRL/STAT register value by clearing and setting the necessary bits to clear the push operation
+    // control bits (TRNCNT & TRNMODE) and the ERRMODE bits and set the ORUNDETECT bit to enable it.
+    uint32_t newCtrlStat = (ctrlStat & ~bitsToClear) | bitsToSet;
+    if (newCtrlStat == ctrlStat)
     {
-        // Already enabled as requested.
+        // Already set as requested.
         return true;
     }
 
-    // Enable/disable overrun detection as requested.
-    ctrlStat &= ~overrunDetectMask;
-    ctrlStat |= overrunDetect;
-    result = writeDP(DP_CTRL_STAT, ctrlStat);
+    // Write out the updated CTRL/STAT register value.
+    result = writeDP(DP_CTRL_STAT, newCtrlStat);
     if (!result)
     {
-        logErrorF("Failed to call writeDP(DP_CTRL_STAT, 0x%lX)", ctrlStat);
+        logErrorF("Failed to call writeDP(DP_CTRL_STAT, 0x%lX)", newCtrlStat);
+    }
+    return result;
+}
+
+bool SWD::setTurnAroundPeriod(uint32_t cycles)
+{
+    assert ( cycles > 0 && cycles <= 4 );
+
+    // Read out the current DLCR value.
+    uint32_t dlcr = 0;
+    bool result = readDP(DP_DLCR, &dlcr);
+    if (!result)
+    {
+        logError("Failed to call readDP(DP_DLCR, &dlcr)");
+        return false;
+    }
+
+    // Set the TURNAROUND bits to desired cycle count.
+    const uint32_t TURNAROUND_Shift = 8;
+    const uint32_t TURNAROUND_Mask = 0x3 << TURNAROUND_Shift;
+    uint32_t period = cycles - 1;
+    dlcr = (dlcr & ~TURNAROUND_Mask) | (period << TURNAROUND_Shift);
+
+    // Write out the updated DLCR register value.
+    result = writeDP(DP_DLCR, dlcr);
+    if (!result)
+    {
+        logErrorF("Failed to call writeDP(DP_DLCR, 0x%lX)", dlcr);
+    }
+    return result;
+}
+
+bool SWD::initDpVersion3Registers()
+{
+    // Assume that AP SELECT address is 8-bits in length unless found to be different in DPIDR1.
+    m_apAddressSize = 8;
+
+    if (m_dpVersion < 3)
+    {
+        // Skip this step if DP version is less than 3.
+        return true;
+    }
+
+    // Check that AP address size is 32-bit or less and log an error if not but continue along anyway.
+    uint32_t dpidr1 = 0;
+    bool result = readDP(DP_DPIDR1, &dpidr1);
+    if (!result)
+    {
+        logError("Failed to call readDP(DP_DPIdR1, &dpidr1)");
+        return false;
+    }
+
+    uint32_t addressSize = dpidr1 & 0x7F;
+    if (addressSize > 32)
+    {
+        // Just log the error and continue execution.
+        logErrorF("DPIDR1.ASIZE of %lu was unexpectedly greater than 32", addressSize);
+    }
+
+    // The number of upper bits in the SELECT register which are used for selecting the current AP.
+    m_apAddressSize = addressSize - 12;
+
+    // Clear the upper 32-bits of the SELECT AP address (SELECT1).
+    result = writeDP(DP_SELECT1, 0x0);
+    if (!result)
+    {
+        logError("Failed to call writeDP(DP_SELECT1, 0x0)");
+        return false;
     }
     return result;
 }
 
 bool SWD::findDebugMemAP()
 {
-    for (uint32_t i = 0 ; i <= 0xFF ; i++)
+    uint32_t maxAddress = (1 << m_apAddressSize) - 1;
+    for (uint32_t i = 0 ; i <= maxAddress ; i++)
     {
         bool result = checkAP(i);
         if (result)
@@ -632,22 +720,31 @@ bool SWD::checkAP(uint32_t ap)
         return false;
     }
 
+    // APv1 and APv2 use different AP register banks.
+    uint32_t BASE = APv1_BASE;
+    uint32_t IDR = APv1_IDR;
+    if (m_dpVersion >= 3)
+    {
+        BASE = APv2_BASE;
+        IDR = APv2_IDR;
+    }
+
     // Read in the AP's BASE and IDR values to determine if this is a memory AP connected to a Cortex-M's debug
     // hardware.
     //
     // AP reads are pipelined so throwaway first read result. BASE value will be returned by next read.
     uint32_t dummy;
-    result = readAP(AP_BASE, &dummy);
+    result = readAP(BASE, &dummy);
     if (!result)
     {
-        logError("Failed to call readAP(AP_BASE, &dummy)");
+        logError("Failed to call readAP(BASE, &dummy)");
         return false;
     }
     uint32_t base = 0xBAADFEED;
-    result = readAP(AP_IDR, &base);
+    result = readAP(IDR, &base);
     if (!result)
     {
-        logError("Failed to call readAP(AP_IDR, &base)");
+        logError("Failed to call readAP(IDR, &base)");
         return false;
     }
     uint32_t id = 0xBAADFEED;
@@ -722,6 +819,15 @@ uint32_t SWD::readTargetMemoryInternal(uint32_t address, uint8_t* pDest, uint32_
     assert ( bufferSize % sizeInBytes == 0 );
     assert ( address % sizeInBytes == 0 );
 
+    // APv1 and APv2 use different AP register banks.
+    uint32_t TAR = APv1_TAR;
+    uint32_t DRW = APv1_DRW;
+    if (m_dpVersion >= 3)
+    {
+        TAR = APv2_TAR;
+        DRW = APv2_DRW;
+    }
+
     // Have the read stop at the next 1k limit and let the caller deal with starting the next 1k chunk.
     // This is done because the auto-incrementing on the TAR may wrap at 10-bits.
     uint32_t roundUp = (address + 1024) & ~(1024-1);
@@ -739,10 +845,10 @@ uint32_t SWD::readTargetMemoryInternal(uint32_t address, uint8_t* pDest, uint32_
         return 0;
     }
     // Set the starting address in the TAR.
-    result = writeAP(AP_TAR, address);
+    result = writeAP(TAR, address);
     if (!result)
     {
-        logErrorF("Failed to call writeAP(AP_TAR, 0x%08lx)", address);
+        logErrorF("Failed to call writeAP(TAR, 0x%08lx)", address);
         return 0;
     }
 
@@ -754,7 +860,7 @@ uint32_t SWD::readTargetMemoryInternal(uint32_t address, uint8_t* pDest, uint32_
         uint32_t curr;
         if (dummyRead || bytesRead < lastRead)
         {
-            result = readAP(AP_DRW, &curr);
+            result = readAP(DRW, &curr);
         }
         else
         {
@@ -850,6 +956,15 @@ uint32_t SWD::writeTargetMemoryInternal(uint32_t address, const uint8_t* pSrc, u
     assert ( bufferSize % sizeInBytes == 0 );
     assert ( address % sizeInBytes == 0 );
 
+    // APv1 and APv2 use different AP register banks.
+    uint32_t TAR = APv1_TAR;
+    uint32_t DRW = APv1_DRW;
+    if (m_dpVersion >= 3)
+    {
+        TAR = APv2_TAR;
+        DRW = APv2_DRW;
+    }
+
     // Have the write stop at the next 1k limit and let the caller deal with starting the next 1k chunk.
     // This is done because the auto-incrementing on the TAR may wrap at 10-bits.
     uint32_t roundUp = (address + 1024) & ~(1024-1);
@@ -867,10 +982,10 @@ uint32_t SWD::writeTargetMemoryInternal(uint32_t address, const uint8_t* pSrc, u
         return 0;
     }
     // Set the starting address in the TAR.
-    result = writeAP(AP_TAR, address);
+    result = writeAP(TAR, address);
     if (!result)
     {
-        logErrorF("Failed to call writeAP(AP_TAR, 0x%08lX)", address);
+        logErrorF("Failed to call writeAP(TAR, 0x%08lX)", address);
         return 0;
     }
 
@@ -893,13 +1008,13 @@ uint32_t SWD::writeTargetMemoryInternal(uint32_t address, const uint8_t* pSrc, u
             default:
                 return 0;
         }
-        result = writeAP(AP_DRW, drwVal);
+        result = writeAP(DRW, drwVal);
         if (!result)
         {
             if (m_lastReadWriteError != SWD_FAULT_ERROR)
             {
                 // Silencing errors on access violations and only reporting higher up the call stack.
-                logErrorF("Failed to call writeAP(AP_DRW, 0x%lX)", drwVal);
+                logErrorF("Failed to call writeAP(DRW, 0x%lX)", drwVal);
             }
             return calculateTransferCount(startAddress, address);
         }
@@ -928,11 +1043,26 @@ bool SWD::updateCSW(CSW_AddrIncs addrInc, TransferSize transferSize)
             return false;
     }
 
+    // APv1 and APv2 use different AP register banks.
+    uint32_t CSW = APv1_CSW;
+    if (m_dpVersion >= 3)
+    {
+        CSW = APv2_CSW;
+    }
+
+    // Bitmasks for fields to be set in the CSW register.
     const uint32_t addrIncMask = 3 << 4;
     const uint32_t sizeMask = 7 << 0;
-    const uint32_t addrIncAndSizeMask = addrIncMask | sizeMask;
-    uint32_t bitsToUpdate = (addrInc << 4) | cswSize;
-    if (m_cswValid && (m_csw & addrIncAndSizeMask) == bitsToUpdate)
+    const uint32_t protMask = 0x7F << 24;
+    const uint32_t protAddrIncAndSizeMask = protMask | addrIncMask | sizeMask;
+
+    // PROT value of 0x23 means:
+    //      Requester ID for the AHB-AP
+    //      Data Transfer
+    //      Privileged Transfer
+    const uint32_t protValue = 0x23;
+    uint32_t       bitsToUpdate = (protValue << 24) | (addrInc << 4) | cswSize;
+    if (m_cswValid && (m_csw & protAddrIncAndSizeMask) == bitsToUpdate)
     {
         // The CSW bits are already set to the needed value.
         return true;
@@ -946,10 +1076,10 @@ bool SWD::updateCSW(CSW_AddrIncs addrInc, TransferSize transferSize)
     else
     {
         uint32_t dummy;
-        bool result = readAP(AP_CSW, &dummy);
+        bool result = readAP(CSW, &dummy);
         if (!result)
         {
-            logError("Failed to call readAP(AP_CSW, &dummy)");
+            logError("Failed to call readAP(CSW, &dummy)");
             return false;
         }
         result = readDP(DP_RDBUFF, &csw);
@@ -959,11 +1089,11 @@ bool SWD::updateCSW(CSW_AddrIncs addrInc, TransferSize transferSize)
             return false;
         }
     }
-    csw = (csw & ~addrIncAndSizeMask) | bitsToUpdate;
-    bool result = writeAP(AP_CSW, csw);
+    csw = (csw & ~protAddrIncAndSizeMask) | bitsToUpdate;
+    bool result = writeAP(CSW, csw);
     if (!result)
     {
-        logErrorF("Failed to call writeAP(AP_CSW, 0x%08lX)", csw);
+        logErrorF("Failed to call writeAP(CSW, 0x%08lX)", csw);
         return false;
     }
     // UNDONE: How do I make sure that this AP write has completed?
@@ -975,11 +1105,18 @@ bool SWD::updateCSW(CSW_AddrIncs addrInc, TransferSize transferSize)
 
 uint32_t SWD::calculateTransferCount(uint32_t startAddress, uint32_t expectedAddress)
 {
+    // APv1 and APv2 use different AP register banks.
+    uint32_t TAR = APv1_TAR;
+    if (m_dpVersion >= 3)
+    {
+        TAR = APv2_TAR;
+    }
+
     uint32_t dummy;
-    bool result = readAP(AP_TAR, &dummy);
+    bool result = readAP(TAR, &dummy);
     if (!result)
     {
-        logError("Failed to call readAP(AP_TAR, &dummy)");
+        logError("Failed to call readAP(TAR, &dummy)");
         return 0;
     }
     uint32_t tar = 0;
@@ -1080,9 +1217,13 @@ bool SWD::readDPIDR()
     if (!result)
     {
         logError("Failed to call readDP(DP_DPIDR, &m_dpidr)");
-        m_dpidr = 0xFFFFFFFF;
+        m_dpidr = UNKNOWN_VAL;
+        m_dpVersion = 0;
         return false;
     }
+
+    // Extract the DP version as versions >= 3 function a bit differently (including AP upgrade to version 2).
+    m_dpVersion = (m_dpidr >> 12) & 0xF;
 
     // Clear any sticky error bits from previous interactions with this target.
     clearAbortErrorBits();
@@ -1399,9 +1540,10 @@ bool SWD::selectDpBank(uint32_t address)
 {
     uint32_t registerIndex = address & 0xF;
     uint32_t registerBank = (address >> 4) & 0xF;
-    if (registerIndex != 0x4 || m_dpBank == registerBank)
+    if (registerIndex == 0x8 || registerIndex == 0xC || (m_dpVersion < 3 && registerIndex == 0x0) || m_dpBank == registerBank)
     {
-        // DP bank only matters for register 4.
+        // DP bank only matters for register 4 for DP versions less than 3 and for registers 4 AND 0 in subsequent DP
+        // versions.
         // Only need to set the bank if not already set.
         return true;
     }
@@ -1419,6 +1561,12 @@ bool SWD::selectDpBank(uint32_t address)
 bool SWD::selectApBank(uint32_t address)
 {
     uint32_t registerBank = (address >> 4) & 0xF;
+    if (m_dpVersion >= 3)
+    {
+        // AP bank is 8-bit in DPv3/APv2.
+        registerBank = (address >> 4) & 0xFF;
+    }
+
     if (m_apBank == registerBank)
     {
         // Only need to set the bank if not already set.
@@ -1435,31 +1583,20 @@ bool SWD::selectApBank(uint32_t address)
     return true;
 }
 
-bool SWD::selectAP(uint8_t ap)
+bool SWD::selectAP(uint32_t ap)
 {
-    if (m_ap == ap)
-    {
-        // Just return if this AP has already been selected.
-        return true;
-    }
-
+    // Don't call updateSelect() at this time and wait for the next DP or AP register read/write. Setting m_dpBank and
+    // m_apBank to UNKNOWN_VAL will make sure that updateSelect() gets called on that next read/write.
+    m_dpBank = UNKNOWN_VAL;
+    m_apBank = UNKNOWN_VAL;
     m_ap = ap;
-    bool result = updateSelect();
-    if (!result)
-    {
-        logError("Failed call to updateSelect()");
-        return false;
-    }
+
     return true;
 }
 
 bool SWD::updateSelect()
 {
     // Give unknown AP/DP indices valid values before setting into SELECT register.
-    if (m_ap == UNKNOWN_VAL)
-    {
-        m_ap = 0;
-    }
     if (m_dpBank == UNKNOWN_VAL)
     {
         m_dpBank = 0;
@@ -1468,19 +1605,25 @@ bool SWD::updateSelect()
     {
         m_apBank = 0;
     }
-    assert ( m_ap <= 0xFF );
     assert ( m_dpBank <= 0xF );
-    assert ( m_apBank <= 0xF );
+    assert ( (m_dpVersion < 3 && m_ap <= 0xFF)    || (m_dpVersion >= 3 && m_ap <= 0xFFFFF) );
+    assert ( (m_dpVersion < 3 && m_apBank <= 0xF) || (m_dpVersion >= 3 && m_apBank <= 0xFF) );
 
-    uint32_t apSel = m_ap & 0xFF;
-    uint32_t apBankSel = m_apBank & 0xF;
     uint32_t dpBankSel = m_dpBank & 0xF;
+    uint32_t apBankSel = m_apBank & 0xF;
+    uint32_t apSel = m_ap & 0xFF;
     uint32_t selectValue = (apSel << 24) | (apBankSel << 4) | dpBankSel;
+    if (m_dpVersion >= 3)
+    {
+        // The SELECT register has a different layout in DPv3 to allow for more AP register addresses.
+        apBankSel = m_apBank & 0xFF;
+        apSel = m_ap & 0xFFFFF;
+        selectValue = (apSel << 12) | (apBankSel << 4) | dpBankSel;
+    }
     bool result = writeDP(DP_SELECT, selectValue);
     if (!result)
     {
         logErrorF("Failed call to writeDP(DP_SELECT, 0x%lX)", selectValue);
-        m_ap = UNKNOWN_VAL;
         m_dpBank = UNKNOWN_VAL;
         m_apBank = UNKNOWN_VAL;
         return false;
@@ -1630,7 +1773,14 @@ void SwdTarget::determineCpuType()
                 0x000000C8, 0x000000B4, 0x0000000B, 0x00000000
             },
             SWD::CPU_CORTEX_M7
-        }
+        },
+        {
+            {
+                0x00000004, 0x00000000, 0x00000000, 0x00000000,
+                0x000000C9, 0x000000B4, 0x0000000B, 0x00000000
+            },
+            SWD::CPU_CORTEX_M33
+        },
     };
     m_cpu = SWD::CPU_UNKNOWN;
     if (0 == memcmp(&m_peripheralComponentIDs[8], &armComponentID[0], sizeof(armComponentID)))
@@ -1671,7 +1821,11 @@ void SwdTarget::determineCpuType()
         {
             0x410C270,
             SWD::CPU_CORTEX_M7
-        }
+        },
+        {
+            0x411FD210,
+            SWD::CPU_CORTEX_M33
+        },
     };
     const uint32_t CPUID_REVISION_MASK = 0xF;
     uint32_t cpuID = m_cpuID & ~CPUID_REVISION_MASK;
@@ -1699,6 +1853,8 @@ const char* SwdTarget::getCpuTypeString(SWD::CpuTypes cpu)
             return "Cortex-M4";
         case SWD::CPU_CORTEX_M7:
             return "Cortex-M7";
+        case SWD::CPU_CORTEX_M33:
+            return "Cortex-M33";
         default:
             return "Unknown";
     }
