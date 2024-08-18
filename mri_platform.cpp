@@ -1,4 +1,4 @@
-/* Copyright 2023 Adam Green (https://github.com/adamgreen/)
+/* Copyright 2024 Adam Green (https://github.com/adamgreen/)
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -244,6 +244,7 @@ static bool initNetwork()
 
 static void innerDebuggerLoop()
 {
+    bool isFirstHalt = true;
     bool hasCpuHalted = false;
     while (g_isSwdConnected && g_isNetworkConnected)
     {
@@ -260,6 +261,12 @@ static void innerDebuggerLoop()
             g_wasStopFromGDB = true;
             g_haltOnAttach = false;
             g_cores.requestCoresToHalt();
+            if (isFirstHalt)
+            {
+                // Any active watchpoints or breakpoints would be from a previous GDB connection.
+                g_cores.clearBreakpointsAndWatchpoints();
+            }
+            isFirstHalt = false;
         }
 
         // Query current state of CPU.

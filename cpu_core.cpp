@@ -59,8 +59,8 @@ bool CpuCore::initSWD(SWD* pSwdBus)
 void CpuCore::initForDebugging()
 {
     enableDWTandVectorCatches();
-    initDWT();
-    initFPB();
+    enableFPB();
+    logBreakpointAndWatchpointCounts();
 }
 
 void CpuCore::enableDWTandVectorCatches()
@@ -165,84 +165,43 @@ uint32_t CpuCore::writeMemory(uint32_t address, const void* pvBuffer, uint32_t b
     return bytesWritten;
 }
 
-void CpuCore::initDWT()
+void CpuCore::enableFPB()
 {
-    uint32_t watchpointCount = clearDWTComparators();
-    logInfoF("Core%lu supports %lu hardware watchpoints.", m_coreId, watchpointCount);
+    //  This Key field must be set to 1 when writing or the write will be ignored.
+    const uint32_t FP_CTRL_KEY = 1 << 1;
+    //  Enable bit for the FPB.  Set to 1 to enable FPB.
+    const uint32_t FP_CTRL_ENABLE = 1;
+
+    uint32_t FP_CTRL_Value = readFPControlRegister();
+    FP_CTRL_Value |= (FP_CTRL_KEY | FP_CTRL_ENABLE);
+    writeFPControlRegister(FP_CTRL_Value);
 }
 
-uint32_t CpuCore::clearDWTComparators()
+uint32_t CpuCore::readFPControlRegister()
 {
-    uint32_t DWT_COMP_Address = 0xE0001020;
-    uint32_t comparatorCount = getDWTComparatorCount();
-    for (uint32_t i = 0 ; i < comparatorCount ; i++)
+    uint32_t FP_CTRL_Value = 0;
+    if (readMemory(FP_CTRL_Address, &FP_CTRL_Value, sizeof(FP_CTRL_Value), SWD::TRANSFER_32BIT) != sizeof(FP_CTRL_Value))
     {
-        clearDWTComparator(DWT_COMP_Address);
-        DWT_COMP_Address += sizeof(DWT_COMP_Type);
-    }
-    return comparatorCount;
-}
-
-uint32_t CpuCore::getDWTComparatorCount()
-{
-    uint32_t DWT_CTRL_Address = 0xE0001000;
-    uint32_t DWT_CTRL_Value = 0;
-
-    if (readMemory(DWT_CTRL_Address, &DWT_CTRL_Value, sizeof(DWT_CTRL_Value), SWD::TRANSFER_32BIT) != sizeof(DWT_CTRL_Value))
-    {
-        logErrorF("Core%lu: Failed to read DWT_CTRL register.", m_coreId);
+        logErrorF("Core%lu: Failed to read FP_CTRL register.", m_coreId);
         return 0;
     }
-    return (DWT_CTRL_Value >> 28) & 0xF;
+    return FP_CTRL_Value;
 }
 
-void CpuCore::clearDWTComparator(uint32_t comparatorAddress)
+void CpuCore::writeFPControlRegister(uint32_t FP_CTRL_Value)
 {
-    //  Matched.  Read-only.  Set to 1 to indicate that this comparator has been matched.  Cleared on read.
-    const uint32_t DWT_COMP_FUNCTION_DATAVMATCH_Bit = 1 << 8;
-    //  Cycle Count Match.  Set to 1 for enabling cycle count match and 0 otherwise.  Only valid on comparator 0.
-    const uint32_t DWT_COMP_FUNCTION_CYCMATCH_Bit = 1 << 7;
-    //  Enable Data Trace Address offset packets.  0 to disable.
-    const uint32_t DWT_COMP_FUNCTION_EMITRANGE_Bit = 1 << 5;
-    DWT_COMP_Type dwtComp;
-
-    if (readMemory(comparatorAddress, &dwtComp, 3*sizeof(uint32_t), SWD::TRANSFER_32BIT) != 3*sizeof(uint32_t))
+    if (writeMemory(FP_CTRL_Address, &FP_CTRL_Value, sizeof(FP_CTRL_Value), SWD::TRANSFER_32BIT) != sizeof(FP_CTRL_Value))
     {
-        logErrorF("Core%lu: Failed to read DWT_COMP/DWT_MASK/DWT_FUNCTION registers for clearing.", m_coreId);
-    }
-
-    dwtComp.comp = 0;
-    dwtComp.mask = 0;
-    dwtComp.function &= ~(DWT_COMP_FUNCTION_DATAVMATCH_Bit |
-                          DWT_COMP_FUNCTION_CYCMATCH_Bit |
-                          DWT_COMP_FUNCTION_EMITRANGE_Bit |
-                          DWT_COMP_FUNCTION_FUNCTION_Mask);
-
-    if (writeMemory(comparatorAddress, &dwtComp, 3*sizeof(uint32_t), SWD::TRANSFER_32BIT) != 3*sizeof(uint32_t))
-    {
-        logErrorF("Core%lu: Failed to write DWT_COMP/DWT_MASK/DWT_FUNCTION registers for clearing.", m_coreId);
+        logErrorF("Core%lu: Failed to write FP_CTRL register.", m_coreId);
     }
 }
 
-void CpuCore::initFPB()
+void CpuCore::logBreakpointAndWatchpointCounts()
 {
-    uint32_t breakpointCount = clearFPBComparators();
+    uint32_t breakpointCount = getFPBCodeComparatorCount();
+    uint32_t watchpointCount = getDWTComparatorCount();
     logInfoF("Core%lu supports %lu hardware breakpoints.", m_coreId, breakpointCount);
-    enableFPB();
-}
-
-uint32_t CpuCore::clearFPBComparators()
-{
-    uint32_t currentComparatorAddress = 0xE0002008;
-    uint32_t codeComparatorCount = getFPBCodeComparatorCount();
-    uint32_t literalComparatorCount = getFPBLiteralComparatorCount();
-    uint32_t totalComparatorCount = codeComparatorCount + literalComparatorCount;
-    for (uint32_t i = 0 ; i < totalComparatorCount ; i++)
-    {
-        clearFPBComparator(currentComparatorAddress);
-        currentComparatorAddress += sizeof(uint32_t);
-    }
-    return codeComparatorCount;
+    logInfoF("Core%lu supports %lu hardware watchpoints.", m_coreId, watchpointCount);
 }
 
 uint32_t CpuCore::getFPBCodeComparatorCount()
@@ -259,54 +218,17 @@ uint32_t CpuCore::getFPBCodeComparatorCount()
             ((FP_CTRL_Value & FP_CTRL_NUM_CODE_LSB_Mask) >> FP_CTRL_NUM_CODE_LSB_Shift));
 }
 
-uint32_t CpuCore::readFPControlRegister()
+uint32_t CpuCore::getDWTComparatorCount()
 {
-    uint32_t FP_CTRL_Value = 0;
-    if (readMemory(FP_CTRL_Address, &FP_CTRL_Value, sizeof(FP_CTRL_Value), SWD::TRANSFER_32BIT) != sizeof(FP_CTRL_Value))
+    uint32_t DWT_CTRL_Address = 0xE0001000;
+    uint32_t DWT_CTRL_Value = 0;
+
+    if (readMemory(DWT_CTRL_Address, &DWT_CTRL_Value, sizeof(DWT_CTRL_Value), SWD::TRANSFER_32BIT) != sizeof(DWT_CTRL_Value))
     {
-        logErrorF("Core%lu: Failed to read FP_CTRL register.", m_coreId);
+        logErrorF("Core%lu: Failed to read DWT_CTRL register.", m_coreId);
         return 0;
     }
-    return FP_CTRL_Value;
-}
-
-uint32_t CpuCore::getFPBLiteralComparatorCount()
-{
-    //  Number of instruction literal address comparators.  Read only
-    const uint32_t FP_CTRL_NUM_LIT_Shift = 8;
-    const uint32_t FP_CTRL_NUM_LIT_Mask = 0xF << FP_CTRL_NUM_LIT_Shift;
-    uint32_t FP_CTRL_Value = readFPControlRegister();
-
-    return ((FP_CTRL_Value & FP_CTRL_NUM_LIT_Mask) >> FP_CTRL_NUM_LIT_Shift);
-}
-
-void CpuCore::clearFPBComparator(uint32_t comparatorAddress)
-{
-    uint32_t comparatorValue = 0;
-    if (writeMemory(comparatorAddress, &comparatorValue, sizeof(comparatorValue), SWD::TRANSFER_32BIT) != sizeof(comparatorValue))
-    {
-        logErrorF("Core%lu: Failed to write to FP comparator register.", m_coreId);
-    }
-}
-
-void CpuCore::enableFPB()
-{
-    //  This Key field must be set to 1 when writing or the write will be ignored.
-    const uint32_t FP_CTRL_KEY = 1 << 1;
-    //  Enable bit for the FPB.  Set to 1 to enable FPB.
-    const uint32_t FP_CTRL_ENABLE = 1;
-
-    uint32_t FP_CTRL_Value = readFPControlRegister();
-    FP_CTRL_Value |= (FP_CTRL_KEY | FP_CTRL_ENABLE);
-    writeFPControlRegister(FP_CTRL_Value);
-}
-
-void CpuCore::writeFPControlRegister(uint32_t FP_CTRL_Value)
-{
-    if (writeMemory(FP_CTRL_Address, &FP_CTRL_Value, sizeof(FP_CTRL_Value), SWD::TRANSFER_32BIT) != sizeof(FP_CTRL_Value))
-    {
-        logErrorF("Core%lu: Failed to write FP_CTRL register.", m_coreId);
-    }
+    return (DWT_CTRL_Value >> 28) & 0xF;
 }
 
 bool CpuCore::enableHaltDebugging(uint32_t timeout_ms)
@@ -948,6 +870,44 @@ void CpuCore::configureSingleSteppingBitsInDHCSR(bool enableSingleStepping)
     }
 }
 
+void CpuCore::clearBreakpoints()
+{
+    clearFPBComparators();
+}
+
+uint32_t CpuCore::clearFPBComparators()
+{
+    uint32_t currentComparatorAddress = 0xE0002008;
+    uint32_t codeComparatorCount = getFPBCodeComparatorCount();
+    uint32_t literalComparatorCount = getFPBLiteralComparatorCount();
+    uint32_t totalComparatorCount = codeComparatorCount + literalComparatorCount;
+    for (uint32_t i = 0 ; i < totalComparatorCount ; i++)
+    {
+        clearFPBComparator(currentComparatorAddress);
+        currentComparatorAddress += sizeof(uint32_t);
+    }
+    return codeComparatorCount;
+}
+
+uint32_t CpuCore::getFPBLiteralComparatorCount()
+{
+    //  Number of instruction literal address comparators.  Read only
+    const uint32_t FP_CTRL_NUM_LIT_Shift = 8;
+    const uint32_t FP_CTRL_NUM_LIT_Mask = 0xF << FP_CTRL_NUM_LIT_Shift;
+    uint32_t FP_CTRL_Value = readFPControlRegister();
+
+    return ((FP_CTRL_Value & FP_CTRL_NUM_LIT_Mask) >> FP_CTRL_NUM_LIT_Shift);
+}
+
+void CpuCore::clearFPBComparator(uint32_t comparatorAddress)
+{
+    uint32_t comparatorValue = 0;
+    if (writeMemory(comparatorAddress, &comparatorValue, sizeof(comparatorValue), SWD::TRANSFER_32BIT) != sizeof(comparatorValue))
+    {
+        logErrorF("Core%lu: Failed to write to FP comparator register.", m_coreId);
+    }
+}
+
 uint32_t CpuCore::setBreakpoint(uint32_t breakpointAddress, bool is32BitInstruction)
 {
     uint32_t existingFPBBreakpoint = findFPBBreakpointComparator(breakpointAddress, is32BitInstruction);
@@ -1171,6 +1131,51 @@ uint32_t CpuCore::clearBreakpoint(uint32_t breakpointAddress, bool is32BitInstru
     }
 
     return existingFPBBreakpoint;
+}
+
+void CpuCore::clearWatchpoints()
+{
+    clearDWTComparators();
+}
+
+uint32_t CpuCore::clearDWTComparators()
+{
+    uint32_t DWT_COMP_Address = 0xE0001020;
+    uint32_t comparatorCount = getDWTComparatorCount();
+    for (uint32_t i = 0 ; i < comparatorCount ; i++)
+    {
+        clearDWTComparator(DWT_COMP_Address);
+        DWT_COMP_Address += sizeof(DWT_COMP_Type);
+    }
+    return comparatorCount;
+}
+
+void CpuCore::clearDWTComparator(uint32_t comparatorAddress)
+{
+    //  Matched.  Read-only.  Set to 1 to indicate that this comparator has been matched.  Cleared on read.
+    const uint32_t DWT_COMP_FUNCTION_DATAVMATCH_Bit = 1 << 8;
+    //  Cycle Count Match.  Set to 1 for enabling cycle count match and 0 otherwise.  Only valid on comparator 0.
+    const uint32_t DWT_COMP_FUNCTION_CYCMATCH_Bit = 1 << 7;
+    //  Enable Data Trace Address offset packets.  0 to disable.
+    const uint32_t DWT_COMP_FUNCTION_EMITRANGE_Bit = 1 << 5;
+    DWT_COMP_Type dwtComp;
+
+    if (readMemory(comparatorAddress, &dwtComp, 3*sizeof(uint32_t), SWD::TRANSFER_32BIT) != 3*sizeof(uint32_t))
+    {
+        logErrorF("Core%lu: Failed to read DWT_COMP/DWT_MASK/DWT_FUNCTION registers for clearing.", m_coreId);
+    }
+
+    dwtComp.comp = 0;
+    dwtComp.mask = 0;
+    dwtComp.function &= ~(DWT_COMP_FUNCTION_DATAVMATCH_Bit |
+                          DWT_COMP_FUNCTION_CYCMATCH_Bit |
+                          DWT_COMP_FUNCTION_EMITRANGE_Bit |
+                          DWT_COMP_FUNCTION_FUNCTION_Mask);
+
+    if (writeMemory(comparatorAddress, &dwtComp, 3*sizeof(uint32_t), SWD::TRANSFER_32BIT) != 3*sizeof(uint32_t))
+    {
+        logErrorF("Core%lu: Failed to write DWT_COMP/DWT_MASK/DWT_FUNCTION registers for clearing.", m_coreId);
+    }
 }
 
 void CpuCore::setWatchpoint(uintmri_t address, uintmri_t size,  PlatformWatchpointType type)
@@ -2404,6 +2409,17 @@ void CpuCores::enableResetVectorCatch()
     for (size_t i = 0 ; i < m_coreCount ; i++)
     {
         m_cores[i].enableResetVectorCatch();
+    }
+}
+
+
+void CpuCores::clearBreakpointsAndWatchpoints()
+{
+    assert ( m_coreCount > 0 && m_coreCount <= count_of(m_cores) );
+    for (size_t i = 0 ; i < m_coreCount ; i++)
+    {
+        m_cores[i].clearBreakpoints();
+        m_cores[i].clearWatchpoints();
     }
 }
 

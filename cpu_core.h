@@ -195,6 +195,8 @@ public:
         return !!(DHCSR_Val & DHCSR_C_STEP_Bit);
     }
 
+    // Clears any active breakpoints from a previous GDB connection.
+    void clearBreakpoints();
 
     // Set a breakpoint at the requested address (16 or 32-bit instruction). Returns the 32-bit address of the
     // comparator register used for this breakpoint, 0 if no free ones were found. If the requested breakpoint is
@@ -205,6 +207,9 @@ public:
     // comparator register just cleared for this breakpoint, 0 if no matching breakpoint for the address was found.
     uint32_t clearBreakpoint(uint32_t breakpointAddress, bool is32BitInstruction);
 
+
+    // Clears any active watchpoints from a previous GDB connection.
+    void clearWatchpoints();
 
     // Set a watchpoint (read and/or write) at the specified memory range.
     // Can throw invalidArgumentException if the address, size, or type aren't supported for Cortex-M devices.
@@ -272,18 +277,12 @@ protected:
     void enableDWTandVectorCatches();
     bool setOrClearBitsInDEMCR(uint32_t bitMask, bool set);
     void handleUnrecoverableSwdError();
-    void initDWT();
-    uint32_t clearDWTComparators();
-    uint32_t getDWTComparatorCount();
-    void clearDWTComparator(uint32_t comparatorAddress);
-    void initFPB();
-    uint32_t clearFPBComparators();
-    uint32_t getFPBCodeComparatorCount();
-    uint32_t readFPControlRegister();
-    uint32_t getFPBLiteralComparatorCount();
-    void clearFPBComparator(uint32_t comparatorAddress);
     void enableFPB();
+    uint32_t readFPControlRegister();
     void writeFPControlRegister(uint32_t FP_CTRL_Value);
+    void logBreakpointAndWatchpointCounts();
+    uint32_t getFPBCodeComparatorCount();
+    uint32_t getDWTComparatorCount();
 
     bool enableHaltDebugging(uint32_t timeout_ms);
     bool readDHCSRWithRetry(uint32_t* pValue, uint32_t timeout_ms);
@@ -306,6 +305,9 @@ protected:
     bool clearHaltBit();
     void configureSingleSteppingBitsInDHCSR(bool enableSingleStepping);
 
+    uint32_t clearFPBComparators();
+    uint32_t getFPBLiteralComparatorCount();
+    void clearFPBComparator(uint32_t comparatorAddress);
     uint32_t findFPBBreakpointComparator(uint32_t breakpointAddress, bool is32BitInstruction);
     uint32_t calculateFPBComparatorValue(uint32_t breakpointAddress, bool is32BitInstruction);
     bool isBreakpointAddressInvalid(uint32_t breakpointAddress);
@@ -322,6 +324,8 @@ protected:
     static bool isFPBComparatorEnabledRevision1(uint32_t comparator);
     static bool isFPBComparatorEnabledRevision2(uint32_t comparator);
 
+    uint32_t clearDWTComparators();
+    void clearDWTComparator(uint32_t comparatorAddress);
     static uint32_t convertWatchpointTypeToCortexMType(PlatformWatchpointType type);
     static bool isValidDWTComparatorSetting(uint32_t watchpointAddress,
                                             uint32_t watchpointSize,
@@ -666,6 +670,10 @@ public:
         }
         return false;
     }
+
+
+    // Clears any active breakpoints and watchpoints on all of the cores from a previous GDB connection.
+    void clearBreakpointsAndWatchpoints();
 
 
     // Set a breakpoint at the requested address (16 or 32-bit instruction). Returns the 32-bit address of the
