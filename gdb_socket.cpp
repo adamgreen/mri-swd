@@ -75,6 +75,11 @@ err_t GDBSocket::onAccept(tcp_pcb* pClientPCB, err_t error)
         logErrorF("was called with error=%d & pClientPCB=0x%08X", error, pClientPCB);
         return ERR_VAL;
     }
+    if (m_pClientPCB != NULL)
+    {
+        logError("Can't accept a second connection when GDB is already connected.");
+        return ERR_MEM;
+    }
     logInfo("GDB connected.");
 
     m_pClientPCB = pClientPCB;
