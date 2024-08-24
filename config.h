@@ -75,7 +75,7 @@
 
 // socket_server.cpp logging
 #define LOGGING_SOCKET_SERVER_ERROR_ENABLED 1
-#define LOGGING_SOCKET_SERVER_DEBUG_ENABLED 1
+#define LOGGING_SOCKET_SERVER_DEBUG_ENABLED 0
 
 // gdb_socket.cpp logging
 #define LOGGING_GDB_SOCKET_ERROR_ENABLED 1
@@ -83,7 +83,7 @@
 
 // uart_wifi_bridge.cpp logging
 #define LOGGING_UART_WIFI_BRIDGE_ERROR_ENABLED 1
-#define LOGGING_UART_WIFI_BRIDGE_DEBUG_ENABLED 1
+#define LOGGING_UART_WIFI_BRIDGE_DEBUG_ENABLED 0
 
 // Modules under the devices/ directory
 #define LOGGING_DEVICE_ERROR_ENABLED 1
