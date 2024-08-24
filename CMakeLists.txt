@@ -65,7 +65,9 @@ pico_generate_pio_header(mri-swd ${CMAKE_CURRENT_LIST_DIR}/swd.pio)
 target_sources(mri-swd PRIVATE
     main.cpp
     swd.cpp
+    socket_server.cpp
     gdb_socket.cpp
+    uart_wifi_bridge.cpp
     mri_platform.cpp
     cpu_core.cpp
 )

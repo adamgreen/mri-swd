@@ -44,6 +44,7 @@
   * Only used to expose the second RP2040 core at this point in time
   * **No RTOS** support
 * GDB connection over WiFi on port 2331
+* Target UART<->WiFi Bridging on port 2332
 * Semihosting
 
 ## Unsupported Features
@@ -180,6 +181,29 @@ Transfer rate: 47 KB/sec, 5154 bytes/write.
 ```
 
 
+## UART<->WiFi Bridging
+The target's UART pins can be connected to the `mri-swd` debugger as shown in this table:
+| Pico W Debugger | Pico Target |
+|-----------------|-------------|
+| GPIO 0          | UART Rx     |
+| GPIO 1          | UART Tx     |
+| Gnd             | Gnd         |
+
+If those connections are made then the target can configure its UART for **230400-8-N-1** communication and this UART will then be accessible from the PC host connected to `mri-swd` on TCP/IP port **2332** (can be changed in config.h). The PC host can then use a simple TCP/IP terminal emulator such as `telnet` to communicate with the target's UART over WiFi on this port:
+```console
+~$ telnet -N 10.0.0.201 2332
+Trying 10.0.0.201...
+Connected to 10.0.0.201.
+Escape character is '^]'.
+Send this data to target over UART and have it loop it back to the PC!
+Send this data to target over UART and have it loop it back to the PC!
+^]
+telnet> quit
+Connection closed.
+```
+**Note:** The IP address to be used with `telnet` above should match the IP address you use for connecting GDB to the same `mri-swd` debug probe.
+
+
 ## Firmware Configuration
 In the root folder can be found  a [config.h](config.h) which can be used to customize the `mri-swd` firmware. This header file allows configuration of things such as:
 * GPIO pins to be used for connections to the target.
@@ -210,12 +234,12 @@ I have designed a PCB that allows attaching a PicoW to my [Pololu 3π+ 2040 robo
 * ~~Custom PCB~~
 * ~~Improve Performance~~
 * ~~RP2040 Core 1 Support~~
+* ~~Bridge microcontroller's UART on another WiFi TCP/IP port.~~
 * Addition of a small OLED Display
   * Report IP address
   * Report WiFi connections
   * Report target detected
   * Report target Vcc voltage
   * etc
-* Bridge microcontroller's UART on another WiFi TCP/IP port.
 * RTOS Thread Support
 * Improve Usability

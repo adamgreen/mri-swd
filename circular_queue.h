@@ -102,6 +102,25 @@ class CircularQueue
             return bytesToRead;
         }
 
+        void peekForDMA(uint8_t** ppChunk, uint32_t* pChunkSize)
+        {
+            assert ( m_count <= sizeof(m_queue) );
+            assert ( m_peekSize == 0 );
+
+            // Deal with the fact that the readable bytes might wrap around the end of the circular queue.
+            uint32_t readableByteCount = bytesToRead();
+            uint32_t chunkLimit = QUEUE_SIZE - m_read;
+            uint32_t chunkSize = (readableByteCount > chunkLimit) ? chunkLimit : readableByteCount;
+
+            // Return pointer to the chunk. Caller can send it via DMA and then call commitPeek() when DMA op completes.
+            *ppChunk = (uint8_t*)&m_queue[m_read];
+            *pChunkSize = chunkSize;
+
+            // Advance peek pointer ahead for the chunk size.
+            m_peekSize = chunkSize;
+            m_peek = (m_read + chunkSize) & (QUEUE_SIZE - 1);
+        }
+
         uint32_t peek(uint8_t* pData, uint32_t dataSize)
         {
             assert ( m_count <= sizeof(m_queue) );

@@ -6,6 +6,7 @@ This README documents the manual steps that I conduct in GDB when running a test
 * Build the test program for the Pico by typing the following in a Terminal window: ```make clean all```
 * Connect to **mri-swd** with GDB by using the following command (note that the IP address for the **mri-swd** probe changes over time): ```./debug 10.0.0.201```
 * Upload the new code to the Pico with this GDB command: ```load```
+* Verify that the upload was successful with this GDB command: ```compare-sections```
 * Start the test code running on the Pico with this GDB command: ```continue```
 * Once the initial menu of test options is displayed in GDB, press **CTRL+C** to halt the target.
 
@@ -187,12 +188,18 @@ Remote debugging using 10.0.0.201:2331
 <signal handler called>
 (gdb) load
 Loading section .boot2, size 0x100 lma 0x10000000
-Loading section .text, size 0xf5d8 lma 0x10000100
-Loading section .rodata, size 0x9600 lma 0x1000f6d8
-Loading section .binary_info, size 0x1c lma 0x10018cd8
-Loading section .data, size 0x954 lma 0x10018cf4
-Start address 0x100001e8, load size 104008
-Transfer rate: 109 KB/sec, 9455 bytes/write.
+Loading section .text, size 0xf4d0 lma 0x10000100
+Loading section .rodata, size 0x96d8 lma 0x1000f5d0
+Loading section .binary_info, size 0x20 lma 0x10018ca8
+Loading section .data, size 0x96c lma 0x10018cc8
+Start address 0x100001e8, load size 103988
+Transfer rate: 108 KB/sec, 9453 bytes/write.
+(gdb) compare-sections
+Section .boot2, range 0x10000000 -- 0x10000100: matched.
+Section .text, range 0x10000100 -- 0x1000f5d0: matched.
+Section .rodata, range 0x1000f5d0 -- 0x10018ca8: matched.
+Section .binary_info, range 0x10018ca8 -- 0x10018cc8: matched.
+Section .data, range 0x10018cc8 -- 0x10019634: matched.
 (gdb) continue
 Continuing.
 
@@ -204,6 +211,7 @@ Continuing.
 6) Run Semi-Hosting tests.
 7) Trigger stacking exception.
 8) Blink LED.
+9) UART Loopback.
 Selection: ^C
 Thread 1 received signal SIGINT, Interrupt.
 mriNewlib_SemihostRead () at /Users/user/depots/mri-swd/shared/newlib_stubs.S:41
@@ -331,6 +339,7 @@ Continuing.
 6) Run Semi-Hosting tests.
 7) Trigger stacking exception.
 8) Blink LED.
+9) UART Loopback.
 Selection: 1
 ```
 
@@ -398,6 +407,7 @@ Continuing.
 6) Run Semi-Hosting tests.
 7) Trigger stacking exception.
 8) Blink LED.
+9) UART Loopback.
 Selection:
 ```
 
@@ -471,6 +481,7 @@ Continuing.
 6) Run Semi-Hosting tests.
 7) Trigger stacking exception.
 8) Blink LED.
+9) UART Loopback.
 Selection:
 ```
 
@@ -492,6 +503,7 @@ Continuing.
 6) Run Semi-Hosting tests.
 7) Trigger stacking exception.
 8) Blink LED.
+9) UART Loopback.
 Selection:
 ```
 
@@ -594,6 +606,7 @@ Continuing.
 6) Run Semi-Hosting tests.
 7) Trigger stacking exception.
 8) Blink LED.
+9) UART Loopback.
 Selection: 3
 Delaying 10 seconds...
 Alarm Callback Output
@@ -642,6 +655,7 @@ Continuing.
 6) Run Semi-Hosting tests.
 7) Trigger stacking exception.
 8) Blink LED.
+9) UART Loopback.
 Selection: 3
 Delaying 10 seconds...
 Alarm Callback Output
@@ -683,6 +697,7 @@ Continuing.
 6) Run Semi-Hosting tests.
 7) Trigger stacking exception.
 8) Blink LED.
+9) UART Loopback.
 Selection:
 ```
 
@@ -888,6 +903,7 @@ Multi-threaded test stopping...
 6) Run Semi-Hosting tests.
 7) Trigger stacking exception.
 8) Blink LED.
+9) UART Loopback.
 Selection:
 ```
 
@@ -1015,8 +1031,166 @@ Test completed
 6) Run Semi-Hosting tests.
 7) Trigger stacking exception.
 8) Blink LED.
+9) UART Loopback.
 Selection:
 ```
+
+
+## UART<->WiFi Bridging
+GPIO0 (UART TX) on mri-swd must be connected to GPIO1 (UART RX) on the target.</br>
+GPIO1 (UART RX) on mri-swd must be connected to GPIO0 (UART TX) on the target.</br>
+
+Once making sure that the UARTs are wired up correctly between the two devices, use GDB to select ```9) UART Loopback.```
+
+```console
+1) Set registers to known values and crash.
+2) Set registers to known values and stop at hardcoded bkpt.
+3) Call breakOnMe() to increment g_global.
+4) Log to stdout from both cores at the same time.
+5) Log to stdout from main() and an ISR at the same time.
+6) Run Semi-Hosting tests.
+7) Trigger stacking exception.
+8) Blink LED.
+9) UART Loopback.
+Selection: 9
+Set g_stop to true to end UART loopback test...
+```
+
+This will start a simple UART loopback program on the target so that any data sent from the PC will be sent back to it. In a sister folder to this ```TestPass``` program, there is a Rust program called ```bridge_test```. Use cargo to run it and it will send known data to **mri-swd's** UART<->WiFi Bridge on TCP/IP port 2332 and then verify that it receives the same data as it sent:
+
+```console
+user@Mac bridge_test % cargo run -- 10.0.0.201:2332
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running `target/debug/bridge_test '10.0.0.201:2332'`
+bridge_test - Testing mri-swd's UART<->WiFi Bridge
+Attempting to connect to 10.0.0.201:2332
+Connected!
+Loopback iteration #1 was valid
+Loopback iteration #2 was valid
+Loopback iteration #3 was valid
+Loopback iteration #4 was valid
+Loopback iteration #5 was valid
+Loopback iteration #6 was valid
+Loopback iteration #7 was valid
+Loopback iteration #8 was valid
+Loopback iteration #9 was valid
+Loopback iteration #10 was valid
+Loopback iteration #11 was valid
+Loopback iteration #12 was valid
+Loopback iteration #13 was valid
+Loopback iteration #14 was valid
+Loopback iteration #15 was valid
+Loopback iteration #16 was valid
+Loopback iteration #17 was valid
+Loopback iteration #18 was valid
+Loopback iteration #19 was valid
+Loopback iteration #20 was valid
+Loopback iteration #21 was valid
+Loopback iteration #22 was valid
+Loopback iteration #23 was valid
+Loopback iteration #24 was valid
+Loopback iteration #25 was valid
+Loopback iteration #26 was valid
+Loopback iteration #27 was valid
+Loopback iteration #28 was valid
+Loopback iteration #29 was valid
+Loopback iteration #30 was valid
+Loopback iteration #31 was valid
+Loopback iteration #32 was valid
+Loopback iteration #33 was valid
+Loopback iteration #34 was valid
+Loopback iteration #35 was valid
+Loopback iteration #36 was valid
+Loopback iteration #37 was valid
+Loopback iteration #38 was valid
+Loopback iteration #39 was valid
+Loopback iteration #40 was valid
+Loopback iteration #41 was valid
+Loopback iteration #42 was valid
+Loopback iteration #43 was valid
+Loopback iteration #44 was valid
+Loopback iteration #45 was valid
+Loopback iteration #46 was valid
+Loopback iteration #47 was valid
+Loopback iteration #48 was valid
+Loopback iteration #49 was valid
+Loopback iteration #50 was valid
+Loopback iteration #51 was valid
+Loopback iteration #52 was valid
+Loopback iteration #53 was valid
+Loopback iteration #54 was valid
+Loopback iteration #55 was valid
+Loopback iteration #56 was valid
+Loopback iteration #57 was valid
+Loopback iteration #58 was valid
+Loopback iteration #59 was valid
+Loopback iteration #60 was valid
+Loopback iteration #61 was valid
+Loopback iteration #62 was valid
+Loopback iteration #63 was valid
+Loopback iteration #64 was valid
+Loopback iteration #65 was valid
+Loopback iteration #66 was valid
+Loopback iteration #67 was valid
+Loopback iteration #68 was valid
+Loopback iteration #69 was valid
+Loopback iteration #70 was valid
+Loopback iteration #71 was valid
+Loopback iteration #72 was valid
+Loopback iteration #73 was valid
+Loopback iteration #74 was valid
+Loopback iteration #75 was valid
+Loopback iteration #76 was valid
+Loopback iteration #77 was valid
+Loopback iteration #78 was valid
+Loopback iteration #79 was valid
+Loopback iteration #80 was valid
+Loopback iteration #81 was valid
+Loopback iteration #82 was valid
+Loopback iteration #83 was valid
+Loopback iteration #84 was valid
+Loopback iteration #85 was valid
+Loopback iteration #86 was valid
+Loopback iteration #87 was valid
+Loopback iteration #88 was valid
+Loopback iteration #89 was valid
+Loopback iteration #90 was valid
+Loopback iteration #91 was valid
+Loopback iteration #92 was valid
+Loopback iteration #93 was valid
+Loopback iteration #94 was valid
+Loopback iteration #95 was valid
+Loopback iteration #96 was valid
+Loopback iteration #97 was valid
+Loopback iteration #98 was valid
+Loopback iteration #99 was valid
+Loopback iteration #100 was valid
+Test successful!
+```
+
+Once done running the test, you can use **CTRL+C** to break into the code on the target and set ```g_stop``` to true to exit the loopback code:
+
+```console
+^C
+Thread 1 received signal SIGINT, Interrupt.
+0x1000098c in loopbackUART () at /Users/adamgreen/depots/mri-swd/tests/TestPass/main.c:414
+414         while (!g_stop)
+(gdb) set var g_stop=true
+(gdb) c
+Continuing.
+
+1) Set registers to known values and crash.
+2) Set registers to known values and stop at hardcoded bkpt.
+3) Call breakOnMe() to increment g_global.
+4) Log to stdout from both cores at the same time.
+5) Log to stdout from main() and an ISR at the same time.
+6) Run Semi-Hosting tests.
+7) Trigger stacking exception.
+8) Blink LED.
+9) UART Loopback.
+Selection:
+```
+
 
 ## Stacking Exception HardFault
 Use GDB to select ```7) Trigger stacking exception.```.
@@ -1092,6 +1266,7 @@ Continuing.
 6) Run Semi-Hosting tests.
 7) Trigger stacking exception.
 8) Blink LED.
+9) UART Loopback.
 Selection: 8
 Set g_stop to true to end test...
 ^C

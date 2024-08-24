@@ -1,3 +1,17 @@
+/* Copyright (C) 2024  Adam Green (https://github.com/adamgreen)
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
 /* This sample is used to put the mri-swd debug hardware through its paces before a release. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,6 +22,7 @@
 #include <hardware/exception.h>
 #include <hardware/sync.h>
 #include "../../shared/mriswd_semihost.h"
+#include "../../config.h"
 
 
 // What should Hard Fault handler do when semi-host requests are made when debugger isn't attached?
@@ -36,6 +51,7 @@ static void sleep_ms_with_check(uint32_t timeout_ms);
 static void runThreadAndISR(void);
 static void runFileTests();
 static void blinkLED();
+static void loopbackUART();
 
 // Selection variable to be set from GDB.
 static volatile int g_selection = 0;
@@ -70,6 +86,7 @@ int main(void)
         printf("6) Run Semi-Hosting tests.\n");
         printf("7) Trigger stacking exception.\n");
         printf("8) Blink LED.\n");
+        printf("9) UART Loopback.\n");
 
         printf("Selection: ");
         char buffer[64];
@@ -100,6 +117,9 @@ int main(void)
                 break;
             case 8:
                 blinkLED();
+                break;
+            case 9:
+                loopbackUART();
                 break;
             default:
                 printf("Invalid selection\n");
@@ -378,4 +398,31 @@ void blinkLED()
         gpio_xor_mask(ledPinMask);
         sleep_ms(500);
     }
+}
+
+static void loopbackUART()
+{
+    // Switch the first 2 GPIO pins (GPIO0 and GPIO1) over to the UART.
+    gpio_set_function(0, GPIO_FUNC_UART);
+    gpio_set_function(1, GPIO_FUNC_UART);
+
+    // Initialize the UART instance.
+    uart_init(uart0, UART_BAUD_RATE);
+
+    // Read data from UART and immediately send it back.
+    g_stop = false;
+    printf("Set g_stop to true to end UART loopback test...\n");
+    while (!g_stop)
+    {
+        if (uart_is_readable(uart0))
+        {
+            char byte = uart_getc(uart0);
+            uart_putc_raw(uart0, byte);
+        }
+    }
+
+    // Disable the UART and the associated GPIO pins.
+    uart_deinit(uart0);
+    gpio_set_function(0, GPIO_FUNC_NULL);
+    gpio_set_function(0, GPIO_FUNC_NULL);
 }

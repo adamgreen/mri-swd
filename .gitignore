@@ -9,6 +9,9 @@ wifi_config.cmake
 # CMake / Pico SDK temporary build files.
 build/
 
+# Cargo / Rust build output.
+target/
+
 # Samples used for testing.
 perf/perf-pc/perf-pc
 obj/

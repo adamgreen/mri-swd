@@ -1,4 +1,4 @@
-/* Copyright 2023 Adam Green (https://github.com/adamgreen/)
+/* Copyright 2024 Adam Green (https://github.com/adamgreen/)
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -20,10 +20,17 @@
 // GDB socket port number.
 #define GDB_SOCKET_PORT_NUMBER 2331
 
+// UART <-> WiFi bridge IP port number.
+#define UART_WIFI_BRIDGE_PORT_NUMBER 2332
 
 // SWD pin connections.
 #define SWCLK_PIN 2
 #define SWDIO_PIN 3
+
+// UART pin connections / settings used for the UART<->WiFi Bridge.
+#define UART_TX_PIN 0
+#define UART_RX_PIN 1
+#define UART_BAUD_RATE 230400
 
 // Should the debugger halt the CPU as soon as it attaches? This is useful to break out of an infinite reset loop.
 #define HALT_ON_ATTACH false
@@ -66,9 +73,17 @@
 #define LOGGING_PLATFORM_ERROR_ENABLED 1
 #define LOGGING_PLATFORM_DEBUG_ENABLED 1
 
+// socket_server.cpp logging
+#define LOGGING_SOCKET_SERVER_ERROR_ENABLED 1
+#define LOGGING_SOCKET_SERVER_DEBUG_ENABLED 1
+
 // gdb_socket.cpp logging
 #define LOGGING_GDB_SOCKET_ERROR_ENABLED 1
 #define LOGGING_GDB_SOCKET_DEBUG_ENABLED 0
+
+// uart_wifi_bridge.cpp logging
+#define LOGGING_UART_WIFI_BRIDGE_ERROR_ENABLED 1
+#define LOGGING_UART_WIFI_BRIDGE_DEBUG_ENABLED 1
 
 // Modules under the devices/ directory
 #define LOGGING_DEVICE_ERROR_ENABLED 1

@@ -91,6 +91,23 @@
         #define logDebug(X)
         #define logDebugF(X, ...)
     #endif
+#elif defined (SOCKET_SERVER_MODULE)
+    #define LOGGING_MODULE_FILENAME SOCKET_SERVER_MODULE
+
+    #if LOGGING_SOCKET_SERVER_ERROR_ENABLED
+        #define logError logError_
+        #define logErrorF logErrorF_
+    #else
+        #define logError(X)
+        #define logErrorF(X, ...)
+    #endif
+    #if LOGGING_SOCKET_SERVER_DEBUG_ENABLED
+        #define logDebug logDebug_
+        #define logDebugF logDebugF_
+    #else
+        #define logDebug(X)
+        #define logDebugF(X, ...)
+    #endif
 #elif defined (GDB_SOCKET_MODULE)
     #define LOGGING_MODULE_FILENAME GDB_SOCKET_MODULE
 
@@ -102,6 +119,23 @@
         #define logErrorF(X, ...)
     #endif
     #if LOGGING_GDB_SOCKET_DEBUG_ENABLED
+        #define logDebug logDebug_
+        #define logDebugF logDebugF_
+    #else
+        #define logDebug(X)
+        #define logDebugF(X, ...)
+    #endif
+#elif defined (UART_WIFI_BRIDGE_MODULE)
+    #define LOGGING_MODULE_FILENAME UART_WIFI_BRIDGE_MODULE
+
+    #if LOGGING_UART_WIFI_ERROR_ENABLED
+        #define logError logError_
+        #define logErrorF logErrorF_
+    #else
+        #define logError(X)
+        #define logErrorF(X, ...)
+    #endif
+    #if LOGGING_UART_WIFI_BRIDGE_DEBUG_ENABLED
         #define logDebug logDebug_
         #define logDebugF logDebugF_
     #else

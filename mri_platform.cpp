@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <pico/cyw43_arch.h>
 #include "gdb_socket.h"
+#include "uart_wifi_bridge.h"
 #include "swd.h"
 #include "mri_platform.h"
 #include "config.h"
@@ -46,9 +47,10 @@ extern "C"
 
 
 
-static SWD        g_swdBus;
-static GDBSocket  g_gdbSocket;
-static CpuCores   g_cores;
+static SWD              g_swdBus;
+static GDBSocket        g_gdbSocket;
+static UartWiFiBridge   g_uartWifiBridge;
+static CpuCores         g_cores;
 
 static bool       g_isSwdConnected = false;
 static bool       g_isNetworkConnected = false;
@@ -130,6 +132,7 @@ void mainDebuggerLoop()
         }
         if (!g_isNetworkConnected)
         {
+            g_uartWifiBridge.uninit();
             g_gdbSocket.uninit();
             cyw43_arch_deinit();
         }
@@ -233,9 +236,14 @@ static bool initNetwork()
     } while (connectionResult != 0);
     logInfo("Connected to Wi-Fi router.");
 
-    if (!g_gdbSocket.init())
+    if (!g_gdbSocket.init(GDB_SOCKET_PORT_NUMBER))
     {
         logError("Failed to initialize GDB socket.");
+        return false;
+    }
+    if (!g_uartWifiBridge.init(UART_WIFI_BRIDGE_PORT_NUMBER, UART_TX_PIN, UART_RX_PIN, UART_BAUD_RATE))
+    {
+        logError("Failed to initialize UART<->WiFi Bridge.");
         return false;
     }
 

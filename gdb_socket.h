@@ -1,4 +1,4 @@
-/* Copyright 2023 Adam Green (https://github.com/adamgreen/)
+/* Copyright 2024 Adam Green (https://github.com/adamgreen/)
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -17,55 +17,28 @@
 #define GDB_SOCKET_H_
 
 #include <lwip/tcp.h>
+#include "socket_server.h"
 #include "circular_queue.h"
-#include "config.h"
 
 
-class GDBSocket
+class GDBSocket : public SocketServer
 {
     public:
         GDBSocket();
 
-        bool init(uint16_t port = GDB_SOCKET_PORT_NUMBER);
+        bool init(uint16_t port);
         void uninit();
 
-        err_t send(const void* pBuffer, uint16_t bufferLength);
-        uint32_t bytesInFlight() { return m_bytesInFlight; }
-        err_t closeClient();
         bool isGdbConnected()
         {
-            return m_pClientPCB != NULL;
+            return SocketServer::isConnected();
         }
 
         CircularQueue<16*1024> m_tcpToMriQueue;
 
     protected:
-        err_t closeServer();
-        err_t onAccept(tcp_pcb* pClientPCB, err_t error);
-        err_t onRecv(tcp_pcb* pPCB, pbuf* pBuf, err_t error);
-        err_t onSent(struct tcp_pcb* pPCB, u16_t length);
-        void onError(err_t error);
-
-        static err_t staticAccept(void* pvThis, tcp_pcb* pClientPCB, err_t error)
-        {
-            return ((GDBSocket*)pvThis)->onAccept(pClientPCB, error);
-        }
-        static void staticError(void* pvThis, err_t error)
-        {
-            ((GDBSocket*)pvThis)->onError(error);
-        }
-        static err_t staticRecv(void* pvThis, tcp_pcb* pPCB, pbuf* pBuf, err_t error)
-        {
-            return ((GDBSocket*)pvThis)->onRecv(pPCB, pBuf, error);
-        }
-        static err_t staticSent(void* pvThis, struct tcp_pcb* pPCB, u16_t length)
-        {
-            return ((GDBSocket*)pvThis)->onSent(pPCB, length);
-        }
-
-        tcp_pcb* m_pListenPCB = NULL;
-        tcp_pcb* m_pClientPCB = NULL;
-        volatile uint32_t m_bytesInFlight = 0;
+        virtual uint32_t writeReceivedData(const struct pbuf *pBuf);
+        virtual bool shouldSendNow(const void* pBuffer, uint16_t bufferLength);
 };
 
 #endif // GDB_SOCKET_H_
