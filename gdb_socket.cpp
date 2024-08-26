@@ -16,6 +16,7 @@
 #define GDB_SOCKET_MODULE "gdb_socket.cpp"
 #include "logging.h"
 #include "gdb_socket.h"
+#include "ui.h"
 
 
 GDBSocket::GDBSocket()
@@ -35,14 +36,25 @@ void GDBSocket::uninit()
 
 uint32_t GDBSocket::writeReceivedData(const struct pbuf *pBuf)
 {
+    // Update UI to signal activity to user.
+    UI::receivingFromGdb();
+
     // Place the received packet data into the circular queue.
     return m_tcpToMriQueue.write(pBuf);
 }
 
 bool GDBSocket::shouldSendNow(const void* pBuffer, uint16_t bufferLength)
 {
+    // Update UI to signal activity to user.
+    UI::transmittingToGdb();
+
     // Minimum packet is $#00
     const uint16_t minPacketLength = 4;
     bool isPacketData = bufferLength >= minPacketLength;
     return isPacketData;
+}
+
+void GDBSocket::updateConnectionState(bool isConnected)
+{
+    UI::setGdbConnectedState(isConnected);
 }

@@ -17,7 +17,7 @@
 #include "logging.h"
 #include <pico/stdlib.h>
 #include "uart_wifi_bridge.h"
-
+#include "ui.h"
 
 // The address of the singleton to which UART and DMA ISR requests should be made.
 UartWiFiBridge* UartWiFiBridge::s_pThis = NULL;
@@ -193,6 +193,9 @@ void UartWiFiBridge::uninit()
 
 uint32_t UartWiFiBridge::writeReceivedData(const struct pbuf *pBuf)
 {
+    // Update UI to signal activity to user.
+    UI::transmittingToUart();
+
     uint32_t bytesWritten = m_tcpToUartQueue.write(pBuf);
     irq_set_enabled(m_dmaIRQ, false);
         sendQueuedDataToUart();
@@ -202,6 +205,14 @@ uint32_t UartWiFiBridge::writeReceivedData(const struct pbuf *pBuf)
 
 bool UartWiFiBridge::shouldSendNow(const void* pBuffer, uint16_t bufferLength)
 {
+    // Update UI to signal activity to user.
+    UI::receivingFromUart();
+
     // Don't want to call tcp_output from UART ISR.
     return false;
+}
+
+void UartWiFiBridge::updateConnectionState(bool isConnected)
+{
+    UI::setUartConnectedState(isConnected);
 }

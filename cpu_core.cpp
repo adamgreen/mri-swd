@@ -16,6 +16,7 @@
 #define CPU_CORE_MODULE "cpu_core.cpp"
 #include "logging.h"
 #include "cpu_core.h"
+#include "ui.h"
 
 
 CpuCore::CpuCore()
@@ -1996,12 +1997,15 @@ void CpuCores::searchSupportedDevicesList()
         {
             m_pDevice = pDevice;
             m_pDeviceObject = pObject;
-            logInfoF("Found device of type %s.", pDevice->getName(m_pDeviceObject, m_pDefaultCore));
+            const char* pTargetName = pDevice->getName(m_pDeviceObject, m_pDefaultCore);
+            UI::setTargetName(pTargetName);
+            logInfoF("Found device of type %s.", pTargetName);
             break;
         }
     }
     if (!m_pDevice)
     {
+        UI::setTargetName(SwdTarget::getCpuTypeString(m_pDefaultCore->getTarget()->getCpuType()));
         logInfo("Unrecognized device type. FLASH programming not supported!");
     }
 }

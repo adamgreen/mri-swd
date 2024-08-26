@@ -70,6 +70,9 @@ target_sources(mri-swd PRIVATE
     uart_wifi_bridge.cpp
     mri_platform.cpp
     cpu_core.cpp
+    ui.cpp
+    Adafruit-GFX-Library/Adafruit_GFX.cpp
+    Adafruit_SSD1306/Adafruit_SSD1306.cpp
 )
 
 target_include_directories(mri-swd PRIVATE
@@ -118,7 +121,9 @@ target_compile_definitions(mri-swd PRIVATE
 target_link_libraries(mri-swd PRIVATE
     pico_stdlib
     hardware_pio
+    hardware_spi
     pico_cyw43_arch_lwip_threadsafe_background
+    pico_async_context_threadsafe_background
 )
 pico_add_extra_outputs(mri-swd)
 

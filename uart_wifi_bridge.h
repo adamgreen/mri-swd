@@ -33,6 +33,7 @@ class UartWiFiBridge : public SocketServer
     protected:
         virtual uint32_t writeReceivedData(const struct pbuf *pBuf);
         virtual bool shouldSendNow(const void* pBuffer, uint16_t bufferLength);
+        virtual void updateConnectionState(bool isConnected);
 
         uart_inst_t* txPinToUartInstance(uint32_t txPin);
         uart_inst_t* rxPinToUartInstance(uint32_t rxPin);

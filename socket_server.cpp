@@ -82,6 +82,7 @@ err_t SocketServer::onAccept(tcp_pcb* pClientPCB, err_t error)
         logErrorF("Can't accept a second connection when %s client is already connected.", m_pServerName);
         return ERR_MEM;
     }
+    updateConnectionState(true);
     logInfoF("%s connected.", m_pServerName);
 
     m_pClientPCB = pClientPCB;
@@ -96,6 +97,8 @@ err_t SocketServer::onAccept(tcp_pcb* pClientPCB, err_t error)
 err_t SocketServer::closeClient()
 {
     err_t error = ERR_OK;
+
+    updateConnectionState(false);
     if (m_pClientPCB)
     {
         tcp_arg(m_pClientPCB, NULL);

@@ -176,6 +176,23 @@
         #define logDebug(X)
         #define logDebugF(X, ...)
     #endif
+#elif defined (UI_MODULE)
+    #define LOGGING_MODULE_FILENAME UI_MODULE
+
+    #if LOGGING_UI_ERROR_ENABLED
+        #define logError logError_
+        #define logErrorF logErrorF_
+    #else
+        #define logError(X)
+        #define logErrorF(X, ...)
+    #endif
+    #if LOGGING_UI_DEBUG_ENABLED
+        #define logDebug logDebug_
+        #define logDebugF logDebugF_
+    #else
+        #define logDebug(X)
+        #define logDebugF(X, ...)
+    #endif
 #endif // SWD_MODULE
 
 

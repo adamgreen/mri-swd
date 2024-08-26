@@ -544,7 +544,7 @@ class SwdTarget
         // cpu - An element from the SWD::CpuTypes enumeration to be converted to human readable string.
         //
         // Returns the human readable name of the supplied cpu ordinal. Example: SWD::CPU_CORTEX_M0 to "Cortex-M0".
-        const char* getCpuTypeString(SWD::CpuTypes cpu);
+        static const char* getCpuTypeString(SWD::CpuTypes cpu);
 
         // Method which returns pointers to 12 element array containing device's component & peripheral ID words.
         const uint32_t* getComponentPeripheralIDs()

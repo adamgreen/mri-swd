@@ -32,6 +32,16 @@
 #define UART_RX_PIN 1
 #define UART_BAUD_RATE 230400
 
+// OLED Display pin connections / setting.
+#define OLED_MOSI_PIN      19
+#define OLED_CLK_PIN       18
+#define OLED_DC_PIN        20
+#define OLED_CS_PIN        16
+#define OLED_RESET_PIN     17
+#define OLED_SCREEN_WIDTH  128
+#define OLED_SCREEN_HEIGHT 32
+
+
 // Should the debugger halt the CPU as soon as it attaches? This is useful to break out of an infinite reset loop.
 #define HALT_ON_ATTACH false
 
@@ -92,6 +102,10 @@
 // cpu_core.cpp logging
 #define LOGGING_CPU_CORE_ERROR_ENABLED 1
 #define LOGGING_CPU_CORE_DEBUG_ENABLED 1
+
+// ui.cpp logging
+#define LOGGING_UI_ERROR_ENABLED 1
+#define LOGGING_UI_DEBUG_ENABLED 1
 
 // Size of the packet buffer to use for communicating with GDB.
 // Must be large enough to contain a 'G' packet sent from GDB to update all of the CPU registers in the context at once.

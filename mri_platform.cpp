@@ -26,6 +26,7 @@
 #include "version.h"
 #include "devices/devices.h"
 #include "cpu_core.h"
+#include "ui.h"
 
 // MRI C headers
 extern "C"
@@ -51,6 +52,8 @@ static SWD              g_swdBus;
 static GDBSocket        g_gdbSocket;
 static UartWiFiBridge   g_uartWifiBridge;
 static CpuCores         g_cores;
+static UI               g_ui(OLED_SCREEN_WIDTH, OLED_SCREEN_HEIGHT,
+                             OLED_MOSI_PIN, OLED_CLK_PIN, OLED_DC_PIN, OLED_RESET_PIN, OLED_CS_PIN);
 
 static bool       g_isSwdConnected = false;
 static bool       g_isNetworkConnected = false;
@@ -79,6 +82,11 @@ static void detachDebugger();
 
 void mainDebuggerLoop()
 {
+    if (!g_ui.init())
+    {
+        logError("Failed to initialize the OLED.");
+        return;
+    }
     if (!g_swdBus.init(DEFAULT_SWD_CLOCK_RATE, SWCLK_PIN, SWDIO_PIN))
     {
         logError("Failed to initialize the SWD port.");
@@ -143,6 +151,8 @@ static bool initSWD()
 {
     bool returnCode = false;
 
+    UI::setTargetName("No Target");
+    g_ui.setRunState("");
     returnCode = attemptSwdAttach();
     if (!returnCode)
     {
@@ -220,6 +230,7 @@ static void triggerMriCoreToExit()
 
 static bool initNetwork()
 {
+    g_ui.updateWiFiState(UI::WIFI_CONNECTING, NULL);
     logInfo("Initializing network...");
     if (cyw43_arch_init())
     {
@@ -234,6 +245,7 @@ static bool initNetwork()
         logInfo("Attempting to connect to Wi-Fi router...");
         connectionResult = cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASSWORD, CYW43_AUTH_WPA2_AES_PSK, WIFI_ROUTER_TIMEOUT_MS);
     } while (connectionResult != 0);
+    g_ui.updateWiFiState(UI::WIFI_CONNECTED, ip4addr_ntoa(netif_ip4_addr(netif_list)));
     logInfo("Connected to Wi-Fi router.");
 
     if (!g_gdbSocket.init(GDB_SOCKET_PORT_NUMBER))
@@ -265,6 +277,7 @@ static void innerDebuggerLoop()
         // See if the target should be halted because of attach or because GDB has sent a command via TCP/IP.
         if (g_haltOnAttach || (g_gdbSocket.isGdbConnected() && !g_gdbSocket.m_tcpToMriQueue.isEmpty()))
         {
+            g_ui.setRunState("Halt!");
             logInfoF("%s has requested a CPU halt.", g_haltOnAttach ? "User" : "GDB");
             g_wasStopFromGDB = true;
             g_haltOnAttach = false;
@@ -288,11 +301,13 @@ static void innerDebuggerLoop()
         int haltingCore = g_cores.indexOfHaltedCore(false);
         if (resettingCore != CpuCores::CORE_NONE)
         {
+            g_ui.setRunState("Reset");
             logInfo("External device RESET detected.");
             continue;
         }
         if (!hasCpuHalted && haltingCore != CpuCores::CORE_NONE)
         {
+            g_ui.setRunState("Halted");
             logInfoF("Core%d has halted.", haltingCore);
             g_cores.requestCoresToHalt();
             hasCpuHalted = g_cores.waitForCoresToHalt(READ_DHCSR_TIMEOUT_MS);
@@ -314,6 +329,7 @@ static void innerDebuggerLoop()
             }
             else if (g_isResetting)
             {
+                g_ui.setRunState("Reset");
                 logInfo("GDB has requested device RESET.");
                 g_isResetting = false;
             }
@@ -327,6 +343,14 @@ static void innerDebuggerLoop()
                 }
                 else
                 {
+                    if (g_cores.isAnyCoreSingleStepping())
+                    {
+                        g_ui.setRunState("Step");
+                    }
+                    else
+                    {
+                        g_ui.setRunState("Running");
+                    }
                     logInfoF("CPU execution has been resumed. %s",
                         g_cores.isAnyCoreSingleStepping() ? "Single stepping enabled." : "");
                 }
