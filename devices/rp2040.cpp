@@ -531,12 +531,12 @@ static bool canAllocateTargetRam(RP2040Object* pObject, uint32_t bytesNeeded)
     {
         uint32_t endSpace = pObject->localFlashingConfig.ramLength - pObject->ramWrite;
         uint32_t startSpace = pObject->ramRead;
-        return (bytesNeeded <= endSpace || bytesNeeded <= startSpace);
+        return (bytesNeeded <= endSpace || bytesNeeded < startSpace);
     }
     else
     {
         uint32_t freeSpace = pObject->ramRead - pObject->ramWrite;
-        return (bytesNeeded <= freeSpace);
+        return (bytesNeeded < freeSpace);
     }
 }
 
