@@ -1367,6 +1367,7 @@ const char* Platform_GetDeviceMemoryMapXml(void)
 void Platform_ResetDevice(void)
 {
     g_cores.reset(g_haltOnReset, READ_DHCSR_TIMEOUT_MS);
+    g_haltOnReset = false;
     g_isResetting = true;
 }
 
