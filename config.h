@@ -28,8 +28,8 @@
 #define SWDIO_PIN 3
 
 // UART pin connections / settings used for the UART<->WiFi Bridge.
-#define UART_TX_PIN 0
-#define UART_RX_PIN 1
+#define UART_TX_PIN 4
+#define UART_RX_PIN 5
 #define UART_BAUD_RATE 230400
 
 // OLED Display pin connections / setting.
