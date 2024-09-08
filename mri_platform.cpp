@@ -268,6 +268,9 @@ static void innerDebuggerLoop()
     bool hasCpuHalted = false;
     while (g_isSwdConnected && g_isNetworkConnected)
     {
+        // Let the user know via the UI that the debugger is still running.
+        g_ui.beatHeart();
+
         // Check the WiFi link to see if it has gone down.
         if (checkForNetworkDown())
         {
@@ -305,7 +308,7 @@ static void innerDebuggerLoop()
             logInfo("External device RESET detected.");
             continue;
         }
-        if (!hasCpuHalted && haltingCore != CpuCores::CORE_NONE)
+        else if (!hasCpuHalted && haltingCore != CpuCores::CORE_NONE)
         {
             g_ui.setRunState("Halted");
             logInfoF("Core%d has halted.", haltingCore);
@@ -315,6 +318,10 @@ static void innerDebuggerLoop()
             {
                 logError("Timed out waiting for all cores to halt.");
             }
+        }
+        else if (haltingCore == CpuCores::CORE_NONE)
+        {
+            g_ui.setRunState("Running");
         }
         // UNDONE: Should check the sleep, lockup, retire bits in the DHCSR as well.
 
@@ -329,7 +336,6 @@ static void innerDebuggerLoop()
             }
             else if (g_isResetting)
             {
-                g_ui.setRunState("Reset");
                 logInfo("GDB has requested device RESET.");
                 g_isResetting = false;
             }
@@ -408,6 +414,9 @@ static void waitToReceiveData();
 
 int Platform_CommHasReceiveData(void)
 {
+    // Let the user know via the UI that the debugger is still running.
+    g_ui.beatHeart();
+
     int hasReceiveData = !g_gdbSocket.m_tcpToMriQueue.isEmpty();
     if (!hasReceiveData)
     {
@@ -1366,6 +1375,7 @@ const char* Platform_GetDeviceMemoryMapXml(void)
 // *********************************************************************************************************************
 void Platform_ResetDevice(void)
 {
+    g_ui.setRunState("Reset");
     g_cores.reset(g_haltOnReset, READ_DHCSR_TIMEOUT_MS);
     g_haltOnReset = false;
     g_isResetting = true;

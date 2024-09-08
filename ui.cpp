@@ -112,6 +112,8 @@ bool UI::init()
     m_asyncAnimationTimer.do_work = handleAnimationTimeout;
     async_context_add_when_pending_worker(&m_asyncContext.core, &m_asyncWorker);
 
+    m_lastHeartBeatTime = get_absolute_time();
+
     bool result = m_oled.begin();
     if (!result)
     {
@@ -219,8 +221,25 @@ void UI::setTargetName(const char* pTargetName)
 
 void UI::setRunState(const char* pRunState)
 {
+    // Do nothing if the UI is already displaying this state.
+    if (strncmp(m_runState, pRunState, sizeof(m_runState)-1) == 0)
+    {
+        return;
+    }
+
     strlcpy(m_runState, pRunState, sizeof(m_runState));
     scheduleDisplayUpdate();
+}
+
+void UI::beatHeart()
+{
+    absolute_time_t currentTime = get_absolute_time();
+    if (absolute_time_diff_us(m_lastHeartBeatTime, currentTime) > UI::HEART_BEAT_INTERVAL_US)
+    {
+        m_heartBeat = !m_heartBeat;
+        m_lastHeartBeatTime = currentTime;
+        scheduleDisplayUpdate();
+    }
 }
 
 
@@ -294,6 +313,13 @@ void UI::update()
 
     // Draw the WiFi Logo.
     drawWiFiLogo(OLED_SCREEN_WIDTH/2 - LOGO_WIDTH/2, 0);
+
+    // Draw the heart beat icon if needed.
+    if (m_heartBeat)
+    {
+        m_oled.setCursor(OLED_SCREEN_WIDTH - charWidth, 2*charHeight);
+        m_oled.printf("\x03");
+    }
 
     // Push display buffer out to OLED over SPI.
     m_oled.display();

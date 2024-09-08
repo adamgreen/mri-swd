@@ -37,6 +37,7 @@ public:
     // Methods used by mri-swd code to reports its state to this UI class so that it can be reflected on the OLED.
     void updateWiFiState(WiFiState wifiState, const char* pConnectedIpAddress);
     void setRunState(const char* pRunState);
+    void beatHeart();
     static void setGdbConnectedState(bool isConnected);
     static void setUartConnectedState(bool isConnected);
     static void transmittingToGdb();
@@ -50,6 +51,8 @@ protected:
     static const uint32_t ACTIVITY_TIMEOUT_MS = 250;
     // The WiFi log animation frames are each displayed for this amount of time.
     static const uint32_t ANIMATION_INTERVAL_MS = 250;
+    // The heart icon is toggled at twice this period.
+    static const int64_t HEART_BEAT_INTERVAL_US = 500 * 1000;
     // Dimensions of the WiFi Logo.
     static const uint16_t LOGO_WIDTH = 16;
     static const uint16_t LOGO_HEIGHT = 12;
@@ -91,6 +94,9 @@ protected:
     // Counter used for running the WiFi logo animation during connection attempts.
     uint32_t         m_animationCount = 0;
 
+    // The time of the last heart beat icon change.
+    absolute_time_t  m_lastHeartBeatTime;
+
     // Object which knows how to draw on the attached OLED.
     Adafruit_SSD1306 m_oled;
 
@@ -106,6 +112,9 @@ protected:
     bool m_isReceivingFromGdb = false;
     bool m_isTransmittingToUart = false;
     bool m_isReceivingFromUart = false;
+
+    // Heart beat icon state.
+    bool m_heartBeat = false;
 
     // An async context is notified when there is new state to be displayed on the OLED.
     // All SPI operations to the OLED occur from one of these async workers.
