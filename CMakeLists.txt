@@ -1,8 +1,7 @@
 cmake_minimum_required(VERSION 3.26)
 
-# UNDONE: Need to update the pico-sdk folder to match what I have in my Makefile.
-if (PICO_SDK_PATH_OVERRIDE)
-    set(PICO_SDK_PATH ${PICO_SDK_PATH_OVERRIDE})
+if (DEFINED ENV{PICO_SDK_PATH_OVERRIDE})
+    set(PICO_SDK_PATH $ENV{PICO_SDK_PATH_OVERRIDE})
 else()
     file(REAL_PATH pico-sdk PICO_SDK_PATH BASE_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}")
 endif()
