@@ -220,7 +220,7 @@ err_t SocketServer::send(const void* pBuffer, uint16_t bufferLength)
     }
     if (!m_pClientPCB)
     {
-        logErrorF("%s socket has been closed so %d bytes have been discarded.", m_pServerName, bufferLength);
+        discardingBytesDueToUnconnectedSocket(bufferLength);
     }
 
     return ERR_OK;

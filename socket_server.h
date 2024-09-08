@@ -41,6 +41,7 @@ class SocketServer
         virtual uint32_t writeReceivedData(const struct pbuf *pBuf) = 0;
         virtual bool shouldSendNow(const void* pBuffer, uint16_t bufferLength) = 0;
         virtual void updateConnectionState(bool isConnected) = 0;
+        virtual void discardingBytesDueToUnconnectedSocket(uint16_t bytesDiscarded) = 0;
 
         err_t closeServer();
         err_t onAccept(tcp_pcb* pClientPCB, err_t error);

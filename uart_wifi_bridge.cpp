@@ -15,6 +15,7 @@
 // Module which uses LWIP for implementing the UART WiFi Bridge.
 #define UART_WIFI_BRIDGE_MODULE "uart_wifi_bridge.cpp"
 #include "logging.h"
+#include <string.h>
 #include <pico/stdlib.h>
 #include "uart_wifi_bridge.h"
 #include "ui.h"
@@ -56,7 +57,6 @@ bool UartWiFiBridge::init(uint16_t port, uint32_t uartTxPin, uint32_t uartRxPin,
     // Must run the UART interrupt at the lowest priority, the same as the network stack so that one can't interrupt the
     // other.
     irq_set_exclusive_handler(m_uartIRQ, staticUartISR);
-    irq_set_priority(m_uartIRQ, PICO_LOWEST_IRQ_PRIORITY);
     irq_set_enabled(m_uartIRQ, true);
     uart_set_irq_enables(m_pUartInstance, true, false);
 
@@ -78,6 +78,17 @@ bool UartWiFiBridge::init(uint16_t port, uint32_t uartTxPin, uint32_t uartRxPin,
     irq_set_exclusive_handler(m_dmaIRQ, staticDmaISR);
     irq_set_enabled(m_dmaIRQ, true);
     dma_channel_set_irq0_enabled(m_dmaChannel, true);
+
+    // Setup an async context and worker to send UART data out over the network.
+    if (!async_context_threadsafe_background_init_with_defaults(&m_asyncContext))
+    {
+        logError("Failed to initialize async context.");
+        uninit();
+        return false;
+    }
+    memset(&m_asyncWorker, 0, sizeof(m_asyncWorker));
+    m_asyncWorker.do_work = staticSendQueuedDataToSocket;
+    async_context_add_when_pending_worker(&m_asyncContext.core, &m_asyncWorker);
 
     bool result = SocketServer::init("UART<->WiFi", port);
     if (!result)
@@ -115,18 +126,34 @@ uart_inst_t* UartWiFiBridge::rxPinToUartInstance(uint32_t rxPin)
 
 void UartWiFiBridge::uartISR()
 {
-    const size_t UART_FIFO_SIZE = 32;
-    uint8_t buffer[UART_FIFO_SIZE];
-
-    // Take data in the UART's Rx FIFO and send it out over the network.
+    // Take data in the UART's Rx FIFO and queue it up to send it out over the network in a lower priority async
+    // context.
     size_t i;
-    for (i = 0 ; i < count_of(buffer) && uart_is_readable(m_pUartInstance) ; i++)
+    for (i = 0 ; !m_uartToTcpQueue.isFull() && uart_is_readable(m_pUartInstance) ; i++)
     {
-        buffer[i] = uart_get_hw(m_pUartInstance)->dr;
+        uint8_t byte = uart_get_hw(m_pUartInstance)->dr;
+        m_uartToTcpQueue.write(&byte, 1);
     }
     if (i > 0)
     {
-        SocketServer::send(buffer, i);
+        // Schedule async queueing of data to send out socket.
+        async_context_set_work_pending(&m_asyncContext.core, &m_asyncWorker);
+    }
+}
+
+void UartWiFiBridge::sendQueuedDataToSocket()
+{
+    while (!m_uartToTcpQueue.isEmpty())
+    {
+        // Fetch next chunk of data from the circular queue.
+        uint8_t* pChunk = NULL;
+        uint32_t chunkSize = 0;
+        m_uartToTcpQueue.peekForDMA(&pChunk, &chunkSize);
+        assert ( chunkSize != 0 );
+
+        // Send it out the socket.
+        SocketServer::send(pChunk, chunkSize);
+        m_uartToTcpQueue.commitPeek();
     }
 }
 
@@ -208,11 +235,24 @@ bool UartWiFiBridge::shouldSendNow(const void* pBuffer, uint16_t bufferLength)
     // Update UI to signal activity to user.
     UI::receivingFromUart();
 
-    // Don't want to call tcp_output from UART ISR.
+    // Mark it to send immediately if there is a newline character within the buffer.
+    const uint8_t* pCurr = (const uint8_t*)pBuffer;
+    while (bufferLength--)
+    {
+        if (*pCurr++ == '\n')
+        {
+            return true;
+        }
+    }
     return false;
 }
 
 void UartWiFiBridge::updateConnectionState(bool isConnected)
 {
     UI::setUartConnectedState(isConnected);
+}
+
+void UartWiFiBridge::discardingBytesDueToUnconnectedSocket(uint16_t bytesDiscarded)
+{
+    logDebugF("%s socket has been closed so %d bytes have been discarded.", m_pServerName, bytesDiscarded);
 }

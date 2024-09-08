@@ -18,6 +18,7 @@
 
 #include <hardware/dma.h>
 #include <hardware/uart.h>
+#include <pico/async_context_threadsafe_background.h>
 #include "socket_server.h"
 #include "circular_queue.h"
 
@@ -34,6 +35,7 @@ class UartWiFiBridge : public SocketServer
         virtual uint32_t writeReceivedData(const struct pbuf *pBuf);
         virtual bool shouldSendNow(const void* pBuffer, uint16_t bufferLength);
         virtual void updateConnectionState(bool isConnected);
+        virtual void discardingBytesDueToUnconnectedSocket(uint16_t bytesDiscarded);
 
         uart_inst_t* txPinToUartInstance(uint32_t txPin);
         uart_inst_t* rxPinToUartInstance(uint32_t rxPin);
@@ -44,6 +46,13 @@ class UartWiFiBridge : public SocketServer
             s_pThis->uartISR();
         }
         void uartISR();
+
+        static void staticSendQueuedDataToSocket(async_context_t *async_context, async_when_pending_worker_t *worker)
+        {
+            assert ( s_pThis != NULL );
+            s_pThis->sendQueuedDataToSocket();
+        }
+        void sendQueuedDataToSocket();
 
         static void staticDmaISR()
         {
@@ -62,6 +71,12 @@ class UartWiFiBridge : public SocketServer
         int                m_dmaChannel = 0;
         dma_channel_config m_dmaConfig;
         CircularQueue<256> m_tcpToUartQueue;
+        CircularQueue<256> m_uartToTcpQueue;
+
+        // An async context is notified when there is new data to be sent out over lwIP at a lower priority.
+        async_context_threadsafe_background_t m_asyncContext;
+        async_when_pending_worker_t           m_asyncWorker;
+
         volatile bool      m_isDmaTransmitting = false;
 };
 

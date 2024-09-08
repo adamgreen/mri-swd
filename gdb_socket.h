@@ -40,6 +40,7 @@ class GDBSocket : public SocketServer
         virtual uint32_t writeReceivedData(const struct pbuf *pBuf);
         virtual bool shouldSendNow(const void* pBuffer, uint16_t bufferLength);
         virtual void updateConnectionState(bool isConnected);
+        virtual void discardingBytesDueToUnconnectedSocket(uint16_t bytesDiscarded);
 };
 
 #endif // GDB_SOCKET_H_

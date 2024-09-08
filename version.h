@@ -5,9 +5,9 @@
 #define MRI_SWD_BRANCH "https://github.com/adamgreen/mri-swd"
 
 #define MRI_SWD_VERSION_MAJOR       0
-#define MRI_SWD_VERSION_MINOR       5
-#define MRI_SWD_VERSION_BUILD       20240907
-#define MRI_SWD_VERSION_SUBBUILD    1
+#define MRI_SWD_VERSION_MINOR       6
+#define MRI_SWD_VERSION_BUILD       20240908
+#define MRI_SWD_VERSION_SUBBUILD    0
 
 #define MRI_SWD_STR(X) MRI_SWD_STR2(X)
 #define MRI_SWD_STR2(X) #X

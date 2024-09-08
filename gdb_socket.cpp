@@ -58,3 +58,8 @@ void GDBSocket::updateConnectionState(bool isConnected)
 {
     UI::setGdbConnectedState(isConnected);
 }
+
+void GDBSocket::discardingBytesDueToUnconnectedSocket(uint16_t bytesDiscarded)
+{
+    logErrorF("%s socket has been closed so %d bytes have been discarded.", m_pServerName, bytesDiscarded);
+}
