@@ -151,7 +151,7 @@ add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/bin2h
 # RP2040
 add_custom_target(rp2040-LocalFlashing DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/rp2040-LocalFlashing.h)
 add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/rp2040-LocalFlashing.h
-    DEPENDS ${CMAKE_CURRENT_LIST_DIR}/devices/rp2040-LocalFlashing.c
+    DEPENDS ${CMAKE_CURRENT_LIST_DIR}/devices/rp2040-LocalFlashing.c ${CMAKE_CURRENT_LIST_DIR}/devices/LocalFlashing.h
     COMMAND ${PICO_COMPILER_CC} -mcpu=cortex-m0plus -mthumb -O3 -g3  -std=gnu11 -Wall -Wextra -Werror -Wno-unused-parameter --param=min-pagesize=0 -fno-jump-tables -fno-builtin -ffunction-sections -fdata-sections -nostartfiles -Wl,-Map=${CMAKE_CURRENT_BINARY_DIR}/rp2040-LocalFlashing.map -Wl,--script=${CMAKE_CURRENT_LIST_DIR}/devices/rp2040-LocalFlashing.ld -Wl,-z,max-page-size=4096 -Wl,--gc-sections ${CMAKE_CURRENT_LIST_DIR}/devices/rp2040-LocalFlashing.c -o ${CMAKE_CURRENT_BINARY_DIR}/rp2040-LocalFlashing.elf
     COMMAND ${PICO_OBJCOPY} -Obinary ${CMAKE_CURRENT_BINARY_DIR}/rp2040-LocalFlashing.elf ${CMAKE_CURRENT_BINARY_DIR}/rp2040-LocalFlashing.bin
     COMMAND ${CMAKE_CURRENT_BINARY_DIR}/bin2h ${CMAKE_CURRENT_BINARY_DIR}/rp2040-LocalFlashing.bin ${CMAKE_CURRENT_BINARY_DIR}/rp2040-LocalFlashing.h g_rp2040_LocalFlashing
@@ -163,7 +163,7 @@ add_dependencies(mri-swd rp2040-LocalFlashing)
 # RP2350
 add_custom_target(rp2350-LocalFlashing DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/rp2350-LocalFlashing.h)
 add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/rp2350-LocalFlashing.h
-    DEPENDS ${CMAKE_CURRENT_LIST_DIR}/devices/rp2350-LocalFlashing.c
+    DEPENDS ${CMAKE_CURRENT_LIST_DIR}/devices/rp2350-LocalFlashing.c ${CMAKE_CURRENT_LIST_DIR}/devices/LocalFlashing.h
     COMMAND ${PICO_COMPILER_CC} -mcpu=cortex-m33 -mthumb -O3 -g3  -std=gnu11 -Wall -Wextra -Werror -Wno-unused-parameter --param=min-pagesize=0 -fno-jump-tables -fno-builtin -ffunction-sections -fdata-sections -nostartfiles -Wl,-Map=${CMAKE_CURRENT_BINARY_DIR}/rp2350-LocalFlashing.map -Wl,--script=${CMAKE_CURRENT_LIST_DIR}/devices/rp2350-LocalFlashing.ld -Wl,-z,max-page-size=4096 -Wl,--gc-sections ${CMAKE_CURRENT_LIST_DIR}/devices/rp2350-LocalFlashing.c -o ${CMAKE_CURRENT_BINARY_DIR}/rp2350-LocalFlashing.elf
     COMMAND ${PICO_OBJCOPY} -Obinary ${CMAKE_CURRENT_BINARY_DIR}/rp2350-LocalFlashing.elf ${CMAKE_CURRENT_BINARY_DIR}/rp2350-LocalFlashing.bin
     COMMAND ${CMAKE_CURRENT_BINARY_DIR}/bin2h ${CMAKE_CURRENT_BINARY_DIR}/rp2350-LocalFlashing.bin ${CMAKE_CURRENT_BINARY_DIR}/rp2350-LocalFlashing.h g_rp2350_LocalFlashing
