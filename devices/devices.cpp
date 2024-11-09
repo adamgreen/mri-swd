@@ -1,4 +1,4 @@
-/* Copyright 2023 Adam Green (https://github.com/adamgreen/)
+/* Copyright 2024 Adam Green (https://github.com/adamgreen/)
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -16,12 +16,14 @@
 // Also contains a few utility functions to aid in implementing target device drivers.
 #include "devices.h"
 #include "rp2040.h"
+#include "rp2350.h"
 #include "nrf52.h"
 
 
 // The list of all supported devices can be found in this table.
 DeviceFunctionTable* g_supportedDevices[] = {
     &g_rp2040DeviceSupport,
+    &g_rp2350DeviceSupport,
     &g_nrf52DeviceSupport
 };
 

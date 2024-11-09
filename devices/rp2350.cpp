@@ -1,4 +1,4 @@
-/* Copyright 2023 Adam Green (https://github.com/adamgreen/)
+/* Copyright 2024 Adam Green (https://github.com/adamgreen/)
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -12,35 +12,35 @@
    See the License for the specific language governing permissions and
    limitations under the License.
 */
-// Interface used to add support for Raspberry Pi RP2040 microcontrollers.
+// Interface used to add support for Raspberry Pi RP2350 microcontrollers.
 
 // **********************************************************************************************************
 // **** DEVICE_MODULE must be set to reflect the filename of this source file before including logging.h ****
 // **********************************************************************************************************
-#define DEVICE_MODULE "devices/rp2040.cpp"
+#define DEVICE_MODULE "devices/rp2350.cpp"
 #include "logging.h"
 #include <stdlib.h>
 #include <string.h>
-#include "rp2040.h"
+#include "rp2350.h"
 #include "mri_platform.h"
 #include "cpu_core.h"
 #include "LocalFlashing.h"
-#include <rp2040-LocalFlashing.h>
+#include <rp2350-LocalFlashing.h>
 
 
-// RP2040 FLASH memory location.
+// RP2350 FLASH memory location.
 static const uint32_t FLASH_START_ADDRESS = 0x10000000;
-static const uint32_t FLASH_MAX_SIZE = 16 * 1024 * 1024;
+static const uint32_t FLASH_MAX_SIZE = 32 * 1024 * 1024;
 static const uint32_t FLASH_END_ADDRESS = FLASH_START_ADDRESS + FLASH_MAX_SIZE;
 static const uint32_t FLASH_PAGE_SIZE = 4096;
 
-// RP2040 SRAM memory location.
+// RP2350 SRAM memory location.
 static const uint32_t RAM_START_ADDRESS = 0x20000000;
-static const uint32_t RAM_SIZE = 264*1024;
+static const uint32_t RAM_SIZE = 520*1024;
 static const uint32_t RAM_END_ADDRESS = RAM_START_ADDRESS + RAM_SIZE;
 
-// RP2040 object caches pointers to the ROM based FLASH related routines in the object context.
-struct RP2040Object
+// RP2350 object caches pointers to the ROM based FLASH related routines in the object context.
+struct RP2350Object
 {
     LocalFlashingConfig localFlashingConfig;
     uint32_t            indicesAddress;
@@ -52,25 +52,29 @@ struct RP2040Object
 
 
 // Forward function declarations.
-static bool loadLocalFlashingCodeOnDevice(RP2040Object* pObject, CpuCore* pCore);
-static bool startLocalFlashingCodeOnDevice(RP2040Object* pObject, CpuCore* pCore);
-static void disableDmaChannels(RP2040Object* pObject, CpuCore* pCore);
-static uint32_t getDmaChannelCount(RP2040Object* pObject, CpuCore* pCore);
-static void disableDmaChannel(RP2040Object* pObject, CpuCore* pCore, uint32_t i);
+static void disableDmaChannels(RP2350Object* pObject, CpuCore* pCore);
+static uint32_t getDmaChannelCount(RP2350Object* pObject, CpuCore* pCore);
+static void disableDmaChannel(RP2350Object* pObject, CpuCore* pCore, uint32_t i);
+static void resetSecureAccessToSRAM(RP2350Object* pObject, CpuCore* pCore);
+static bool checkDebuggerAccessToAccessCtrl(RP2350Object* pObject, CpuCore* pCore);
+static void resetAccessControlPermissions(RP2350Object* pObject, CpuCore* pCore);
+static void switchTargetToSecureState(RP2350Object* pObject, CpuCore* pCore);
+static bool loadLocalFlashingCodeOnDevice(RP2350Object* pObject, CpuCore* pCore);
+static bool startLocalFlashingCodeOnDevice(RP2350Object* pObject, CpuCore* pCore);
 static bool isAddressAndLength4kAligned(uint32_t address, uint32_t length);
 static bool is4kAligned(uint32_t value);
 static bool isAttemptingToFlashInvalidAddress(uint32_t address, uint32_t length);
-static uint32_t freeCompletedQueueEntries(RP2040Object* pObject, CpuCore* pCore);
-static bool readQueueEntry(RP2040Object* pObject, CpuCore* pCore, uint32_t index, LocalFlashingQueueEntry* pOut);
-static bool writeQueueEntry(RP2040Object* pObject, CpuCore* pCore, uint32_t index, const LocalFlashingQueueEntry* pIn);
-static void freeRamFromEntry(RP2040Object* pObject, LocalFlashingQueueEntry* pEntry);
-static bool addEntryToQueue(RP2040Object* pObject, CpuCore* pCore, const LocalFlashingQueueEntry* pEntry);
-static bool waitForFreeQueueEntry(RP2040Object* pObject, CpuCore* pCore);
-static bool readQueueIndices(RP2040Object* pObject, CpuCore* pCore, LocalFlashingQueueIndices* pOut);
-static bool writeWriteIndex(RP2040Object* pObject, CpuCore* pCore, uint32_t writeIndex);
-static uint32_t freeCompletedQueueEntriesToFreeNeededRam(RP2040Object* pObject, CpuCore* pCore, uint32_t byteCount);
-static bool canAllocateTargetRam(RP2040Object* pObject, uint32_t bytesNeeded);
-static uint32_t allocateTargetRam(RP2040Object* pObject, uint32_t byteCount);
+static uint32_t freeCompletedQueueEntries(RP2350Object* pObject, CpuCore* pCore);
+static bool readQueueEntry(RP2350Object* pObject, CpuCore* pCore, uint32_t index, LocalFlashingQueueEntry* pOut);
+static bool writeQueueEntry(RP2350Object* pObject, CpuCore* pCore, uint32_t index, const LocalFlashingQueueEntry* pIn);
+static void freeRamFromEntry(RP2350Object* pObject, LocalFlashingQueueEntry* pEntry);
+static bool addEntryToQueue(RP2350Object* pObject, CpuCore* pCore, const LocalFlashingQueueEntry* pEntry);
+static bool waitForFreeQueueEntry(RP2350Object* pObject, CpuCore* pCore);
+static bool readQueueIndices(RP2350Object* pObject, CpuCore* pCore, LocalFlashingQueueIndices* pOut);
+static bool writeWriteIndex(RP2350Object* pObject, CpuCore* pCore, uint32_t writeIndex);
+static uint32_t freeCompletedQueueEntriesToFreeNeededRam(RP2350Object* pObject, CpuCore* pCore, uint32_t byteCount);
+static bool canAllocateTargetRam(RP2350Object* pObject, uint32_t bytesNeeded);
+static uint32_t allocateTargetRam(RP2350Object* pObject, uint32_t byteCount);
 
 
 // mri-swd will call this function on each of the devices listed in g_supportedDevices until a non-NULL response
@@ -82,14 +86,14 @@ static uint32_t allocateTargetRam(RP2040Object* pObject, uint32_t byteCount);
 // other routines in this function table. It can even be something malloc()ed. Calling the free() function from this
 // table can then be used to free it. Should return NULL if the connected target isn't recognized as this type of
 // device.
-static DeviceObject* rp2040Detect(CpuCore* pCore)
+static DeviceObject* rp2350Detect(CpuCore* pCore)
 {
-    if (pCore->getTarget()->getTarget() != SWD::RP2040_CORE0)
+    if (pCore->getTarget()->getTarget() != SWD::RP2350)
     {
         return NULL;
     }
 
-    RP2040Object* pObject = (RP2040Object*)malloc(sizeof(*pObject));
+    RP2350Object* pObject = (RP2350Object*)malloc(sizeof(*pObject));
     if (!pObject)
     {
         return NULL;
@@ -104,7 +108,7 @@ static DeviceObject* rp2040Detect(CpuCore* pCore)
 //
 // pvObject is a pointer to the object allocated by detect().
 // pCore is a pointer to the CpuCore object used for interfacing to the core.
-static void rp2040Free(DeviceObject* pvObject, CpuCore* pCore)
+static void rp2350Free(DeviceObject* pvObject, CpuCore* pCore)
 {
     free(pvObject);
 }
@@ -116,9 +120,9 @@ static void rp2040Free(DeviceObject* pvObject, CpuCore* pCore)
 // pCore is a pointer to the CpuCore object used for interfacing to the core.
 //
 // Returns a \0 terminated string indicating this device's name.
-static const char* rp2040GetName(DeviceObject* pvObject, CpuCore* pCore)
+static const char* rp2350GetName(DeviceObject* pvObject, CpuCore* pCore)
 {
-    return "RP2040";
+    return "RP2350";
 }
 
 // The SWD interface will be set to this frequency from the possibly lower rate used during SWD::init().
@@ -127,10 +131,11 @@ static const char* rp2040GetName(DeviceObject* pvObject, CpuCore* pCore)
 // pCore is a pointer to the CpuCore object used for interfacing to the core.
 //
 // Returns the maximum SWCLK frequency supported by this device.
-static uint32_t rp2040MaximumSWDClockFrequency(DeviceObject* pvObject, CpuCore* pCore)
+static uint32_t rp2350MaximumSWDClockFrequency(DeviceObject* pvObject, CpuCore* pCore)
 {
-    // The RP2040 SWD DP can support clock rates up to 24MHz.
-    return 24000000;
+    // UNDONE: Should support up to 50MHz according the RP2350 datasheet.
+    // The RP2350 SWD DP can support clock rates up to 20MHz.
+    return 20000000;
 }
 
 
@@ -141,11 +146,13 @@ static uint32_t rp2040MaximumSWDClockFrequency(DeviceObject* pvObject, CpuCore* 
 // pCore is a pointer to the CpuCore object used for interfacing to the core.
 //
 // Returns true if successful and false otherwise.
-static bool rp2040FlashBegin(DeviceObject* pvObject, CpuCore* pCore)
+static bool rp2350FlashBegin(DeviceObject* pvObject, CpuCore* pCore)
 {
     assert ( pvObject );
-    RP2040Object* pObject = (RP2040Object*)pvObject;
+    RP2350Object* pObject = (RP2350Object*)pvObject;
     disableDmaChannels(pObject, pCore);
+    resetSecureAccessToSRAM(pObject, pCore);
+    switchTargetToSecureState(pObject, pCore);
     if (!loadLocalFlashingCodeOnDevice(pObject, pCore))
     {
         return false;
@@ -153,43 +160,7 @@ static bool rp2040FlashBegin(DeviceObject* pvObject, CpuCore* pCore)
     return startLocalFlashingCodeOnDevice(pObject, pCore);
 }
 
-static bool loadLocalFlashingCodeOnDevice(RP2040Object* pObject, CpuCore* pCore)
-{
-    assert ( sizeof(g_rp2040_LocalFlashing) >= sizeof(pObject->localFlashingConfig) );
-    memcpy(&pObject->localFlashingConfig, g_rp2040_LocalFlashing, sizeof(pObject->localFlashingConfig));
-
-    uint32_t bytesWritten = pCore->writeMemory(pObject->localFlashingConfig.loadAddress, g_rp2040_LocalFlashing, sizeof(g_rp2040_LocalFlashing), SWD::TRANSFER_8BIT);
-    if (bytesWritten != sizeof(g_rp2040_LocalFlashing))
-    {
-        logErrorF("Failed to write %lu bytes of local flashing code to target at address 0x%08X.",
-            sizeof(g_rp2040_LocalFlashing), pObject->localFlashingConfig.loadAddress);
-        return false;
-    }
-    pObject->indicesAddress = pObject->localFlashingConfig.loadAddress + offsetof(LocalFlashingConfig, queueIndices);
-    pObject->writeIndex = pObject->localFlashingConfig.queueIndices.writeIndex;
-    pObject->freeIndex = pObject->writeIndex;
-    pObject->ramWrite = 0;
-    pObject->ramRead = 0;
-    return true;
-}
-
-static bool startLocalFlashingCodeOnDevice(RP2040Object* pObject, CpuCore* pCore)
-{
-    // Set the CPU registers required for starting the FLASHing routine on the device.
-    CortexM_Registers registers;
-    memset(&registers, 0, sizeof(registers));
-    registers.SP = pObject->localFlashingConfig.stackAddress;
-    registers.LR = pObject->localFlashingConfig.routineAddress;
-    registers.PC = pObject->localFlashingConfig.routineAddress;
-
-    if (!startCodeOnDevice(&registers))
-    {
-        return false;
-    }
-    return true;
-}
-
-static void disableDmaChannels(RP2040Object* pObject, CpuCore* pCore)
+static void disableDmaChannels(RP2350Object* pObject, CpuCore* pCore)
 {
     uint32_t channelCount = getDmaChannelCount(pObject, pCore);
     for (uint32_t i = 0 ; i < channelCount ; i++)
@@ -198,20 +169,20 @@ static void disableDmaChannels(RP2040Object* pObject, CpuCore* pCore)
     }
 }
 
-static uint32_t getDmaChannelCount(RP2040Object* pObject, CpuCore* pCore)
+static uint32_t getDmaChannelCount(RP2350Object* pObject, CpuCore* pCore)
 {
-    const uint32_t DMA_N_CHANNELS_Address = 0x50000448;
+    const uint32_t DMA_N_CHANNELS_Address = 0x50000468;
     uint32_t channelCount = 0;
     uint32_t bytesRead = pCore->readMemory(DMA_N_CHANNELS_Address, &channelCount, sizeof(channelCount), SWD::TRANSFER_32BIT);
     if (bytesRead != sizeof(channelCount) || channelCount == 0)
     {
-        logError("Failed to read RP2040 DMA N_CHANNELS register.");
+        logError("Failed to read RP2350 DMA N_CHANNELS register.");
         return 0;
     }
     return channelCount;
 }
 
-static void disableDmaChannel(RP2040Object* pObject, CpuCore* pCore, uint32_t i)
+static void disableDmaChannel(RP2350Object* pObject, CpuCore* pCore, uint32_t i)
 {
     const uint32_t DMA_BASE_Address = 0x50000000;
     // The registers (including all of the aliases) for a channel take up this many bytes.
@@ -229,6 +200,119 @@ static void disableDmaChannel(RP2040Object* pObject, CpuCore* pCore, uint32_t i)
     }
 }
 
+static void resetSecureAccessToSRAM(RP2350Object* pObject, CpuCore* pCore)
+{
+    bool isAccessible = checkDebuggerAccessToAccessCtrl(pObject, pCore);
+    if (!isAccessible)
+    {
+        logError("Debugger can't reset ACCESSCTRL permissions. FLASH programming might fail.");
+        return;
+    }
+    resetAccessControlPermissions(pObject, pCore);
+}
+
+static bool checkDebuggerAccessToAccessCtrl(RP2350Object* pObject, CpuCore* pCore)
+{
+    const uint32_t ACCESSCTRL_LOCK_Address = 0x40060000;
+    uint32_t ACCESSCTRL_LOCK_Value = 0x00000000;
+    uint32_t bytesRead = pCore->readMemory(ACCESSCTRL_LOCK_Address, &ACCESSCTRL_LOCK_Value, sizeof(ACCESSCTRL_LOCK_Value), SWD::TRANSFER_32BIT);
+    if (bytesRead != sizeof(ACCESSCTRL_LOCK_Value))
+    {
+        logError("Failed read from RP2350 ACCESSCTRL_LOCK register.");
+        return false;
+    }
+
+    const uint32_t ACCESSCTRL_LOCK_DEBUG_Bit = 1 << 3;
+    return (ACCESSCTRL_LOCK_Value & ACCESSCTRL_LOCK_DEBUG_Bit) == 0;
+}
+
+static void resetAccessControlPermissions(RP2350Object* pObject, CpuCore* pCore)
+{
+    const uint32_t ACCESSCTRL_CFGRESET_Address = 0x40060008;
+    const uint32_t ACCESSCTRL_PASSWORD = 0xacce0000;
+    const uint32_t ACCESSCTRL_CFGRESET_RESET = 1;
+    const uint32_t ACCESSCTRL_CFGRESET_Value = ACCESSCTRL_PASSWORD | ACCESSCTRL_CFGRESET_RESET;
+    uint32_t bytesWritten = pCore->writeMemory(ACCESSCTRL_CFGRESET_Address, &ACCESSCTRL_CFGRESET_Value, sizeof(ACCESSCTRL_CFGRESET_Value), SWD::TRANSFER_32BIT);
+    if (bytesWritten != sizeof(ACCESSCTRL_CFGRESET_Value))
+    {
+        logError("Failed write to RP2350 ACCESSCTRL_CFGRESET register.");
+    }
+}
+
+static void switchTargetToSecureState(RP2350Object* pObject, CpuCore* pCore)
+{
+    const uint32_t DSCSR_Address = 0xE000EE08;
+    const uint32_t DSCSR_CDSKEY_Bit = 1 << 17;
+    const uint32_t DSCSR_CDS_Bit = 1 << 16;
+    uint32_t DSCSR_Value = 0;
+    uint32_t bytesRead = pCore->readMemory(DSCSR_Address, &DSCSR_Value, sizeof(DSCSR_Value), SWD::TRANSFER_32BIT);
+    if (bytesRead != sizeof(DSCSR_Value))
+    {
+        logError("Failed read from RP2350 DSCSR register.");
+    }
+
+    if (DSCSR_Value & DSCSR_CDS_Bit)
+    {
+        // Return early if the target is already running in the secure state.
+        return;
+    }
+
+    DSCSR_Value = (DSCSR_Value & ~DSCSR_CDSKEY_Bit) | DSCSR_CDS_Bit;
+    uint32_t bytesWritten = pCore->writeMemory(DSCSR_Address, &DSCSR_Value, sizeof(DSCSR_Value), SWD::TRANSFER_32BIT);
+    if (bytesWritten != sizeof(DSCSR_Value))
+    {
+        logError("Failed write to RP2350 DSCSR register.");
+    }
+
+    // Let the user know if it didn't get set properly.
+    DSCSR_Value = 0;
+    bytesRead = pCore->readMemory(DSCSR_Address, &DSCSR_Value, sizeof(DSCSR_Value), SWD::TRANSFER_32BIT);
+    if (bytesRead != sizeof(DSCSR_Value))
+    {
+        logError("Failed read from RP2350 DSCSR register for verification.");
+    }
+    if ((DSCSR_Value & DSCSR_CDS_Bit) == 0)
+    {
+        logErrorF("Failed to set target to secure state. FLASH programming might fail. DSCSR=0x%08X", DSCSR_Value);
+    }
+}
+
+static bool loadLocalFlashingCodeOnDevice(RP2350Object* pObject, CpuCore* pCore)
+{
+    assert ( sizeof(g_rp2350_LocalFlashing) >= sizeof(pObject->localFlashingConfig) );
+    memcpy(&pObject->localFlashingConfig, g_rp2350_LocalFlashing, sizeof(pObject->localFlashingConfig));
+
+    uint32_t bytesWritten = pCore->writeMemory(pObject->localFlashingConfig.loadAddress, g_rp2350_LocalFlashing, sizeof(g_rp2350_LocalFlashing), SWD::TRANSFER_8BIT);
+    if (bytesWritten != sizeof(g_rp2350_LocalFlashing))
+    {
+        logErrorF("Failed to write %lu bytes of local flashing code to target at address 0x%08X.",
+            sizeof(g_rp2350_LocalFlashing), pObject->localFlashingConfig.loadAddress);
+        return false;
+    }
+    pObject->indicesAddress = pObject->localFlashingConfig.loadAddress + offsetof(LocalFlashingConfig, queueIndices);
+    pObject->writeIndex = pObject->localFlashingConfig.queueIndices.writeIndex;
+    pObject->freeIndex = pObject->writeIndex;
+    pObject->ramWrite = 0;
+    pObject->ramRead = 0;
+    return true;
+}
+
+static bool startLocalFlashingCodeOnDevice(RP2350Object* pObject, CpuCore* pCore)
+{
+    // Set the CPU registers required for starting the FLASHing routine on the device.
+    CortexM_Registers registers;
+    memset(&registers, 0, sizeof(registers));
+    registers.SP = pObject->localFlashingConfig.stackAddress;
+    registers.LR = pObject->localFlashingConfig.routineAddress;
+    registers.PC = pObject->localFlashingConfig.routineAddress;
+
+    if (!startCodeOnDevice(&registers))
+    {
+        return false;
+    }
+    return true;
+}
+
 
 // GDB would like the FLASH at the specified address range to be erased in preparation for programming.
 //
@@ -238,9 +322,9 @@ static void disableDmaChannel(RP2040Object* pObject, CpuCore* pCore, uint32_t i)
 // length is the number of bytes starting at address to be erased.
 //
 // Returns true if successful and false otherwise.
-static bool rp2040FlashErase(DeviceObject* pvObject, CpuCore* pCore, uint32_t addressStart, uint32_t length)
+static bool rp2350FlashErase(DeviceObject* pvObject, CpuCore* pCore, uint32_t addressStart, uint32_t length)
 {
-    RP2040Object* pObject = (RP2040Object*)pvObject;
+    RP2350Object* pObject = (RP2350Object*)pvObject;
     assert ( pObject && pCore );
 
     if (!isAddressAndLength4kAligned(addressStart, length))
@@ -298,7 +382,7 @@ static bool isAttemptingToFlashInvalidAddress(uint32_t address, uint32_t length)
     return false;
 }
 
-static uint32_t freeCompletedQueueEntries(RP2040Object* pObject, CpuCore* pCore)
+static uint32_t freeCompletedQueueEntries(RP2350Object* pObject, CpuCore* pCore)
 {
     uint32_t errorCode = 0;
     while (pObject->freeIndex != pObject->writeIndex)
@@ -336,7 +420,7 @@ static uint32_t freeCompletedQueueEntries(RP2040Object* pObject, CpuCore* pCore)
     return errorCode;
 }
 
-static bool readQueueEntry(RP2040Object* pObject, CpuCore* pCore, uint32_t index, LocalFlashingQueueEntry* pOut)
+static bool readQueueEntry(RP2350Object* pObject, CpuCore* pCore, uint32_t index, LocalFlashingQueueEntry* pOut)
 {
     uint32_t entryAddress = pObject->localFlashingConfig.queueAddress + index * sizeof(*pOut);
     uint32_t bytesRead = pCore->readMemory(entryAddress, pOut, sizeof(*pOut), SWD::TRANSFER_32BIT);
@@ -348,7 +432,7 @@ static bool readQueueEntry(RP2040Object* pObject, CpuCore* pCore, uint32_t index
     return true;
 }
 
-static bool writeQueueEntry(RP2040Object* pObject, CpuCore* pCore, uint32_t index, const LocalFlashingQueueEntry* pIn)
+static bool writeQueueEntry(RP2350Object* pObject, CpuCore* pCore, uint32_t index, const LocalFlashingQueueEntry* pIn)
 {
     uint32_t entryAddress = pObject->localFlashingConfig.queueAddress + index * sizeof(*pIn);
     uint32_t bytesWritten = pCore->writeMemory(entryAddress, pIn, sizeof(*pIn), SWD::TRANSFER_32BIT);
@@ -360,7 +444,7 @@ static bool writeQueueEntry(RP2040Object* pObject, CpuCore* pCore, uint32_t inde
     return true;
 }
 
-static void freeRamFromEntry(RP2040Object* pObject, LocalFlashingQueueEntry* pEntry)
+static void freeRamFromEntry(RP2350Object* pObject, LocalFlashingQueueEntry* pEntry)
 {
     if (pEntry->alloc == 0)
     {
@@ -376,7 +460,7 @@ static void freeRamFromEntry(RP2040Object* pObject, LocalFlashingQueueEntry* pEn
     pEntry->alloc = 0;
 }
 
-static bool addEntryToQueue(RP2040Object* pObject, CpuCore* pCore, const LocalFlashingQueueEntry* pEntry)
+static bool addEntryToQueue(RP2350Object* pObject, CpuCore* pCore, const LocalFlashingQueueEntry* pEntry)
 {
     if (!waitForFreeQueueEntry(pObject, pCore))
     {
@@ -394,7 +478,7 @@ static bool addEntryToQueue(RP2040Object* pObject, CpuCore* pCore, const LocalFl
     return true;
 }
 
-static bool waitForFreeQueueEntry(RP2040Object* pObject, CpuCore* pCore)
+static bool waitForFreeQueueEntry(RP2350Object* pObject, CpuCore* pCore)
 {
     absolute_time_t endTime = make_timeout_time_ms(EXEC_RP2040_BOOT_ROM_FUNC_TIMEOUT_MS);
     do
@@ -420,7 +504,7 @@ static bool waitForFreeQueueEntry(RP2040Object* pObject, CpuCore* pCore)
     return false;
 }
 
-static bool readQueueIndices(RP2040Object* pObject, CpuCore* pCore, LocalFlashingQueueIndices* pOut)
+static bool readQueueIndices(RP2350Object* pObject, CpuCore* pCore, LocalFlashingQueueIndices* pOut)
 {
     uint32_t bytesRead = pCore->readMemory(pObject->indicesAddress, pOut, sizeof(*pOut), SWD::TRANSFER_32BIT);
     if (bytesRead != sizeof(*pOut))
@@ -431,7 +515,7 @@ static bool readQueueIndices(RP2040Object* pObject, CpuCore* pCore, LocalFlashin
     return true;
 }
 
-static bool writeWriteIndex(RP2040Object* pObject, CpuCore* pCore, uint32_t writeIndex)
+static bool writeWriteIndex(RP2350Object* pObject, CpuCore* pCore, uint32_t writeIndex)
 {
     uint32_t address = pObject->indicesAddress + offsetof(LocalFlashingQueueIndices, writeIndex);
     uint32_t bytesWritten = pCore->writeMemory(address, &writeIndex, sizeof(writeIndex), SWD::TRANSFER_32BIT);
@@ -453,9 +537,9 @@ static bool writeWriteIndex(RP2040Object* pObject, CpuCore* pCore, uint32_t writ
 // bufferSize is the number of bytes in pBuffer to be programmed into FLASH at the specified location.
 //
 // Returns true if successful and false otherwise.
-static bool rp2040FlashProgram(DeviceObject* pvObject, CpuCore* pCore, uint32_t addressStart, const void* pBuffer, size_t bufferSize)
+static bool rp2350FlashProgram(DeviceObject* pvObject, CpuCore* pCore, uint32_t addressStart, const void* pBuffer, size_t bufferSize)
 {
-    RP2040Object* pObject = (RP2040Object*)pvObject;
+    RP2350Object* pObject = (RP2350Object*)pvObject;
     assert ( pObject && pCore );
 
     if (isAttemptingToFlashInvalidAddress(addressStart, bufferSize))
@@ -505,7 +589,7 @@ static bool rp2040FlashProgram(DeviceObject* pvObject, CpuCore* pCore, uint32_t 
     return true;
 }
 
-static uint32_t freeCompletedQueueEntriesToFreeNeededRam(RP2040Object* pObject, CpuCore* pCore, uint32_t byteCount)
+static uint32_t freeCompletedQueueEntriesToFreeNeededRam(RP2350Object* pObject, CpuCore* pCore, uint32_t byteCount)
 {
     if (byteCount > pObject->localFlashingConfig.ramLength)
     {
@@ -523,7 +607,7 @@ static uint32_t freeCompletedQueueEntriesToFreeNeededRam(RP2040Object* pObject, 
     return 0;
 }
 
-static bool canAllocateTargetRam(RP2040Object* pObject, uint32_t bytesNeeded)
+static bool canAllocateTargetRam(RP2350Object* pObject, uint32_t bytesNeeded)
 {
     // This check is a little more complicated than a usual circular buffer since the allocation needs to be contiguous,
     // so it can't split bytes across the end of the buffer.
@@ -540,7 +624,7 @@ static bool canAllocateTargetRam(RP2040Object* pObject, uint32_t bytesNeeded)
     }
 }
 
-static uint32_t allocateTargetRam(RP2040Object* pObject, uint32_t byteCount)
+static uint32_t allocateTargetRam(RP2350Object* pObject, uint32_t byteCount)
 {
     if (pObject->ramRead <= pObject->ramWrite)
     {
@@ -584,9 +668,9 @@ static uint32_t allocateTargetRam(RP2040Object* pObject, uint32_t byteCount)
 // pCore is a pointer to the CpuCore object used for interfacing to the core.
 //
 // Returns true if successful and false otherwise.
-static bool rp2040FlashEnd(DeviceObject* pvObject, CpuCore* pCore)
+static bool rp2350FlashEnd(DeviceObject* pvObject, CpuCore* pCore)
 {
-    RP2040Object* pObject = (RP2040Object*)pvObject;
+    RP2350Object* pObject = (RP2350Object*)pvObject;
     assert ( pObject && pCore );
 
     uint32_t errorCode = freeCompletedQueueEntries(pObject, pCore);
@@ -627,13 +711,13 @@ static bool rp2040FlashEnd(DeviceObject* pvObject, CpuCore* pCore)
 }
 
 
-// The FLASH region is set to the maximum 16MB supported by the RP2040 and might not reflect the actual size of the
+// The FLASH region is set to the maximum 16MB supported by the RP2350 and might not reflect the actual size of the
 // FLASH part attached to the CPU.
 static const DeviceMemoryRegion g_memoryRegions[] =
 {
     { .address = 0x00000000, .length = 0x4000, .blockSize = 0, .type = DEVICE_MEMORY_ROM },
-    { .address = 0x10000000, .length = 0x1000000, .blockSize = FLASH_PAGE_SIZE, .type = DEVICE_MEMORY_FLASH },
-    { .address = 0x20000000, .length = 0x42000, .blockSize = 0, .type = DEVICE_MEMORY_RAM }
+    { .address = FLASH_START_ADDRESS, .length = FLASH_MAX_SIZE, .blockSize = FLASH_PAGE_SIZE, .type = DEVICE_MEMORY_FLASH },
+    { .address = RAM_START_ADDRESS, .length = RAM_SIZE, .blockSize = 0, .type = DEVICE_MEMORY_RAM }
 };
 static const DeviceMemoryLayout g_memoryLayout =
 {
@@ -652,7 +736,7 @@ static const DeviceMemoryLayout g_memoryLayout =
 // pCore is a pointer to the CpuCore object used for interfacing to the core.
 //
 // Returns a pointer to the memory layout description for this device. Can't be NULL.
-const DeviceMemoryLayout* rp2040GetMemoryLayout(DeviceObject* pvObject, CpuCore* pCore)
+const DeviceMemoryLayout* rp2350GetMemoryLayout(DeviceObject* pvObject, CpuCore* pCore)
 {
     return &g_memoryLayout;
 }
@@ -662,8 +746,8 @@ const DeviceMemoryLayout* rp2040GetMemoryLayout(DeviceObject* pvObject, CpuCore*
 // This function pointer can be set to the deviceNoAdditionalTarget() function declared below for single core
 // devices.
 //
-// An example implementation where an additional target is added can be found in rp2040.cpp to expose the second
-// core on the RP2040.
+// An example implementation where an additional target is added can be found in rp2350.cpp to expose the second
+// core on the RP2350.
 //
 // pvObject is a pointer to the object allocated by detect().
 // pCore is a pointer to the CpuCore object used for interfacing to the core.
@@ -672,12 +756,17 @@ const DeviceMemoryLayout* rp2040GetMemoryLayout(DeviceObject* pvObject, CpuCore*
 // pCoreCount is the number of additional pCoreArray elements that were actually initialized by this function.
 //
 // Returns true if successful and false otherwise.
-bool rp2040GetAdditionalTargets(DeviceObject* pvObject, CpuCore* pCore, CpuCore* pCoreArray, size_t coreArrayLength, size_t* pCoreCount)
+bool rp2350GetAdditionalTargets(DeviceObject* pvObject, CpuCore* pCore, CpuCore* pCoreArray, size_t coreArrayLength, size_t* pCoreCount)
 {
+    // UNDONE: Add multi-core support through multiple APs to SWD.
+    *pCoreCount = 0;
+    return true;
+
+#ifdef UNDONE
     assert ( coreArrayLength >= 1 );
 
     SWD* pCoreBus = pCore->getTarget()->getSwdBus();
-    if (!pCoreBus->selectSwdTarget(SWD::RP2040_CORE1))
+    if (!pCoreBus->selectSwdTarget(SWD::RP2350_CORE1))
     {
         logError("Failed to find the second core on SWD bus.");
         return false;
@@ -691,22 +780,23 @@ bool rp2040GetAdditionalTargets(DeviceObject* pvObject, CpuCore* pCore, CpuCore*
 
     *pCoreCount = 1;
     return true;
+#endif // UNDONE
 }
 
 
 // The function pointer table for this device. A pointer to it can be found in g_supportedDevices (in devices.cpp).
-DeviceFunctionTable g_rp2040DeviceSupport =
+DeviceFunctionTable g_rp2350DeviceSupport =
 {
-    .detect = rp2040Detect,
-    .free = rp2040Free,
-    .getName = rp2040GetName,
-    .hasFpu = deviceHasNoFpu,
-    .getMaximumSWDClockFrequency = rp2040MaximumSWDClockFrequency,
-    .flashBegin = rp2040FlashBegin,
-    .flashErase = rp2040FlashErase,
-    .flashProgram = rp2040FlashProgram,
-    .flashEnd = rp2040FlashEnd,
-    .getMemoryLayout = rp2040GetMemoryLayout,
-    .getAdditionalTargets = rp2040GetAdditionalTargets,
+    .detect = rp2350Detect,
+    .free = rp2350Free,
+    .getName = rp2350GetName,
+    .hasFpu = deviceHasFpu,
+    .getMaximumSWDClockFrequency = rp2350MaximumSWDClockFrequency,
+    .flashBegin = rp2350FlashBegin,
+    .flashErase = rp2350FlashErase,
+    .flashProgram = rp2350FlashProgram,
+    .flashEnd = rp2350FlashEnd,
+    .getMemoryLayout = rp2350GetMemoryLayout,
+    .getAdditionalTargets = rp2350GetAdditionalTargets,
     .handleMonitorCommand = NULL
 };

@@ -29,5 +29,8 @@ mri.log
 # Intermediate graphics where the final output is stored as .png
 *.paint
 
+# Boot ROM symbols that I keep on my local drive.
+/*bootrom*.elf
+
 # Metadata created by macOS.
 .DS_Store

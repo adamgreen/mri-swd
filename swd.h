@@ -35,6 +35,7 @@ class SWD
             RP2040_CORE0 = 0x01002927,  // *
             RP2040_CORE1 = 0x11002927,
             RP2040_RESCUE = 0xf1002927,
+            RP2350 = 0x00040927,        // *
             // No known target is currently selected on the SWD bus.
             UNKNOWN = 0,
             // A DPv1 target which doesn't require a DPv2 TARGETSEL value is selected on the SWD bus.

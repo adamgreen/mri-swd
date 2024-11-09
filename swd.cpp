@@ -24,7 +24,8 @@
 // Array of known DPv2 targets.
 static SWD::DPv2Targets g_knownDPv2Targets[] =
 {
-    SWD::RP2040_CORE0
+    SWD::RP2040_CORE0,
+    SWD::RP2350,
 };
 
 
