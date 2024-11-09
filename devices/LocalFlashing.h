@@ -18,6 +18,7 @@
 #define LOCAL_FLASHING_H_
 
 #include <stdint.h>
+#include "cpu_core.h"
 
 // Set LocalFlashQueueEntry.ramAddress to this value for operations like LOCAL_FLASHING_OP_ERASE which don't use
 // RAM.
@@ -59,5 +60,22 @@ typedef struct
     uint32_t                  routineAddress;
     uint32_t                  loadAddress;
 } LocalFlashingConfig;
+
+// Object caches pointers to the ROM based FLASH related routines in the object context.
+typedef struct LocalFlashingObject
+{
+    LocalFlashingConfig localFlashingConfig;
+    uint32_t            indicesAddress;
+    uint32_t            freeIndex;
+    uint32_t            writeIndex;
+    uint32_t            ramWrite;
+    uint32_t            ramRead;
+} LocalFlashingObject;
+
+
+bool localFlashingInit(LocalFlashingObject* pObject, CpuCore* pCore, const uint8_t* pTargetCode, size_t targetCodeSize);
+bool localFlashingQueueEraseOperation(LocalFlashingObject* pObject, CpuCore* pCore, uint32_t addressStart, uint32_t length);
+bool localFlashingQueueProgramOperation(LocalFlashingObject* pObject, CpuCore* pCore, uint32_t addressStart, const void* pBuffer, size_t bufferSize, size_t alignedSize);
+bool localFlashingUninit(LocalFlashingObject* pObject, CpuCore* pCore);
 
 #endif // LOCAL_FLASHING_H_

@@ -81,6 +81,7 @@ target_include_directories(mri-swd PRIVATE
 # Sources for devices and device families supported by mri-swd.
 target_sources(mri-swd PRIVATE
     devices/devices.cpp
+    devices/LocalFlashing.cpp
     devices/rp2040.cpp
     devices/rp2350.cpp
     devices/nrf52.cpp

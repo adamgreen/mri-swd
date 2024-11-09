@@ -1,4 +1,4 @@
-/* Copyright 2023 Adam Green (https://github.com/adamgreen/)
+/* Copyright 2024 Adam Green (https://github.com/adamgreen/)
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -40,37 +40,16 @@ static const uint32_t RAM_SIZE = 264*1024;
 static const uint32_t RAM_END_ADDRESS = RAM_START_ADDRESS + RAM_SIZE;
 
 // RP2040 object caches pointers to the ROM based FLASH related routines in the object context.
-struct RP2040Object
-{
-    LocalFlashingConfig localFlashingConfig;
-    uint32_t            indicesAddress;
-    uint32_t            freeIndex;
-    uint32_t            writeIndex;
-    uint32_t            ramWrite;
-    uint32_t            ramRead;
-};
+typedef struct LocalFlashingObject RP2040Object;
 
 
 // Forward function declarations.
-static bool loadLocalFlashingCodeOnDevice(RP2040Object* pObject, CpuCore* pCore);
-static bool startLocalFlashingCodeOnDevice(RP2040Object* pObject, CpuCore* pCore);
 static void disableDmaChannels(RP2040Object* pObject, CpuCore* pCore);
 static uint32_t getDmaChannelCount(RP2040Object* pObject, CpuCore* pCore);
 static void disableDmaChannel(RP2040Object* pObject, CpuCore* pCore, uint32_t i);
 static bool isAddressAndLength4kAligned(uint32_t address, uint32_t length);
 static bool is4kAligned(uint32_t value);
 static bool isAttemptingToFlashInvalidAddress(uint32_t address, uint32_t length);
-static uint32_t freeCompletedQueueEntries(RP2040Object* pObject, CpuCore* pCore);
-static bool readQueueEntry(RP2040Object* pObject, CpuCore* pCore, uint32_t index, LocalFlashingQueueEntry* pOut);
-static bool writeQueueEntry(RP2040Object* pObject, CpuCore* pCore, uint32_t index, const LocalFlashingQueueEntry* pIn);
-static void freeRamFromEntry(RP2040Object* pObject, LocalFlashingQueueEntry* pEntry);
-static bool addEntryToQueue(RP2040Object* pObject, CpuCore* pCore, const LocalFlashingQueueEntry* pEntry);
-static bool waitForFreeQueueEntry(RP2040Object* pObject, CpuCore* pCore);
-static bool readQueueIndices(RP2040Object* pObject, CpuCore* pCore, LocalFlashingQueueIndices* pOut);
-static bool writeWriteIndex(RP2040Object* pObject, CpuCore* pCore, uint32_t writeIndex);
-static uint32_t freeCompletedQueueEntriesToFreeNeededRam(RP2040Object* pObject, CpuCore* pCore, uint32_t byteCount);
-static bool canAllocateTargetRam(RP2040Object* pObject, uint32_t bytesNeeded);
-static uint32_t allocateTargetRam(RP2040Object* pObject, uint32_t byteCount);
 
 
 // mri-swd will call this function on each of the devices listed in g_supportedDevices until a non-NULL response
@@ -146,47 +125,7 @@ static bool rp2040FlashBegin(DeviceObject* pvObject, CpuCore* pCore)
     assert ( pvObject );
     RP2040Object* pObject = (RP2040Object*)pvObject;
     disableDmaChannels(pObject, pCore);
-    if (!loadLocalFlashingCodeOnDevice(pObject, pCore))
-    {
-        return false;
-    }
-    return startLocalFlashingCodeOnDevice(pObject, pCore);
-}
-
-static bool loadLocalFlashingCodeOnDevice(RP2040Object* pObject, CpuCore* pCore)
-{
-    assert ( sizeof(g_rp2040_LocalFlashing) >= sizeof(pObject->localFlashingConfig) );
-    memcpy(&pObject->localFlashingConfig, g_rp2040_LocalFlashing, sizeof(pObject->localFlashingConfig));
-
-    uint32_t bytesWritten = pCore->writeMemory(pObject->localFlashingConfig.loadAddress, g_rp2040_LocalFlashing, sizeof(g_rp2040_LocalFlashing), SWD::TRANSFER_8BIT);
-    if (bytesWritten != sizeof(g_rp2040_LocalFlashing))
-    {
-        logErrorF("Failed to write %lu bytes of local flashing code to target at address 0x%08X.",
-            sizeof(g_rp2040_LocalFlashing), pObject->localFlashingConfig.loadAddress);
-        return false;
-    }
-    pObject->indicesAddress = pObject->localFlashingConfig.loadAddress + offsetof(LocalFlashingConfig, queueIndices);
-    pObject->writeIndex = pObject->localFlashingConfig.queueIndices.writeIndex;
-    pObject->freeIndex = pObject->writeIndex;
-    pObject->ramWrite = 0;
-    pObject->ramRead = 0;
-    return true;
-}
-
-static bool startLocalFlashingCodeOnDevice(RP2040Object* pObject, CpuCore* pCore)
-{
-    // Set the CPU registers required for starting the FLASHing routine on the device.
-    CortexM_Registers registers;
-    memset(&registers, 0, sizeof(registers));
-    registers.SP = pObject->localFlashingConfig.stackAddress;
-    registers.LR = pObject->localFlashingConfig.routineAddress;
-    registers.PC = pObject->localFlashingConfig.routineAddress;
-
-    if (!startCodeOnDevice(&registers))
-    {
-        return false;
-    }
-    return true;
+    return localFlashingInit(pObject, pCore, g_rp2040_LocalFlashing, sizeof(g_rp2040_LocalFlashing));
 }
 
 static void disableDmaChannels(RP2040Object* pObject, CpuCore* pCore)
@@ -254,28 +193,7 @@ static bool rp2040FlashErase(DeviceObject* pvObject, CpuCore* pCore, uint32_t ad
         return false;
     }
 
-    uint32_t errorCode = freeCompletedQueueEntries(pObject, pCore);
-    if (errorCode != 0)
-    {
-        return false;
-    }
-
-    // Add FLASH erase operation to device's queue.
-    LocalFlashingQueueEntry entry =
-    {
-        .op = LOCAL_FLASHING_OP_ERASE,
-        .errorCode = 0,
-        .flashAddress = addressStart,
-        .ramAddress = LOCAL_FLASHING_RAM_UNUSED,
-        .size = length,
-        .alloc = 0
-    };
-    if (!addEntryToQueue(pObject, pCore, &entry))
-    {
-        return false;
-    }
-
-    return true;
+    return localFlashingQueueEraseOperation(pObject, pCore, addressStart, length);
 }
 
 static bool isAddressAndLength4kAligned(uint32_t address, uint32_t length)
@@ -296,151 +214,6 @@ static bool isAttemptingToFlashInvalidAddress(uint32_t address, uint32_t length)
         return true;
     }
     return false;
-}
-
-static uint32_t freeCompletedQueueEntries(RP2040Object* pObject, CpuCore* pCore)
-{
-    uint32_t errorCode = 0;
-    while (pObject->freeIndex != pObject->writeIndex)
-    {
-        LocalFlashingQueueEntry entry;
-        if (!readQueueEntry(pObject, pCore, pObject->freeIndex, &entry))
-        {
-            logError("Failed call to readQueueEntry().");
-            return 0xFFFFFFFF;
-        }
-        if (entry.op != LOCAL_FLASHING_OP_COMPLETE)
-        {
-            // We have encountered the first entry that hasn't been completed yet so return.
-            break;
-        }
-
-        // Remember the first error code we encounter.
-        if (errorCode == 0 && entry.errorCode != 0)
-        {
-            errorCode = entry.errorCode;
-        }
-
-        // Free any RAM associated with this operation as it is no longer in use.
-        freeRamFromEntry(pObject, &entry);
-
-        // Mark the completed entry as free now that any associated RAM has been freed.
-        entry.op = LOCAL_FLASHING_OP_FREE;
-        if (!writeQueueEntry(pObject, pCore, pObject->freeIndex, &entry))
-        {
-            logError("Failed call to writeQueueEntry().");
-            return 0xFFFFFFFF;
-        }
-        pObject->freeIndex = (pObject->freeIndex + 1) % pObject->localFlashingConfig.queueLength;
-    }
-    return errorCode;
-}
-
-static bool readQueueEntry(RP2040Object* pObject, CpuCore* pCore, uint32_t index, LocalFlashingQueueEntry* pOut)
-{
-    uint32_t entryAddress = pObject->localFlashingConfig.queueAddress + index * sizeof(*pOut);
-    uint32_t bytesRead = pCore->readMemory(entryAddress, pOut, sizeof(*pOut), SWD::TRANSFER_32BIT);
-    if (bytesRead != sizeof(*pOut))
-    {
-        logErrorF("Failed to read LocalFlashingQueueEntry element %lu from target.", index);
-        return false;
-    }
-    return true;
-}
-
-static bool writeQueueEntry(RP2040Object* pObject, CpuCore* pCore, uint32_t index, const LocalFlashingQueueEntry* pIn)
-{
-    uint32_t entryAddress = pObject->localFlashingConfig.queueAddress + index * sizeof(*pIn);
-    uint32_t bytesWritten = pCore->writeMemory(entryAddress, pIn, sizeof(*pIn), SWD::TRANSFER_32BIT);
-    if (bytesWritten != sizeof(*pIn))
-    {
-        logErrorF("Failed to write LocalFlashingQueueEntry element %lu to target.", index);
-        return false;
-    }
-    return true;
-}
-
-static void freeRamFromEntry(RP2040Object* pObject, LocalFlashingQueueEntry* pEntry)
-{
-    if (pEntry->alloc == 0)
-    {
-        return;
-    }
-
-    uint32_t endOffset = pEntry->ramAddress + pEntry->alloc - pObject->localFlashingConfig.ramAddress;
-    if (endOffset >= pObject->localFlashingConfig.ramLength)
-    {
-        endOffset = 0;
-    }
-    pObject->ramRead = endOffset;
-    pEntry->alloc = 0;
-}
-
-static bool addEntryToQueue(RP2040Object* pObject, CpuCore* pCore, const LocalFlashingQueueEntry* pEntry)
-{
-    if (!waitForFreeQueueEntry(pObject, pCore))
-    {
-        return false;
-    }
-    if (!writeQueueEntry(pObject, pCore, pObject->writeIndex, pEntry))
-    {
-        return false;
-    }
-    pObject->writeIndex = (pObject->writeIndex + 1) % pObject->localFlashingConfig.queueLength;
-    if (!writeWriteIndex(pObject, pCore, pObject->writeIndex))
-    {
-        return false;
-    }
-    return true;
-}
-
-static bool waitForFreeQueueEntry(RP2040Object* pObject, CpuCore* pCore)
-{
-    absolute_time_t endTime = make_timeout_time_ms(EXEC_RP2040_BOOT_ROM_FUNC_TIMEOUT_MS);
-    do
-    {
-        LocalFlashingQueueIndices indices;
-        if (!readQueueIndices(pObject, pCore, &indices))
-        {
-            return false;
-        }
-        if (indices.writeIndex != pObject->writeIndex)
-        {
-            logErrorF("Expected writeIndex=%lu. Actual=%lu", pObject->writeIndex, indices.writeIndex);
-            return false;
-        }
-        uint32_t nextIndex = (pObject->writeIndex + 1) % pObject->localFlashingConfig.queueLength;
-        if (nextIndex != indices.readIndex)
-        {
-            // Queue isn't full so we have at least one free entry.
-            return true;
-        }
-    } while (absolute_time_diff_us(get_absolute_time(), endTime) > 0);
-
-    return false;
-}
-
-static bool readQueueIndices(RP2040Object* pObject, CpuCore* pCore, LocalFlashingQueueIndices* pOut)
-{
-    uint32_t bytesRead = pCore->readMemory(pObject->indicesAddress, pOut, sizeof(*pOut), SWD::TRANSFER_32BIT);
-    if (bytesRead != sizeof(*pOut))
-    {
-        logError("Failed to read LocalFlashingQueueIndices from target.");
-        return false;
-    }
-    return true;
-}
-
-static bool writeWriteIndex(RP2040Object* pObject, CpuCore* pCore, uint32_t writeIndex)
-{
-    uint32_t address = pObject->indicesAddress + offsetof(LocalFlashingQueueIndices, writeIndex);
-    uint32_t bytesWritten = pCore->writeMemory(address, &writeIndex, sizeof(writeIndex), SWD::TRANSFER_32BIT);
-    if (bytesWritten != sizeof(writeIndex))
-    {
-        logErrorF("Failed to write %lu to LocalFlashingQueueIndices.writeIndex to target.", writeIndex);
-        return false;
-    }
-    return true;
 }
 
 
@@ -464,14 +237,6 @@ static bool rp2040FlashProgram(DeviceObject* pvObject, CpuCore* pCore, uint32_t 
         return false;
     }
 
-    uint32_t errorCode = freeCompletedQueueEntriesToFreeNeededRam(pObject, pCore, bufferSize);
-    if (errorCode != 0)
-    {
-        logErrorF("Failed call to freeCompletedQueueEntriesToFreeNeededRam(pCore, %lu) with error %lu", bufferSize, errorCode);
-        return false;
-    }
-    uint32_t targetRamAddress = allocateTargetRam(pObject, bufferSize);
-
     // Make sure that the buffer is 32-bit aligned.
     const uint32_t alignment = sizeof(uint32_t);
     uint32_t alignedBuffer[PACKET_SIZE / sizeof(uint32_t)];
@@ -479,101 +244,7 @@ static bool rp2040FlashProgram(DeviceObject* pvObject, CpuCore* pCore, uint32_t 
     assert ( alignedSize <= sizeof(alignedBuffer) );
     memcpy(alignedBuffer, pBuffer, bufferSize);
 
-    // Copy buffer from debugger to target RAM.
-    uint32_t bytesCopied = pCore->writeMemory(targetRamAddress, alignedBuffer, alignedSize, SWD::TRANSFER_32BIT);
-    if (bytesCopied != alignedSize)
-    {
-        logErrorF("Failed to copy %lu bytes to target RAM @ 0x%08lX.", alignedSize, targetRamAddress);
-        return false;
-    }
-
-    // Add FLASH write operation to device's queue.
-    LocalFlashingQueueEntry entry =
-    {
-        .op = LOCAL_FLASHING_OP_WRITE,
-        .errorCode = 0,
-        .flashAddress = addressStart,
-        .ramAddress = targetRamAddress,
-        .size = bufferSize,
-        .alloc = alignedSize
-    };
-    if (!addEntryToQueue(pObject, pCore, &entry))
-    {
-        return false;
-    }
-
-    return true;
-}
-
-static uint32_t freeCompletedQueueEntriesToFreeNeededRam(RP2040Object* pObject, CpuCore* pCore, uint32_t byteCount)
-{
-    if (byteCount > pObject->localFlashingConfig.ramLength)
-    {
-        return 0xFFFFFFFF;
-    }
-    while (!canAllocateTargetRam(pObject, byteCount))
-    {
-        uint32_t result = freeCompletedQueueEntries(pObject, pCore);
-        if (result != 0)
-        {
-            return result;
-        }
-    }
-
-    return 0;
-}
-
-static bool canAllocateTargetRam(RP2040Object* pObject, uint32_t bytesNeeded)
-{
-    // This check is a little more complicated than a usual circular buffer since the allocation needs to be contiguous,
-    // so it can't split bytes across the end of the buffer.
-    if (pObject->ramRead <= pObject->ramWrite)
-    {
-        uint32_t endSpace = pObject->localFlashingConfig.ramLength - pObject->ramWrite;
-        uint32_t startSpace = pObject->ramRead;
-        return (bytesNeeded <= endSpace || bytesNeeded < startSpace);
-    }
-    else
-    {
-        uint32_t freeSpace = pObject->ramRead - pObject->ramWrite;
-        return (bytesNeeded < freeSpace);
-    }
-}
-
-static uint32_t allocateTargetRam(RP2040Object* pObject, uint32_t byteCount)
-{
-    if (pObject->ramRead <= pObject->ramWrite)
-    {
-        // Read pointer is still lagging behind write pointer.
-        uint32_t endSpace = pObject->localFlashingConfig.ramLength - pObject->ramWrite;
-        if (byteCount <= endSpace)
-        {
-            // Fits in free space at end of target RAM.
-            uint32_t alloc = pObject->ramWrite;
-            pObject->ramWrite = pObject->ramWrite + byteCount;
-            if (pObject->ramWrite >= pObject->localFlashingConfig.ramLength)
-            {
-                pObject->ramWrite = 0;
-            }
-            return pObject->localFlashingConfig.ramAddress + alloc;
-        }
-        else
-        {
-            // Fits in free space at the very beginning of target RAM.
-            uint32_t alloc = 0;
-            pObject->ramWrite = byteCount;
-            assert ( pObject->ramWrite < pObject->ramRead );
-            return pObject->localFlashingConfig.ramAddress + alloc;
-        }
-    }
-    else
-    {
-        // Write pointer has wrapped around and is now behind read pointer.
-        uint32_t alloc = pObject->ramWrite;
-        pObject->ramWrite = pObject->ramWrite + byteCount;
-        assert ( pObject->ramWrite < pObject->ramRead );
-        return pObject->localFlashingConfig.ramAddress + alloc;
-    }
+    return localFlashingQueueProgramOperation(pObject, pCore, addressStart, alignedBuffer, bufferSize, alignedSize);
 }
 
 
@@ -589,41 +260,7 @@ static bool rp2040FlashEnd(DeviceObject* pvObject, CpuCore* pCore)
     RP2040Object* pObject = (RP2040Object*)pvObject;
     assert ( pObject && pCore );
 
-    uint32_t errorCode = freeCompletedQueueEntries(pObject, pCore);
-    if (errorCode != 0)
-    {
-        logErrorF("Failed call to freeCompletedQueueEntries() with error %lu", errorCode);
-        return false;
-    }
-
-    // Ask target to trigger breakpoint when it is done processing the queue.
-    LocalFlashingQueueEntry entry =
-    {
-        .op = LOCAL_FLASHING_OP_BREAKPOINT,
-        .errorCode = 0,
-        .flashAddress = 0,
-        .ramAddress = LOCAL_FLASHING_RAM_UNUSED,
-        .size = 0,
-        .alloc = 0
-    };
-    if (!addEntryToQueue(pObject, pCore, &entry))
-    {
-        return false;
-    }
-
-    // Wait for breakpoint to trigger.
-    CortexM_Registers registers;
-    if (!waitForCodeToHalt(&registers, EXEC_RP2040_BOOT_ROM_FUNC_TIMEOUT_MS))
-    {
-        logError("Failed waiting for target to finish FLASHing.");
-        return false;
-    }
-
-    // UNDONE: Just doing for assert.
-    freeCompletedQueueEntries(pObject, pCore);
-    assert ( pObject->ramRead == pObject->ramWrite && pObject->freeIndex == pObject->writeIndex );
-
-    return true;
+    return localFlashingUninit(pObject, pCore);
 }
 
 
