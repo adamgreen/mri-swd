@@ -23,7 +23,7 @@ CpuCore::CpuCore()
 {
 }
 
-bool CpuCore::init(SWD* pSwdBus, void (*pHandler)(void), uint32_t coreId)
+bool CpuCore::init(SWD* pSwdBus, void (*pHandler)(void), uint32_t coreId, SwdCoreType type)
 {
     m_coreId = coreId;
     m_ignoreReadErrors = false;
@@ -31,7 +31,7 @@ bool CpuCore::init(SWD* pSwdBus, void (*pHandler)(void), uint32_t coreId)
     m_currState = MRI_PLATFORM_THREAD_THAWED;
 
     assert ( m_pSwdBus == NULL && m_contextEntries.count == 0 && m_currentDHCSR == 0 );
-    if (!initSWD(pSwdBus))
+    if (!initSWD(pSwdBus, type))
     {
         return false;
     }
@@ -44,10 +44,22 @@ bool CpuCore::init(SWD* pSwdBus, void (*pHandler)(void), uint32_t coreId)
     return true;
 }
 
-bool CpuCore::initSWD(SWD* pSwdBus)
+bool CpuCore::initSWD(SWD* pSwdBus, SwdCoreType type)
 {
     logInfo("Initializing target's debug components...");
-    bool result = pSwdBus->initTargetForDebugging(m_swd);
+    bool result = false;
+    switch (type)
+    {
+        case DP_CORE:
+            result = pSwdBus->initTargetDpForDebugging(m_swd);
+            break;
+        case AP_CORE:
+            result = pSwdBus->initApTarget(m_swd);
+            break;
+        default:
+            assert ( type == DP_CORE || type == AP_CORE );
+            break;
+    }
     if (!result)
     {
         logError("Failed to initialize target's debug components.");
@@ -1963,7 +1975,7 @@ bool CpuCores::init(SWD* pSwdBus, void (*pHandler)(void))
 
     // Initialize the first/default core.
     CpuCore* pDefaultCore = &m_cores[0];
-    if (!pDefaultCore->init(pSwdBus, pHandler, 0))
+    if (!pDefaultCore->init(pSwdBus, pHandler, 0, CpuCore::DP_CORE))
     {
         logError("Failed to initialize core0's debug components.");
         return false;

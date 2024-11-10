@@ -144,7 +144,19 @@ class SWD
         //  Enabling debug and system power for the currently select DP.
         //  Enabling overrun detection which is required for proper functioning of this SWD driver.
         //  Finding the MEM-AP which is the debug entry.
-        bool initTargetForDebugging(SwdTarget& target);
+        //
+        // target - SwdTarget to be filled in with information unique to the current CPU core.
+        //
+        // Returns true if init was successful and false otherwise.
+        bool initTargetDpForDebugging(SwdTarget& target);
+
+        // Method to initialize a SwdTarget for a CPU core that shares the DP with other cores and instead uses a
+        // different AP.
+        //
+        // target - SwdTarget to be filled in with information unique to the current CPU core.
+        //
+        // Returns true if init was successful and false otherwise.
+        bool initApTarget(SwdTarget& target);
 
         // Method which returns the currently connected DPv2 target, if any.
         //
@@ -460,6 +472,10 @@ class SWD
         // Returns true if operation was successful and false otherwise.
         bool selectAP(uint32_t ap);
 
+        // Method to select the AP and verify that it is a valid MEM-AP.
+        // Returns true if the check was successful and false otherwise.
+        bool checkAP(uint32_t ap);
+
 
     protected:
         // Unknown value.
@@ -486,7 +502,6 @@ class SWD
                                                                     uint32_t* pRead,
                                                                     uint32_t readLength) __attribute__ ((optimize(3)));
         bool readDPIDR();
-        bool checkAP(uint32_t ap);
         uint32_t readTargetMemoryInternal(uint32_t address, uint8_t* pDest, uint32_t bufferSize, TransferSize readSize);
         uint32_t writeTargetMemoryInternal(uint32_t address, const uint8_t* pSrc, uint32_t bufferSize, TransferSize writeSize);
         bool updateCSW(CSW_AddrIncs addrInc, TransferSize transferSize);
@@ -592,7 +607,7 @@ class SwdTarget
         // Method to power down the CPU's debug subsystem and free this target object so that it can be reused.
         bool disconnect()
         {
-            if (!m_pSWD->selectSwdTarget(m_target))
+            if (!selectCore())
             {
                 return false;
             }
@@ -610,6 +625,7 @@ class SwdTarget
         void uninit()
         {
             m_target = SWD::UNKNOWN;
+            m_ap = 0;
             m_cpu = SWD::CPU_UNKNOWN;
             m_cpuID = 0;
             m_dpidr = SWD::UNKNOWN_VAL;
@@ -661,7 +677,7 @@ class SwdTarget
         // Returns the number of bytes successfully read. 0 if none were read successfully.
         uint32_t readMemory(uint32_t address, void* pvBuffer, uint32_t bufferSize, SWD::TransferSize readSize)
         {
-            if (!m_pSWD->selectSwdTarget(m_target))
+            if (!selectCore())
             {
                 return 0;
             }
@@ -680,7 +696,7 @@ class SwdTarget
         // Returns the number of bytes successfully written. 0 if none were written successfully.
         uint32_t writeMemory(uint32_t address, const void* pvBuffer, uint32_t bufferSize, SWD::TransferSize writeSize)
         {
-            if (!m_pSWD->selectSwdTarget(m_target))
+            if (!selectCore())
             {
                 return 0;
             }
@@ -706,8 +722,17 @@ class SwdTarget
         bool init(SWD* pSWD);
         bool fetchTargetDetails();
         void determineCpuType();
+        bool selectCore()
+        {
+            if (!m_pSWD->selectSwdTarget(m_target))
+            {
+                return false;
+            }
+            return m_pSWD->selectAP(m_ap);
+        }
 
         SWD*                m_pSWD;
+        uint32_t            m_ap = 0;
         uint32_t            m_dpidr = SWD::UNKNOWN_VAL;
         uint32_t            m_peripheralComponentIDs[12];
         uint32_t            m_cpuID = 0;

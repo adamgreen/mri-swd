@@ -395,21 +395,17 @@ const DeviceMemoryLayout* rp2350GetMemoryLayout(DeviceObject* pvObject, CpuCore*
 // Returns true if successful and false otherwise.
 bool rp2350GetAdditionalTargets(DeviceObject* pvObject, CpuCore* pCore, CpuCore* pCoreArray, size_t coreArrayLength, size_t* pCoreCount)
 {
-    // UNDONE: Add multi-core support through multiple APs to SWD.
-    *pCoreCount = 0;
-    return true;
-
-#ifdef UNDONE
     assert ( coreArrayLength >= 1 );
 
+    const uint32_t RP2350_CORE1_AP = 4;
     SWD* pCoreBus = pCore->getTarget()->getSwdBus();
-    if (!pCoreBus->selectSwdTarget(SWD::RP2350_CORE1))
+    if (!pCoreBus->checkAP(RP2350_CORE1_AP))
     {
         logError("Failed to find the second core on SWD bus.");
         return false;
     }
     // Note: The index passed into init() is 1 (since this is Core1), not 0 like the array index.
-    if (!pCoreArray[0].init(pCore, 0+1))
+    if (!pCoreArray[0].init(pCore, 0+1, CpuCore::AP_CORE))
     {
         logError("Failed to init the second core.");
         return false;
@@ -417,7 +413,6 @@ bool rp2350GetAdditionalTargets(DeviceObject* pvObject, CpuCore* pCore, CpuCore*
 
     *pCoreCount = 1;
     return true;
-#endif // UNDONE
 }
 
 

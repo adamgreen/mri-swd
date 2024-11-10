@@ -496,7 +496,7 @@ void SWD::advanceTargetId(bool foundTarget)
     }
 }
 
-bool SWD::initTargetForDebugging(SwdTarget& target)
+bool SWD::initTargetDpForDebugging(SwdTarget& target)
 {
     bool result = controlPower(true, true);
     if (!result)
@@ -529,6 +529,18 @@ bool SWD::initTargetForDebugging(SwdTarget& target)
         return false;
     }
     result = target.init(this);
+    if (!result)
+    {
+        logError("Failed to call target.init(this)");
+        return false;
+    }
+
+    return true;
+}
+
+bool SWD::initApTarget(SwdTarget& target)
+{
+    bool result = target.init(this);
     if (!result)
     {
         logError("Failed to call target.init(this)");
@@ -1586,10 +1598,17 @@ bool SWD::selectApBank(uint32_t address)
 
 bool SWD::selectAP(uint32_t ap)
 {
+    if (m_ap == ap)
+    {
+        // Just return if the AP is already set to this value.
+        return true;
+    }
+
     // Don't call updateSelect() at this time and wait for the next DP or AP register read/write. Setting m_dpBank and
     // m_apBank to UNKNOWN_VAL will make sure that updateSelect() gets called on that next read/write.
     m_dpBank = UNKNOWN_VAL;
     m_apBank = UNKNOWN_VAL;
+    m_cswValid = false;
     m_ap = ap;
 
     return true;
@@ -1692,6 +1711,7 @@ bool SwdTarget::init(SWD* pSWD)
 {
     m_pSWD = pSWD;
     m_target = pSWD->getTarget();
+    m_ap = pSWD->m_ap;
     m_dpidr = pSWD->getDPIDR();
     return fetchTargetDetails();
 }

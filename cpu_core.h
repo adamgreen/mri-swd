@@ -58,15 +58,22 @@ class CpuCore
 public:
     CpuCore();
 
+    // The cores can be differentiated by SWD DP or share a DP and be differentiated by SWD AP instead.
+    enum SwdCoreType
+    {
+        DP_CORE,
+        AP_CORE
+    };
+
     // Initialize the CPU core object after establishing a new SWD connection.
     // This object will call the pHandler function if unrecoverable SWD connection errors are detected at runtime.
     // This handler is typically used to set a flag noting the connection error and force the MRI core code to exit.
-    bool init(SWD* pSwdBus, void (*pHandler)(void), uint32_t coreId);
+    bool init(SWD* pSwdBus, void (*pHandler)(void), uint32_t coreId, SwdCoreType type);
 
     // Initialize the CPU core object after establishing a new SWD connection based off of a template object.
-    bool init(CpuCore* pTemplate, uint32_t coreId)
+    bool init(CpuCore* pTemplate, uint32_t coreId, SwdCoreType type)
     {
-        return init(pTemplate->m_pSwdBus, pTemplate->m_connectionFailureHandler, coreId);
+        return init(pTemplate->m_pSwdBus, pTemplate->m_connectionFailureHandler, coreId, type);
     }
 
     // Cleanup the CPU core object after disconnecting the SWD bus. Call init() again later once the SWD
@@ -272,7 +279,7 @@ public:
 
 
 protected:
-    bool initSWD(SWD* pSwdBus);
+    bool initSWD(SWD* pSwdBus, SwdCoreType type);
     void initForDebugging();
     void enableDWTandVectorCatches();
     bool setOrClearBitsInDEMCR(uint32_t bitMask, bool set);

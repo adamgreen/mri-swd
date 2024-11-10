@@ -320,7 +320,7 @@ bool rp2040GetAdditionalTargets(DeviceObject* pvObject, CpuCore* pCore, CpuCore*
         return false;
     }
     // Note: The index passed into init() is 1 (since this is Core1), not 0 like the array index.
-    if (!pCoreArray[0].init(pCore, 0+1))
+    if (!pCoreArray[0].init(pCore, 0+1, CpuCore::DP_CORE))
     {
         logError("Failed to init the second core.");
         return false;
