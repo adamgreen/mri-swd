@@ -2,7 +2,7 @@
 ## Monitor for Remote Inspection - SWD Edition
 `mri-swd` is a [Pico W](https://www.adafruit.com/product/5526) based debug probe for debugging Cortex-M based microcontrollers with the [GNU debugger (GDB)](https://www.sourceware.org/gdb/). GDB can connect to the `mri-swd` debug probe over WiFi and the debug probe then connects to the debug target using SWD.
 
-![mri-swd PCB mounted on 3π+ 2040 bot](images/20231114-PCB-MountedOn3pi+2040.jpg)
+![mri-swd PCB mounted on 3π+ 2040 bot](images/20241110-PCB-MountedOn3pi+2040.png)
 
 ## Table of Contents
 * [Important Notes](#important-notes): Important goals, non-goals, and limitations of this `mri-swd` project.
@@ -22,7 +22,7 @@
 ![Dogfood Setup](images/dogfood.jpg)
 
 * __[8/25/2024]:__ The code found within this repository is now at the point where I regularly use it for debugging the `mri-swd` firmware itself and other RP2040 based projects. The WiFi abilities make it really useful for debugging RP2040 based electronics on mobile robot paltforms. Dogfooding it like this continue to surface more issues that can then be addressed to make it even better. I will continue with this dogfooding for several more months yet before deciding whether I should port `mri-swd` to the [Raspberry Pi Debug Probe](https://www.raspberrypi.com/products/debug-probe/) and make a more public announcement about this alternative debug probe firmware.
-* The initial goal is to just be able to debug and program the dual core [RP2040 microcontroller](https://www.raspberrypi.com/products/rp2040/). Support has also been added for the [nRF52xxx family of microcontrollers](https://infocenter.nordicsemi.com/index.jsp?topic=%2Fstruct_nrf52%2Fstruct%2Fnrf52.html) which was good for making sure that it doesn't only work on the RP2040. Support for other Cortex-M based microcontrollers may be added in the future but it isn't currently a priority.
+* The initial goal is to just be able to debug and program the dual core [RP2040](https://www.raspberrypi.com/products/rp2040/) and [RP2350](https://www.raspberrypi.com/products/rp2350/) microcontrollers. Support has also been added for the [nRF52xxx family of microcontrollers](https://infocenter.nordicsemi.com/index.jsp?topic=%2Fstruct_nrf52%2Fstruct%2Fnrf52.html) which was good for making sure that it doesn't only work on the RP2xx parts. Support for other Cortex-M based microcontrollers may be added in the future but it isn't currently a priority.
 * The `mri-swd` firmware is initially being developed to run on the low cost [Pico W](https://www.adafruit.com/product/5526). It will use the Pico W's WiFi capabilities to wirelessly communicate with GDB. No intermediate program like OpenOCD will be required since the [mri remote debug stub](https://github.com/adamgreen/mri) functionality will be running on the Pico W itself.
 * I want to concentrate on making this debugger work as well as possible for the devices and features that it does support. This brings me to my list of  **Non-Goals**:
   * JTAG Support
@@ -30,20 +30,20 @@
 
 
 ## Supported Features
-* Supports debugging and programming of the **RP2040** microcontroller.
+* Supports debugging and programming of the Raspberry Pi **RP2040** and **RP2350** microcontrollers.
   * Does support the **nRF52xxx** microcontroller as well.
   * If may also be able to auto-detect other Cortex-M microcontrollers if they are attached but this isn't guaranteed. Any such detected devices will only support debugging and not programming.
 * RAM/FLASH/ROM Read
 * RAM Write
 * CPU Register Read/Write
-* `load` (**FLASH Programming** of RP2040 and nRF52xxx)
+* `load` (**FLASH Programming** of RP2040, RP2350, and nRF52xxx)
 * `step` and `next` (Single Stepping)
 * `break` (Hardware Breakpoints)
 * `watch`, `awatch`, `rwatch` (Hardware Watchpoints)
 * `monitor reset [halt]` (Reboot the microcontroller)
 * `monitor detach` (Power down target DAP and shutdown mri-swd)
 * `info thread` and `thread`:
-  * Only used to expose the second RP2040 core at this point in time
+  * Only used to expose the second core on the RP2040 and RP2350 microcontrollers at this point in time
   * **No RTOS** support
 * GDB connection over WiFi on **port 2331**
 * Host access to the Target's UART on **port 2332** (UART<->WiFi Bridging)
@@ -223,9 +223,11 @@ Connection closed.
 
 
 ## Firmware Configuration
-In the root folder can be found  a [config.h](config.h) which can be used to customize the `mri-swd` firmware. This header file allows configuration of things such as:
+The root folder contains a [config.h](config.h) file which can be used to customize the `mri-swd` firmware. This header file allows configuration of things such as:
 * GPIO pins to be used for connections to the target.
-* TCP/IP port number to which GDB should be connected.
+* TCP/IP port numbers to which GDB and Telnet should connect.
+* Default SWCLK rate.
+* Various timeouts to use.
 * Logging enable/disable settings for each module in the `mri-swd` firmware:
   * `logError()` calls let the user know about unexpected errors. They can be disabled per module in `config.h` but typically should be left enabled.
   * `logDebug()` calls give information about the inner workings of the code and are most useful to `mri-swd` developers. They can be disabled per module in the `config.h` header.
@@ -250,11 +252,9 @@ In the root folder can be found  a [config.h](config.h) which can be used to cus
 
 ## Current Hardware Progress
 I have designed a PCB that allows attaching a PicoW to my [Pololu 3π+ 2040 robot](https://www.pololu.com/category/300/3pi-plus-2040-robot). The images below show my current progress on that project.<br>
-![Image of version 1.0 of the Schematic](images/20231030-PCBv1.0-Schematic.png)</br>
+![Image of version 1.1 of the Schematic](images/20241110-PCBv1.1-Schematic.png)</br>
 ![Image of version 1.0 of PCB Front](images/20231030-PCBv1.0-Front.png)
 ![Image of version 1.0 of PCB Back](images/20231030-PCBv1.0-Back.png)</br>
-![Image of version 1.0 of PCB Front once Soldered](images/20231114-PCBv1.0-Soldered.jpg)</br>
-![Image of version 1.0 of PCB mounted on 3π+ 2040 bot](images/20231114-PCB-MountedOn3pi+2040.jpg)
 
 
 ## Next Steps
@@ -272,5 +272,7 @@ I have designed a PCB that allows attaching a PicoW to my [Pololu 3π+ 2040 robo
   * ~~Report WiFi activity~~
   * ~~Report target detected~~
   * ~~Report target run state~~
+* ~~RP2350 Support~~
+* Better ARMv8-M support
 * RTOS Thread Support
 * Improve Usability
